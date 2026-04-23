@@ -229,6 +229,53 @@ export default function Focus() {
           </>
         )}
       </View>
+
+      <Modal
+        visible={challengePicker}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setChallengePicker(false)}
+      >
+        <View style={styles.pickerBackdrop} testID="challenge-picker">
+          <View style={styles.pickerSheet}>
+            <Text style={styles.pickerTitle}>Exit Focus Mode?</Text>
+            <Text style={styles.pickerDesc}>Earn your unlock with a quick challenge.</Text>
+            <TouchableOpacity
+              testID="challenge-pushups"
+              style={[styles.pickerBtn, { backgroundColor: colors.green }]}
+              onPress={() => {
+                setChallengePicker(false);
+                setChallenge('pushups');
+                setPushupCount(0);
+              }}
+            >
+              <Ionicons name="fitness" size={18} color={colors.bg} />
+              <Text style={styles.pickerBtnText}>20 Push-ups</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="challenge-breathing"
+              style={[styles.pickerBtn, { backgroundColor: colors.cyan }]}
+              onPress={() => {
+                setChallengePicker(false);
+                setChallenge('breathing');
+                setBreathCycle(0);
+              }}
+            >
+              <Ionicons name="leaf" size={18} color={colors.bg} />
+              <Text style={styles.pickerBtnText}>4 Breath Cycles</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="challenge-cancel"
+              style={[styles.pickerBtn, styles.pickerCancel]}
+              onPress={() => setChallengePicker(false)}
+            >
+              <Text style={[styles.pickerBtnText, { color: colors.textSecondary }]}>
+                Keep Focusing
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
