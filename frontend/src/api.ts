@@ -33,27 +33,6 @@ export type Profile = {
   onboarding: Record<string, any>;
   bio: string;
   avatar_base64: string | null;
-  purchased_apps: string[];
-};
-
-export type LibraryApp = {
-  id: string;
-  title: string;
-  tagline: string;
-  description: string;
-  icon: string;
-  accent: string;
-  price_cents: number;
-  price_label: string;
-  route: string;
-  purchased: boolean;
-};
-
-export type GratitudeEntry = {
-  id: string;
-  items: string[];
-  date: string;
-  created_at: string;
 };
 
 export type Task = {
@@ -150,15 +129,4 @@ export const api = {
   statsWeekly: () => req<WeeklyStats>('/stats/weekly'),
   statsByArea: () =>
     req<{ by_area: Record<FocusArea, number> }>('/stats/by-area'),
-
-  libraryApps: () =>
-    req<{ apps: LibraryApp[]; purchased_count: number; total: number }>('/library/apps'),
-  purchaseApp: (app_id: string) =>
-    req<{ purchased: boolean; app: LibraryApp; profile: Profile }>(`/library/purchase/${app_id}`, { method: 'POST' }),
-  refundApp: (app_id: string) =>
-    req<{ refunded: boolean; profile: Profile }>(`/library/refund/${app_id}`, { method: 'POST' }),
-
-  listGratitude: () => req<{ entries: GratitudeEntry[] }>('/gratitude'),
-  createGratitude: (items: string[]) =>
-    req<GratitudeEntry>('/gratitude', { method: 'POST', body: JSON.stringify({ items }) }),
 };

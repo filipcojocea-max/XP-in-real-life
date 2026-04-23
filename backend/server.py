@@ -109,71 +109,10 @@ async def get_or_create_profile():
             "onboarding": {},
             "bio": "",
             "avatar_base64": None,
-            "purchased_apps": [],
             "created_at": now_iso(),
         }
         await db.profile.insert_one(prof)
     return prof
-
-
-# Mini-apps catalog (Library+)
-LIBRARY_APPS = [
-    {
-        "id": "anxiety",
-        "title": "Anxiety Coach",
-        "tagline": "Calm the mind in 2 min",
-        "description": "Box-breathing and 5-4-3-2-1 grounding to handle panic and anxious moments.",
-        "icon": "heart",
-        "accent": "#FF3366",
-        "price_cents": 299,
-        "price_label": "$2.99",
-        "route": "/miniapp/anxiety",
-    },
-    {
-        "id": "posture",
-        "title": "Posture Coach",
-        "tagline": "Stand tall in 60 sec",
-        "description": "A guided 60-second posture reset sequence for your spine, shoulders and chin.",
-        "icon": "body",
-        "accent": "#00D9FF",
-        "price_cents": 199,
-        "price_label": "$1.99",
-        "route": "/miniapp/posture",
-    },
-    {
-        "id": "affirmations",
-        "title": "Affirmation Vault",
-        "tagline": "Rewire your self-talk",
-        "description": "30+ power affirmations with a heart-to-save favorites deck.",
-        "icon": "sparkles",
-        "accent": "#FFB800",
-        "price_cents": 199,
-        "price_label": "$1.99",
-        "route": "/miniapp/affirmations",
-    },
-    {
-        "id": "cold-shower",
-        "title": "Cold Shower Timer",
-        "tagline": "Earn grit points",
-        "description": "Countdown with haptic stage pulses. Track streaks of cold exposure.",
-        "icon": "snow",
-        "accent": "#00FF88",
-        "price_cents": 149,
-        "price_label": "$1.49",
-        "route": "/miniapp/cold-shower",
-    },
-    {
-        "id": "gratitude",
-        "title": "Gratitude Journal",
-        "tagline": "3 things a day",
-        "description": "Capture 3 gratitudes daily. Review past entries to feed your mindset.",
-        "icon": "leaf",
-        "accent": "#9D4CDD",
-        "price_cents": 249,
-        "price_label": "$2.49",
-        "route": "/miniapp/gratitude",
-    },
-]
 
 
 def serialize_profile(prof: dict) -> dict:
@@ -198,7 +137,6 @@ def serialize_profile(prof: dict) -> dict:
         "onboarding": prof.get("onboarding", {}),
         "bio": prof.get("bio", ""),
         "avatar_base64": prof.get("avatar_base64"),
-        "purchased_apps": prof.get("purchased_apps", []),
         "created_at": prof.get("created_at"),
     }
 
@@ -455,74 +393,6 @@ async def set_avatar(body: AvatarData):
     )
     prof = await db.profile.find_one({"_id": "main"})
     return serialize_profile(prof)
-
-
-# ---------- Library+ (mini-apps) ----------
-@api_router.get("/library/apps")
-async def list_library_apps():
-    prof = await get_or_create_profile()
-    purchased = set(prof.get("purchased_apps", []))
-    apps = []
-    for a in LIBRARY_APPS:
-        apps.append({**a, "purchased": a["id"] in purchased})
-    return {"apps": apps, "purchased_count": len(purchased), "total": len(LIBRARY_APPS)}
-
-
-@api_router.post("/library/purchase/{app_id}")
-async def purchase_app(app_id: str):
-    """MOCKED purchase flow — marks the app as purchased. Wire to Stripe later."""
-    app_def = next((a for a in LIBRARY_APPS if a["id"] == app_id), None)
-    if not app_def:
-        raise HTTPException(404, "App not found")
-    await get_or_create_profile()
-    await db.profile.update_one(
-        {"_id": "main"},
-        {"$addToSet": {"purchased_apps": app_id}},
-    )
-    prof = await db.profile.find_one({"_id": "main"})
-    return {
-        "purchased": True,
-        "app": app_def,
-        "profile": serialize_profile(prof),
-    }
-
-
-@api_router.post("/library/refund/{app_id}")
-async def refund_app(app_id: str):
-    """Remove from library (dev / refund helper)."""
-    await db.profile.update_one(
-        {"_id": "main"},
-        {"$pull": {"purchased_apps": app_id}},
-    )
-    prof = await db.profile.find_one({"_id": "main"})
-    return {"refunded": True, "profile": serialize_profile(prof)}
-
-
-# ---------- Gratitude entries (for Gratitude Journal mini-app) ----------
-class GratitudeBody(BaseModel):
-    items: List[str]
-
-
-@api_router.post("/gratitude")
-async def create_gratitude(body: GratitudeBody):
-    items = [i.strip() for i in body.items if i and i.strip()]
-    if not items:
-        raise HTTPException(400, "Add at least one item")
-    entry = {
-        "id": str(uuid.uuid4()),
-        "items": items[:3],
-        "date": today_str(),
-        "created_at": now_iso(),
-    }
-    await db.gratitude.insert_one(entry)
-    entry.pop("_id", None)
-    return entry
-
-
-@api_router.get("/gratitude")
-async def list_gratitude():
-    entries = await db.gratitude.find({}, {"_id": 0}).sort("created_at", -1).to_list(50)
-    return {"entries": entries}
 
 
 # --------- Tasks ---------
