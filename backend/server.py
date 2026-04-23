@@ -105,6 +105,10 @@ async def get_or_create_profile():
             "goals_created": 0,
             "goals_completed": 0,
             "achievements_unlocked": [],
+            "onboarding_complete": False,
+            "onboarding": {},
+            "bio": "",
+            "avatar_base64": None,
             "created_at": now_iso(),
         }
         await db.profile.insert_one(prof)
@@ -129,6 +133,10 @@ def serialize_profile(prof: dict) -> dict:
         "goals_created": prof.get("goals_created", 0),
         "goals_completed": prof.get("goals_completed", 0),
         "achievements_unlocked": prof.get("achievements_unlocked", []),
+        "onboarding_complete": prof.get("onboarding_complete", False),
+        "onboarding": prof.get("onboarding", {}),
+        "bio": prof.get("bio", ""),
+        "avatar_base64": prof.get("avatar_base64"),
         "created_at": prof.get("created_at"),
     }
 
@@ -204,6 +212,8 @@ class TaskCreate(BaseModel):
     time_slot: Literal["morning", "afternoon", "evening"]
     xp_value: int = 20
     recurring: bool = True
+    scheduled_time: Optional[str] = None  # "HH:MM" 24h
+    reminder_enabled: bool = True
 
 
 class TaskUpdate(BaseModel):
@@ -213,6 +223,8 @@ class TaskUpdate(BaseModel):
     time_slot: Optional[Literal["morning", "afternoon", "evening"]] = None
     xp_value: Optional[int] = None
     recurring: Optional[bool] = None
+    scheduled_time: Optional[str] = None
+    reminder_enabled: Optional[bool] = None
 
 
 class GoalCreate(BaseModel):
@@ -276,6 +288,113 @@ async def reset_profile():
     return serialize_profile(prof)
 
 
+class OnboardingData(BaseModel):
+    name: Optional[str] = None
+    main_goals: Optional[List[str]] = None
+    experience_level: Optional[str] = None  # beginner / intermediate / expert
+    productivity_score: Optional[int] = None  # 1-10
+    loves: Optional[List[str]] = None
+    loves_other: Optional[str] = None
+    focused_time: Optional[str] = None  # morning, midday, evening, etc
+    focused_window: Optional[str] = None  # early / after
+    good_habits: Optional[List[str]] = None
+    good_habits_other: Optional[str] = None
+    bad_habits: Optional[List[str]] = None
+    bad_habits_other: Optional[str] = None
+    age_range: Optional[str] = None  # 12-16, 17-20, 21-25, 25-30, 31-40, 41+
+    gender: Optional[str] = None  # boy / girl / other
+    skip_complete: bool = False
+
+
+class AvatarData(BaseModel):
+    avatar_base64: Optional[str] = None
+
+
+def _build_bio(data: dict) -> str:
+    parts: List[str] = []
+    age = data.get("age_range")
+    gender = data.get("gender")
+    exp = data.get("experience_level")
+
+    intro_bits = []
+    if age:
+        intro_bits.append(f"{age}")
+    if gender and gender.lower() != "other":
+        intro_bits.append(gender.lower())
+    if exp:
+        intro_bits.append(exp.lower())
+
+    if intro_bits:
+        parts.append(f"A {' · '.join(intro_bits)} on a self-improvement quest.")
+    else:
+        parts.append("On a self-improvement quest.")
+
+    goals = data.get("main_goals") or []
+    if goals:
+        parts.append(f"Main focus: {', '.join(goals[:4]).lower()}.")
+
+    loves = list(data.get("loves") or [])
+    if data.get("loves_other"):
+        loves.append(data["loves_other"])
+    if loves:
+        parts.append(f"Loves {', '.join(loves[:5]).lower()}.")
+
+    ft = data.get("focused_time")
+    fw = data.get("focused_window")
+    if ft:
+        window = f"{fw} " if fw else ""
+        parts.append(f"Most productive in the {window}{ft}.".lower().capitalize())
+
+    good = list(data.get("good_habits") or [])
+    if data.get("good_habits_other"):
+        good.append(data["good_habits_other"])
+    if good:
+        parts.append(f"Good habits: {', '.join(good[:5]).lower()}.")
+
+    bad = list(data.get("bad_habits") or [])
+    if data.get("bad_habits_other"):
+        bad.append(data["bad_habits_other"])
+    if bad:
+        parts.append(f"Working on reducing: {', '.join(bad[:5]).lower()}.")
+
+    prod = data.get("productivity_score")
+    if prod is not None:
+        parts.append(f"Current productivity: {prod}/10 — leveling up.")
+
+    return " ".join(parts)
+
+
+@api_router.put("/profile/onboarding")
+async def update_onboarding(body: OnboardingData):
+    await get_or_create_profile()
+    payload = {k: v for k, v in body.dict().items() if v is not None and k != "skip_complete"}
+
+    prof = await db.profile.find_one({"_id": "main"})
+    existing = dict(prof.get("onboarding") or {})
+    existing.update(payload)
+
+    update = {"onboarding": existing}
+    if body.name:
+        update["name"] = body.name
+    update["bio"] = _build_bio(existing)
+    update["onboarding_complete"] = True
+
+    await db.profile.update_one({"_id": "main"}, {"$set": update})
+    prof = await db.profile.find_one({"_id": "main"})
+    return serialize_profile(prof)
+
+
+@api_router.post("/profile/avatar")
+async def set_avatar(body: AvatarData):
+    await get_or_create_profile()
+    await db.profile.update_one(
+        {"_id": "main"},
+        {"$set": {"avatar_base64": body.avatar_base64}},
+    )
+    prof = await db.profile.find_one({"_id": "main"})
+    return serialize_profile(prof)
+
+
 # --------- Tasks ---------
 @api_router.get("/tasks")
 async def list_tasks(date: Optional[str] = None):
@@ -303,6 +422,8 @@ async def create_task(body: TaskCreate):
         "time_slot": body.time_slot,
         "xp_value": max(5, min(200, body.xp_value)),
         "recurring": body.recurring,
+        "scheduled_time": body.scheduled_time,
+        "reminder_enabled": body.reminder_enabled,
         "created_at": now_iso(),
     }
     await db.tasks.insert_one(task)
@@ -538,18 +659,18 @@ async def seed_defaults():
     if count > 0:
         return {"seeded": False, "reason": "tasks already exist"}
     defaults = [
-        {"title": "Morning reflection (5 min)", "focus_area": "mindset", "time_slot": "morning", "xp_value": 15, "description": "Set intentions for the day"},
-        {"title": "Workout session", "focus_area": "fitness", "time_slot": "morning", "xp_value": 40, "description": "30 min training"},
-        {"title": "Pick a clean outfit", "focus_area": "appearance", "time_slot": "morning", "xp_value": 10, "description": "Plan your look"},
-        {"title": "Start 3 conversations", "focus_area": "social", "time_slot": "afternoon", "xp_value": 30, "description": "Practice social skills"},
-        {"title": "Drink 2L water", "focus_area": "fitness", "time_slot": "afternoon", "xp_value": 15, "description": "Stay hydrated"},
-        {"title": "Gratitude journal", "focus_area": "mindset", "time_slot": "evening", "xp_value": 20, "description": "3 things you are grateful for"},
-        {"title": "Skincare routine", "focus_area": "appearance", "time_slot": "evening", "xp_value": 10, "description": "Take care of your skin"},
-        {"title": "Read 10 pages", "focus_area": "mindset", "time_slot": "evening", "xp_value": 20, "description": "Feed your mind"},
+        {"title": "Morning reflection (5 min)", "focus_area": "mindset", "time_slot": "morning", "xp_value": 15, "description": "Set intentions for the day", "scheduled_time": "08:00"},
+        {"title": "Workout session", "focus_area": "fitness", "time_slot": "morning", "xp_value": 40, "description": "30 min training", "scheduled_time": "09:00"},
+        {"title": "Pick a clean outfit", "focus_area": "appearance", "time_slot": "morning", "xp_value": 10, "description": "Plan your look", "scheduled_time": "07:30"},
+        {"title": "Start 3 conversations", "focus_area": "social", "time_slot": "afternoon", "xp_value": 30, "description": "Practice social skills", "scheduled_time": "13:00"},
+        {"title": "Drink 2L water", "focus_area": "fitness", "time_slot": "afternoon", "xp_value": 15, "description": "Stay hydrated", "scheduled_time": "15:00"},
+        {"title": "Gratitude journal", "focus_area": "mindset", "time_slot": "evening", "xp_value": 20, "description": "3 things you are grateful for", "scheduled_time": "20:00"},
+        {"title": "Skincare routine", "focus_area": "appearance", "time_slot": "evening", "xp_value": 10, "description": "Take care of your skin", "scheduled_time": "21:30"},
+        {"title": "Read 10 pages", "focus_area": "mindset", "time_slot": "evening", "xp_value": 20, "description": "Feed your mind", "scheduled_time": "22:00"},
     ]
     now = now_iso()
     docs = [
-        {**d, "id": str(uuid.uuid4()), "recurring": True, "created_at": now}
+        {**d, "id": str(uuid.uuid4()), "recurring": True, "reminder_enabled": True, "created_at": now}
         for d in defaults
     ]
     await db.tasks.insert_many(docs)

@@ -28,6 +28,10 @@ export default function Home() {
       const [p, d] = await Promise.all([api.getProfile(), api.statsDaily()]);
       setProfile(p);
       setDaily(d);
+      if (!p.onboarding_complete) {
+        router.replace('/onboarding');
+        return;
+      }
       if (d.total_tasks === 0) {
         await api.seed().catch(() => null);
         const d2 = await api.statsDaily();
@@ -39,7 +43,7 @@ export default function Home() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     load();

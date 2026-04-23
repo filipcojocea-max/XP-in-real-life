@@ -8,6 +8,7 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -78,7 +79,11 @@ export default function ProfileScreen() {
         <View style={styles.avatarWrap}>
           <Ring size={150} stroke={8} progress={profile.xp_progress} color={colors.amber}>
             <View style={styles.avatar}>
-              <Ionicons name="shield" size={70} color={colors.cyan} />
+              {profile.avatar_base64 ? (
+                <Image source={{ uri: profile.avatar_base64 }} style={styles.avatarImg} />
+              ) : (
+                <Ionicons name="shield" size={70} color={colors.cyan} />
+              )}
             </View>
           </Ring>
           <View style={styles.levelBadge}>
@@ -109,6 +114,17 @@ export default function ProfileScreen() {
             </TouchableOpacity>
           )}
         </View>
+
+        {/* Bio */}
+        {profile.bio ? (
+          <Card style={styles.bioCard} testID="profile-bio">
+            <View style={styles.bioHeader}>
+              <Ionicons name="sparkles" size={14} color={colors.cyan} />
+              <Text style={styles.bioLabel}>Character Bio</Text>
+            </View>
+            <Text style={styles.bioText}>{profile.bio}</Text>
+          </Card>
+        ) : null}
 
         {/* Stats grid */}
         <View style={styles.grid}>
@@ -145,6 +161,21 @@ export default function ProfileScreen() {
         </View>
 
         {/* Actions */}
+        <TouchableOpacity
+          testID="profile-edit-btn"
+          style={styles.actionRow}
+          onPress={() => router.push('/onboarding')}
+        >
+          <View style={[styles.actionIcon, { backgroundColor: colors.green + '22', borderColor: colors.green + '55' }]}>
+            <Ionicons name="create" size={18} color={colors.green} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.actionTitle}>Edit Profile</Text>
+            <Text style={styles.actionDesc}>Update interests, goals, avatar and bio</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
         <TouchableOpacity
           testID="profile-focus-btn"
           style={styles.actionRow}
@@ -192,7 +223,13 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
   },
+  avatarImg: { width: '100%', height: '100%' },
+  bioCard: { marginTop: spacing.lg },
+  bioHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  bioLabel: { color: colors.cyan, fontSize: 11, fontWeight: '800', letterSpacing: 1.5, textTransform: 'uppercase' },
+  bioText: { color: colors.text, fontSize: 14, lineHeight: 20 },
   levelBadge: {
     marginTop: -14,
     paddingHorizontal: 14,

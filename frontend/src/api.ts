@@ -39,6 +39,8 @@ export type Task = {
   time_slot: TimeSlot;
   xp_value: number;
   recurring: boolean;
+  scheduled_time?: string | null;
+  reminder_enabled?: boolean;
   completed?: boolean;
   created_at: string;
 };
@@ -81,12 +83,16 @@ export const api = {
   updateProfile: (name: string) =>
     req<Profile>('/profile', { method: 'PUT', body: JSON.stringify({ name }) }),
   resetProfile: () => req<Profile>('/profile/reset', { method: 'POST' }),
+  completeOnboarding: (payload: OnboardingPayload) =>
+    req<Profile>('/profile/onboarding', { method: 'PUT', body: JSON.stringify(payload) }),
+  setAvatar: (avatar_base64: string | null) =>
+    req<Profile>('/profile/avatar', { method: 'POST', body: JSON.stringify({ avatar_base64 }) }),
   seed: () => req<{ seeded: boolean; count?: number }>('/seed', { method: 'POST' }),
 
   listTasks: (date?: string) =>
     req<{ date: string; tasks: Task[] }>(`/tasks${date ? `?date=${date}` : ''}`),
-  createTask: (body: Omit<Task, 'id' | 'created_at' | 'completed' | 'recurring'> & { recurring?: boolean }) =>
-    req<Task>('/tasks', { method: 'POST', body: JSON.stringify({ recurring: true, ...body }) }),
+  createTask: (body: { title: string; description?: string; focus_area: FocusArea; time_slot: TimeSlot; xp_value: number; scheduled_time?: string | null; reminder_enabled?: boolean }) =>
+    req<Task>('/tasks', { method: 'POST', body: JSON.stringify({ recurring: true, reminder_enabled: true, ...body }) }),
   updateTask: (id: string, body: Partial<Task>) =>
     req<Task>(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteTask: (id: string) =>

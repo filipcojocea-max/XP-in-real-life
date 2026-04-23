@@ -21,6 +21,13 @@ import { useFocusEffect } from 'expo-router';
 import Card from '../../src/components/Card';
 import { api, Task } from '../../src/api';
 import { colors, focusMeta, slotMeta, spacing, radii, FocusArea, TimeSlot } from '../../src/theme';
+import {
+  ensureNotificationPermission,
+  scheduleTaskNotification,
+  cancelTaskNotification,
+  syncAllTaskNotifications,
+} from '../../src/notifications';
+import DateTimePicker from '@react-native-community/datetimepicker';
 
 const SLOTS: TimeSlot[] = ['morning', 'afternoon', 'evening'];
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
@@ -36,6 +43,7 @@ export default function Tasks() {
     try {
       const r = await api.listTasks();
       setTasks(r.tasks);
+      syncAllTaskNotifications(r.tasks).catch(() => {});
     } catch (e) {
       console.log('tasks load', e);
     } finally {
@@ -45,6 +53,7 @@ export default function Tasks() {
 
   useEffect(() => {
     load();
+    ensureNotificationPermission().catch(() => {});
   }, [load]);
 
   useFocusEffect(
@@ -99,6 +108,7 @@ export default function Tasks() {
         style: 'destructive',
         onPress: async () => {
           await api.deleteTask(task.id);
+          await cancelTaskNotification(task.id);
           load();
         },
       },
@@ -136,8 +146,8 @@ export default function Tasks() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
-        <View>
-          <Text style={styles.kicker}>Daily Quests</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.kicker}>Daily Quests · Unlimited</Text>
           <Text style={styles.title}>{new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</Text>
         </View>
         <Text testID="tasks-count" style={styles.countPill}>
@@ -218,6 +228,21 @@ export default function Tasks() {
                                 {focusMeta[t.focus_area].label}
                               </Text>
                             </View>
+                            {t.scheduled_time ? (
+                              <View testID={`task-time-${t.id}`} style={styles.timeTag}>
+                                <Ionicons
+                                  name={t.reminder_enabled ? 'notifications' : 'notifications-off'}
+                                  size={10}
+                                  color={t.reminder_enabled ? colors.cyan : colors.textMuted}
+                                />
+                                <Text style={[
+                                  styles.timeTagText,
+                                  { color: t.reminder_enabled ? colors.cyan : colors.textMuted },
+                                ]}>
+                                  {t.scheduled_time}
+                                </Text>
+                              </View>
+                            ) : null}
                             <Text style={styles.xpBadge}>+{t.xp_value} XP</Text>
                           </View>
                         </View>
@@ -273,7 +298,16 @@ function AddTaskModal({
   const [slot, setSlot] = useState<TimeSlot>('morning');
   const [area, setArea] = useState<FocusArea>('fitness');
   const [xp, setXp] = useState('20');
+  const [reminderOn, setReminderOn] = useState(true);
+  const [scheduledDate, setScheduledDate] = useState<Date>(() => {
+    const d = new Date();
+    d.setHours(8, 0, 0, 0);
+    return d;
+  });
+  const [showPicker, setShowPicker] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const slotDefaultHour: Record<TimeSlot, number> = { morning: 8, afternoon: 13, evening: 20 };
 
   useEffect(() => {
     if (visible) {
@@ -282,8 +316,26 @@ function AddTaskModal({
       setSlot('morning');
       setArea('fitness');
       setXp('20');
+      setReminderOn(true);
+      const d = new Date();
+      d.setHours(8, 0, 0, 0);
+      setScheduledDate(d);
+      setShowPicker(false);
     }
   }, [visible]);
+
+  const onSlotChange = (s: TimeSlot) => {
+    setSlot(s);
+    const d = new Date(scheduledDate);
+    d.setHours(slotDefaultHour[s], 0, 0, 0);
+    setScheduledDate(d);
+  };
+
+  const formatTime = (d: Date) => {
+    const h = String(d.getHours()).padStart(2, '0');
+    const m = String(d.getMinutes()).padStart(2, '0');
+    return `${h}:${m}`;
+  };
 
   const save = async () => {
     if (!title.trim()) {
@@ -292,13 +344,19 @@ function AddTaskModal({
     }
     setSaving(true);
     try {
-      await api.createTask({
+      const scheduled_time = reminderOn ? formatTime(scheduledDate) : null;
+      const created = await api.createTask({
         title: title.trim(),
         description: desc.trim(),
         focus_area: area,
         time_slot: slot,
         xp_value: parseInt(xp, 10) || 20,
+        scheduled_time,
+        reminder_enabled: reminderOn,
       });
+      if (reminderOn && scheduled_time) {
+        await scheduleTaskNotification({ ...created, reminder_enabled: true, scheduled_time });
+      }
       onAdded();
     } catch (e: any) {
       Alert.alert('Failed to create quest', String(e.message || e));
@@ -344,7 +402,7 @@ function AddTaskModal({
               <TouchableOpacity
                 key={s}
                 testID={`task-slot-${s}`}
-                onPress={() => setSlot(s)}
+                onPress={() => onSlotChange(s)}
                 style={[styles.chip, slot === s && styles.chipActive]}
               >
                 <Ionicons
@@ -394,6 +452,51 @@ function AddTaskModal({
               );
             })}
           </View>
+
+          <Text style={styles.inputLabel}>Reminder</Text>
+          <View style={styles.reminderRow}>
+            <TouchableOpacity
+              testID="task-reminder-toggle"
+              onPress={() => setReminderOn((v) => !v)}
+              style={[
+                styles.reminderToggle,
+                { backgroundColor: reminderOn ? colors.cyan : colors.surfaceGlass, borderColor: reminderOn ? colors.cyan : colors.border },
+              ]}
+            >
+              <Ionicons
+                name={reminderOn ? 'notifications' : 'notifications-off'}
+                size={16}
+                color={reminderOn ? colors.bg : colors.textMuted}
+              />
+              <Text style={[styles.reminderText, { color: reminderOn ? colors.bg : colors.textMuted }]}>
+                {reminderOn ? 'Daily reminder ON' : 'Reminder OFF'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              testID="task-time-picker-btn"
+              onPress={() => setShowPicker(true)}
+              disabled={!reminderOn}
+              style={[styles.timePickBtn, !reminderOn && { opacity: 0.4 }]}
+            >
+              <Ionicons name="time" size={14} color={colors.amber} />
+              <Text style={styles.timePickText}>{formatTime(scheduledDate)}</Text>
+            </TouchableOpacity>
+          </View>
+          {showPicker ? (
+            <DateTimePicker
+              testID="task-time-picker"
+              value={scheduledDate}
+              mode="time"
+              is24Hour
+              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+              onChange={(_, d) => {
+                if (Platform.OS !== 'ios') setShowPicker(false);
+                if (d) setScheduledDate(d);
+              }}
+              themeVariant="dark"
+            />
+          ) : null}
 
           <Text style={styles.inputLabel}>XP Reward</Text>
           <TextInput
@@ -499,6 +602,47 @@ const styles = StyleSheet.create({
     borderRadius: radii.pill,
     overflow: 'hidden',
   },
+  timeTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radii.pill,
+    backgroundColor: 'rgba(0,217,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,217,255,0.3)',
+  },
+  timeTagText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
+  reminderRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    alignItems: 'center',
+  },
+  reminderToggle: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+  },
+  reminderText: { fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
+  timePickBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.amber + '66',
+    backgroundColor: colors.amber + '15',
+  },
+  timePickText: { color: colors.amber, fontSize: 14, fontWeight: '800', letterSpacing: 0.5 },
   hint: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: spacing.md },
 
   fab: {
