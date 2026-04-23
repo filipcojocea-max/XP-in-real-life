@@ -29,12 +29,71 @@ export function pickMotivation(): string {
   return MOTIVATIONAL_MESSAGES[Math.floor(Math.random() * MOTIVATIONAL_MESSAGES.length)];
 }
 
-const MOTIVATION_SLOTS: { hour: number; minute: number }[] = [
-  { hour: 9, minute: 0 },
-  { hour: 13, minute: 0 },
-  { hour: 19, minute: 0 },
+type WindowKey = 'morning' | 'afternoon' | 'evening' | 'night';
+
+const MOTIVATION_WINDOWS: {
+  key: WindowKey;
+  hour: number;
+  minute: number;
+  title: string;
+  messages: string[];
+}[] = [
+  {
+    key: 'morning',
+    hour: 8,
+    minute: 0,
+    title: 'Good morning, Hero',
+    messages: [
+      'Start the day. Lock in a morning quest.',
+      'First pick-up of the day. Set the tone. Tap in.',
+      'You rise, you level up. Morning XP is waiting.',
+      'Stay Focused. Stay Committed. Stay Consistent.',
+      'Your character is ready. Are you?',
+    ],
+  },
+  {
+    key: 'afternoon',
+    hour: 13,
+    minute: 0,
+    title: 'Midday reset',
+    messages: [
+      'One quest now keeps the streak alive.',
+      'Halfway check-in. Do the next small thing.',
+      'Afternoon XP is up for grabs.',
+      'Momentum beats perfection. Tap in.',
+    ],
+  },
+  {
+    key: 'evening',
+    hour: 19,
+    minute: 0,
+    title: 'Evening check-in',
+    messages: [
+      'Claim your XP before sundown.',
+      'Evening quests hit different. Let\'s finish strong.',
+      'Future you is watching. Make them proud.',
+      'Show up. Even now. Especially now.',
+    ],
+  },
+  {
+    key: 'night',
+    hour: 22,
+    minute: 0,
+    title: 'Last call',
+    messages: [
+      'Close the day strong. Stack XP and sleep like a champion.',
+      'No zero days. One tap keeps the streak.',
+      'Tomorrow\'s Hero is built tonight.',
+      'Wind down. Tick one quest. Rest.',
+    ],
+  },
 ];
+
 const MOTIVATION_ID_PREFIX = 'levelup-motivation-';
+
+function pickFromPool(pool: string[]): string {
+  return pool[Math.floor(Math.random() * pool.length)];
+}
 
 export async function scheduleMotivationalNotifications(): Promise<void> {
   if (Platform.OS === 'web') return;
@@ -51,30 +110,7 @@ export async function scheduleMotivationalNotifications(): Promise<void> {
       }
     }
 
-    for (const slot of MOTIVATION_SLOTS) {
-      const msg = pickMotivation();
-      await Notifications.scheduleNotificationAsync({
-        identifier: `${MOTIVATION_ID_PREFIX}${slot.hour}`,
-        content: {
-          title: 'LevelUp · Stay in the game',
-          body: msg,
-          data: { kind: 'motivation' },
-          sound: 'default',
-          // iOS: interruptionLevel helps heads-up behavior
-          interruptionLevel: 'timeSensitive',
-          // Android: set channelId so the HIGH-importance channel is used (heads-up)
-          // (expo-notifications picks up the channel via setNotificationChannelAsync below)
-        } as any,
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
-          hour: slot.hour,
-          minute: slot.minute,
-          repeats: true,
-        },
-      });
-    }
-
-    // Ensure the HIGH-importance "motivation" channel on Android — gets heads-up banners
+    // Ensure high-importance Android channel first so the channelId works
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('motivation', {
         name: 'LevelUp Motivation',
@@ -82,6 +118,27 @@ export async function scheduleMotivationalNotifications(): Promise<void> {
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#00FF88',
         bypassDnd: false,
+      });
+    }
+
+    for (const w of MOTIVATION_WINDOWS) {
+      const msg = pickFromPool(w.messages);
+      await Notifications.scheduleNotificationAsync({
+        identifier: `${MOTIVATION_ID_PREFIX}${w.key}`,
+        content: {
+          title: `LevelUp · ${w.title}`,
+          body: msg,
+          data: { kind: 'motivation', window: w.key },
+          sound: 'default',
+          interruptionLevel: 'timeSensitive',
+        } as any,
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+          hour: w.hour,
+          minute: w.minute,
+          repeats: true,
+          channelId: Platform.OS === 'android' ? 'motivation' : undefined,
+        } as any,
       });
     }
   } catch (e) {
@@ -102,6 +159,14 @@ export async function cancelMotivationalNotifications() {
   } catch (e) {
     console.log('cancel motivation err', e);
   }
+}
+
+export function getMotivationSchedule() {
+  return MOTIVATION_WINDOWS.map((w) => ({
+    key: w.key,
+    time: `${String(w.hour).padStart(2, '0')}:${String(w.minute).padStart(2, '0')}`,
+    title: w.title,
+  }));
 }
 
 let permissionGranted: boolean | null = null;

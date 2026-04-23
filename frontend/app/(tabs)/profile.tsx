@@ -17,6 +17,7 @@ import Card from '../../src/components/Card';
 import Ring from '../../src/components/Ring';
 import { api, Profile } from '../../src/api';
 import { colors, spacing, radii } from '../../src/theme';
+import { getMotivationSchedule } from '../../src/notifications';
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -160,6 +161,25 @@ export default function ProfileScreen() {
           </Card>
         </View>
 
+        {/* Motivation notification schedule */}
+        <Card style={styles.motivCard} testID="motivation-schedule">
+          <View style={styles.motivHeader}>
+            <Ionicons name="notifications" size={16} color={colors.cyan} />
+            <Text style={styles.motivLabel}>Daily Motivation</Text>
+          </View>
+          <Text style={styles.motivDesc}>
+            We ping you 4 times a day to keep your character on track.
+          </Text>
+          <View style={styles.motivRow}>
+            {getMotivationSchedule().map((w) => (
+              <View key={w.key} style={styles.motivPill} testID={`motiv-pill-${w.key}`}>
+                <Text style={styles.motivTime}>{w.time}</Text>
+                <Text style={styles.motivKey}>{w.key.toUpperCase()}</Text>
+              </View>
+            ))}
+          </View>
+        </Card>
+
         {/* Actions */}
         <TouchableOpacity
           testID="profile-edit-btn"
@@ -295,5 +315,21 @@ const styles = StyleSheet.create({
   },
   actionTitle: { color: colors.text, fontSize: 14, fontWeight: '700' },
   actionDesc: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  motivCard: { marginTop: spacing.lg },
+  motivHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  motivLabel: { color: colors.cyan, fontSize: 11, fontWeight: '800', letterSpacing: 1.5, textTransform: 'uppercase' },
+  motivDesc: { color: colors.textSecondary, fontSize: 12, marginTop: 6, lineHeight: 17 },
+  motivRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.md, gap: 6 },
+  motivPill: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderRadius: radii.md,
+    backgroundColor: colors.cyan + '12',
+    borderWidth: 1,
+    borderColor: colors.cyan + '44',
+  },
+  motivTime: { color: colors.text, fontWeight: '900', fontSize: 14, letterSpacing: -0.5 },
+  motivKey: { color: colors.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
   footer: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: spacing.xl },
 });
