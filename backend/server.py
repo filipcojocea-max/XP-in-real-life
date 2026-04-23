@@ -398,18 +398,51 @@ async def set_avatar(body: AvatarData):
 # --------- Tasks ---------
 @api_router.get("/tasks")
 async def list_tasks(date: Optional[str] = None):
-    """List all task templates with completion status for the given date."""
+    """List all task templates with completion status for the given date.
+
+    Order is adaptive: within each time slot, tasks are sorted by the user's
+    completion order from the most recent day that had completions. Tasks the
+    user completed earliest yesterday float to the top today.
+    """
     target_date = date or today_str()
     tasks = await db.tasks.find({}, {"_id": 0}).to_list(1000)
-    # Fetch completion logs for the date
     logs = await db.task_logs.find({"date": target_date}, {"_id": 0}).to_list(1000)
     done_ids = {log["task_id"] for log in logs}
     for t in tasks:
         t["completed"] = t["id"] in done_ids
-    # Sort by time slot then created_at
+
+    # Build adaptive rank from the most recent prior day with completions
+    rank_map: dict = {}
+    rank_source_date: Optional[str] = None
+    today_d = datetime.now(timezone.utc).date()
+    try:
+        target_d = datetime.fromisoformat(target_date).date()
+    except Exception:
+        target_d = today_d
+    for delta in range(1, 15):  # look back up to 14 days
+        d_str = (target_d - timedelta(days=delta)).isoformat()
+        prior = await db.task_logs.find({"date": d_str}, {"_id": 0}).sort("completed_at", 1).to_list(1000)
+        if prior:
+            rank_map = {log["task_id"]: i for i, log in enumerate(prior)}
+            rank_source_date = d_str
+            break
+
     slot_order = {"morning": 0, "afternoon": 1, "evening": 2}
-    tasks.sort(key=lambda t: (slot_order.get(t.get("time_slot", "morning"), 3), t.get("created_at", "")))
-    return {"date": target_date, "tasks": tasks}
+
+    def sort_key(t):
+        return (
+            slot_order.get(t.get("time_slot", "morning"), 3),
+            rank_map.get(t["id"], 10_000),  # unseen/new tasks go last within slot
+            t.get("created_at", ""),
+        )
+
+    tasks.sort(key=sort_key)
+    return {
+        "date": target_date,
+        "tasks": tasks,
+        "order_source_date": rank_source_date,
+        "adaptive_order": bool(rank_map),
+    }
 
 
 @api_router.post("/tasks")

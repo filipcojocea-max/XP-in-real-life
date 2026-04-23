@@ -34,6 +34,7 @@ const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
 export default function Tasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [orderSource, setOrderSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [xpFloater, setXpFloater] = useState<{ value: number } | null>(null);
@@ -43,6 +44,7 @@ export default function Tasks() {
     try {
       const r = await api.listTasks();
       setTasks(r.tasks);
+      setOrderSource(r.adaptive_order ? r.order_source_date ?? null : null);
       syncAllTaskNotifications(r.tasks).catch(() => {});
     } catch (e) {
       console.log('tasks load', e);
@@ -156,6 +158,15 @@ export default function Tasks() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        {orderSource ? (
+          <View testID="adaptive-order-hint" style={styles.orderHint}>
+            <Ionicons name="reorder-four" size={14} color={colors.cyan} />
+            <Text style={styles.orderHintText}>
+              Smart order · reshuffled from your completion pattern on{' '}
+              {new Date(orderSource).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
+            </Text>
+          </View>
+        ) : null}
         {SLOTS.map((slot) => {
           const arr = grouped[slot];
           const meta = slotMeta[slot];

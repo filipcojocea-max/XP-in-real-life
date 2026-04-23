@@ -2,6 +2,108 @@ import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import type { Task } from './api';
 
+export const MOTIVATIONAL_MESSAGES = [
+  'Stay Focused. Stay Committed. Stay Consistent.',
+  'One more rep. One more win.',
+  'Future you is watching. Make them proud.',
+  'Small steps. Big quests. Stack XP.',
+  'Your streak is waiting for you.',
+  'Show up. Even now. Especially now.',
+  'Discipline is freedom. Tap in.',
+  'Every tick is a level up.',
+  'You don\'t need motivation. You need to move.',
+  'Legends are built 10 minutes at a time.',
+  'Your character is leveling up. Claim the XP.',
+  'Win the next 60 seconds.',
+  'The best version of you is one tap away.',
+  'No zero days.',
+  'Focus beats talent. Commit.',
+  'Keep the promise you made to yourself.',
+  'You are not behind. You are becoming.',
+  'Today\'s quest is waiting. Press play.',
+  'Confidence is built. Start building.',
+  'Level up in real life.',
+];
+
+export function pickMotivation(): string {
+  return MOTIVATIONAL_MESSAGES[Math.floor(Math.random() * MOTIVATIONAL_MESSAGES.length)];
+}
+
+const MOTIVATION_SLOTS: { hour: number; minute: number }[] = [
+  { hour: 9, minute: 0 },
+  { hour: 13, minute: 0 },
+  { hour: 19, minute: 0 },
+];
+const MOTIVATION_ID_PREFIX = 'levelup-motivation-';
+
+export async function scheduleMotivationalNotifications(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  const granted = await ensureNotificationPermission();
+  if (!granted) return;
+  try {
+    // Cancel existing motivation notifications
+    const existing = await Notifications.getAllScheduledNotificationsAsync();
+    for (const n of existing) {
+      const id = n.identifier || '';
+      const tag = (n.content?.data as any)?.kind;
+      if (id.startsWith(MOTIVATION_ID_PREFIX) || tag === 'motivation') {
+        await Notifications.cancelScheduledNotificationAsync(n.identifier);
+      }
+    }
+
+    for (const slot of MOTIVATION_SLOTS) {
+      const msg = pickMotivation();
+      await Notifications.scheduleNotificationAsync({
+        identifier: `${MOTIVATION_ID_PREFIX}${slot.hour}`,
+        content: {
+          title: 'LevelUp · Stay in the game',
+          body: msg,
+          data: { kind: 'motivation' },
+          sound: 'default',
+          // iOS: interruptionLevel helps heads-up behavior
+          interruptionLevel: 'timeSensitive',
+          // Android: set channelId so the HIGH-importance channel is used (heads-up)
+          // (expo-notifications picks up the channel via setNotificationChannelAsync below)
+        } as any,
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+          hour: slot.hour,
+          minute: slot.minute,
+          repeats: true,
+        },
+      });
+    }
+
+    // Ensure the HIGH-importance "motivation" channel on Android — gets heads-up banners
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('motivation', {
+        name: 'LevelUp Motivation',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#00FF88',
+        bypassDnd: false,
+      });
+    }
+  } catch (e) {
+    console.log('motivation schedule err', e);
+  }
+}
+
+export async function cancelMotivationalNotifications() {
+  if (Platform.OS === 'web') return;
+  try {
+    const existing = await Notifications.getAllScheduledNotificationsAsync();
+    for (const n of existing) {
+      const id = n.identifier || '';
+      if (id.startsWith(MOTIVATION_ID_PREFIX)) {
+        await Notifications.cancelScheduledNotificationAsync(n.identifier);
+      }
+    }
+  } catch (e) {
+    console.log('cancel motivation err', e);
+  }
+}
+
 let permissionGranted: boolean | null = null;
 let handlerConfigured = false;
 

@@ -94,7 +94,9 @@ export const api = {
   seed: () => req<{ seeded: boolean; count?: number }>('/seed', { method: 'POST' }),
 
   listTasks: (date?: string) =>
-    req<{ date: string; tasks: Task[] }>(`/tasks${date ? `?date=${date}` : ''}`),
+    req<{ date: string; tasks: Task[]; order_source_date?: string | null; adaptive_order?: boolean }>(
+      `/tasks${date ? `?date=${date}` : ''}`,
+    ),
   createTask: (body: { title: string; description?: string; focus_area: FocusArea; time_slot: TimeSlot; xp_value: number; scheduled_time?: string | null; reminder_enabled?: boolean }) =>
     req<Task>('/tasks', { method: 'POST', body: JSON.stringify({ recurring: true, reminder_enabled: true, ...body }) }),
   updateTask: (id: string, body: Partial<Task>) =>

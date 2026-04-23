@@ -13,8 +13,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import Ring from '../../src/components/Ring';
 import Card from '../../src/components/Card';
+import MotivationBanner from '../../src/components/MotivationBanner';
 import { api, Profile, DailyStats } from '../../src/api';
 import { colors, focusMeta, spacing, radii } from '../../src/theme';
+import { scheduleMotivationalNotifications, pickMotivation } from '../../src/notifications';
 
 export default function Home() {
   const router = useRouter();
@@ -22,6 +24,7 @@ export default function Home() {
   const [daily, setDaily] = useState<DailyStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [motivation, setMotivation] = useState<string>(() => pickMotivation());
 
   const load = useCallback(async () => {
     try {
@@ -47,6 +50,7 @@ export default function Home() {
 
   useEffect(() => {
     load();
+    scheduleMotivationalNotifications().catch(() => {});
   }, [load]);
 
   useFocusEffect(
@@ -102,6 +106,16 @@ export default function Home() {
             <Text style={styles.focusChipText}>Focus Mode</Text>
           </TouchableOpacity>
         </View>
+
+        {/* Motivational banner with rotating green+cyan border */}
+        <MotivationBanner
+          testID="motivation-banner"
+          message={motivation}
+          onPress={() => {
+            setMotivation(pickMotivation());
+            router.push('/tasks');
+          }}
+        />
 
         {/* Hero emblem */}
         <View style={styles.heroWrap}>
