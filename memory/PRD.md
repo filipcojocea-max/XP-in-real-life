@@ -8,17 +8,19 @@ LevelUp is a personal-progress gamified confidence/self-improvement Expo mobile 
 - **Backend**: FastAPI + MongoDB (motor). Singleton profile, task templates, daily task_logs, goals, achievements.
 - **Auth**: None (single local profile; can be added later).
 
-## Features (MVP)
-- **Home**: Hero shield emblem with glowing XP ring, LEVEL badge (1-10), XP bar, Day Streak / Today's Quests / XP Today stat cards, 4 daily focus completion rings, overall daily progress, CTA to Quests.
-- **Quests (Tasks)**: Daily quests grouped by Morning/Afternoon/Evening, tick-to-complete with haptic + floating "+XP" animation, long-press to delete, FAB add with focus area + time slot + XP chips. Pre-seeded 8 default quests.
+## Features (MVP + v1.1)
+- **Onboarding (first launch)**: 13-step questionnaire (name, main goals, experience level, productivity 1-10, loves + other, focused time with early/after follow-up, good habits, bad habits, age range, gender, avatar photo), every step skippable. Auto-generated character bio from answers.
+- **Push Reminders**: each task can have a scheduled time (HH:MM) + reminder toggle. Local daily repeating notifications via `expo-notifications` (Android channel + iOS permission request, no-op on web).
+- **Home**: Hero shield emblem with glowing XP ring, LEVEL badge (1-10), XP bar, Day Streak / Today's Quests / XP Today stat cards, 4 daily focus completion rings, overall daily progress, CTA to Quests. Auto-redirects to /onboarding if onboarding_complete=false.
+- **Quests (Tasks)**: UNLIMITED user-created tasks grouped by Morning/Afternoon/Evening, tick-to-complete with haptic + floating "+XP" animation, long-press to delete, FAB add with focus area + time slot + time picker + reminder toggle + XP chips. Pre-seeded 8 default quests with scheduled times.
 - **Goals**: Long-term goals per focus area, +/-/+10 progress controls, auto-complete at target (bonus +100 XP).
 - **Progress**: Weekly XP SVG bar chart, Total XP / Level / Best Streak stats, Confidence Metric (XP distribution by focus area), Achievements grid (locked/unlocked).
-- **Profile**: Character avatar ring, editable name, 6 lifetime stats, link to Focus Mode, Reset Progress.
-- **Focus Mode** (modal): 5-min lock-in timer with circular progress. Exit early requires a challenge — either tap-count 20 push-ups or complete 4 breathing cycles (in/hold/out).
-- **Achievements**: 12 badges (first task, 10/50/100 tasks, 3/7/30 streak, Level 3/5/10, first goal, first goal complete). Auto-unlocked on stat thresholds.
+- **Profile**: Avatar (photo or shield fallback) with XP ring, editable name, auto-generated character bio card, 6 lifetime stats, Edit Profile (re-runs onboarding), Focus Mode link, Reset Progress.
+- **Focus Mode** (modal): 5-min lock-in timer with challenge-to-unlock (tap-count 20 push-ups OR 4 breathing cycles).
+- **Achievements**: 12 badges auto-unlocked on stat thresholds.
 
 ## XP & Leveling
 Cumulative thresholds per level: [0, 100, 250, 500, 900, 1500, 2500, 4000, 6000, 9000, 13000]. Max level 10.
 
 ## API
-`/api/profile`, `/api/tasks`, `/api/tasks/{id}/complete|uncomplete`, `/api/goals`, `/api/goals/{id}/progress`, `/api/achievements`, `/api/stats/daily`, `/api/stats/weekly`, `/api/stats/by-area`, `/api/seed`, `/api/profile/reset`.
+`/api/profile`, `/api/profile/onboarding`, `/api/profile/avatar`, `/api/profile/reset`, `/api/tasks` (+ complete/uncomplete), `/api/goals` (+ progress), `/api/achievements`, `/api/stats/daily|weekly|by-area`, `/api/seed`.
