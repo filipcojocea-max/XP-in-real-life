@@ -10,6 +10,7 @@ const TasksIcon = (p: IconProps) => <Ionicons name="checkbox" {...p} />;
 const GoalsIcon = (p: IconProps) => <Ionicons name="flag" {...p} />;
 const ProgressIcon = (p: IconProps) => <Ionicons name="stats-chart" {...p} />;
 const ProfileIcon = (p: IconProps) => <Ionicons name="person-circle" {...p} />;
+const LibraryIcon = (p: IconProps) => <Ionicons name="sparkles" {...p} />;
 
 export default function TabsLayout() {
   return (
@@ -48,6 +49,10 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="profile"
         options={{ title: 'Profile', tabBarIcon: ProfileIcon, tabBarButtonTestID: 'tab-profile' }}
+      />
+      <Tabs.Screen
+        name="library"
+        options={{ title: 'Library+', tabBarIcon: LibraryIcon, tabBarButtonTestID: 'tab-library' }}
       />
     </Tabs>
   );
