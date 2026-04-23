@@ -104,7 +104,7 @@ export default function AffirmationVault() {
       {view === 'deck' ? (
         <View style={styles.body}>
           <View style={styles.card} testID="aff-card">
-            <Ionicons name="quote" size={24} color={ACCENT} style={{ opacity: 0.6 }} />
+            <Ionicons name="chatbubble-ellipses" size={24} color={ACCENT} style={{ opacity: 0.6 }} />
             <Text style={styles.quote}>{AFFIRMATIONS[idx]}</Text>
             <Text style={styles.counter}>{idx + 1} / {AFFIRMATIONS.length}</Text>
           </View>
