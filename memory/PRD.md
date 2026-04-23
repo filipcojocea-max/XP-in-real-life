@@ -8,19 +8,26 @@ LevelUp is a personal-progress gamified confidence/self-improvement Expo mobile 
 - **Backend**: FastAPI + MongoDB (motor). Singleton profile, task templates, daily task_logs, goals, achievements.
 - **Auth**: None (single local profile; can be added later).
 
-## Features (MVP + v1.1 + v1.2)
-- **Onboarding (first launch)**: 13-step questionnaire (name, main goals, experience level, productivity 1-10, loves + other, focused time with early/after follow-up, good habits, bad habits, age range, gender, avatar photo), every step skippable. Auto-generated character bio from answers.
-- **Push Reminders**: each task can have a scheduled time (HH:MM) + reminder toggle. Local daily repeating notifications via `expo-notifications`.
-- **Home**: Hero shield emblem with glowing XP ring, LEVEL badge (1-10), XP bar, Day Streak / Today's Quests / XP Today stat cards, 4 daily focus completion rings, overall daily progress.
-- **Quests (Tasks)**: UNLIMITED user-created tasks grouped by Morning/Afternoon/Evening, tick-to-complete with haptic + floating "+XP" animation, FAB add with focus area + time slot + time picker + reminder toggle + XP chips.
-- **Goals**: Long-term goals per focus area, +/-/+10 progress controls, auto-complete at target (bonus +100 XP).
-- **Progress**: Weekly XP SVG bar chart, Confidence Metric XP distribution, Achievements grid.
-- **Profile**: Avatar (photo or shield fallback) with XP ring, auto-generated bio, 6 lifetime stats, Edit Profile, Focus Mode, Reset Progress.
-- **Focus Mode**: 5-min lock-in timer with challenge-to-unlock (push-ups OR breathing cycles).
-- **Library+ (premium tab — placeholder)**: 6th bottom-right tab. Two segmented sections — **Add** (shows "Apps coming out soon!" with 4 locked coming-soon preview cards and a notify-me badge) and **My Library** (empty state). Mini-apps will be built later.
+## Features (MVP + v1.1 + v1.2 + v1.3)
+- **Onboarding (first launch)**: 13-step questionnaire, skippable, auto-generated bio from answers.
+- **Push Reminders + Motivational Notifications**:
+  - Per-task scheduled time (HH:MM) + reminder toggle, local daily repeating.
+  - **3 motivational notifications daily** at 9 AM / 1 PM / 7 PM with random phrases like "Stay Focused. Stay Committed. Stay Consistent.", "Future you is watching. Make them proud.", "Level up in real life.", etc. Android uses MAX-importance "motivation" channel for heads-up banners; iOS uses time-sensitive interruption level.
+- **In-app MotivationBanner**: Sits on Home between greeting and hero emblem. Notification-style card with a rotating half-green/half-cyan border traveling in the same direction, exactly opposite sides. Tap → shuffles to a new message and routes to Quests.
+- **Adaptive Task Order**: `GET /api/tasks` reshuffles each time-slot group based on the user's most-recent day's completion order (completed-earliest → top). Cyan "Smart order · reshuffled from your completion pattern on {date}" hint appears above Quests list when active.
+- **Home**: Hero shield emblem with glowing XP ring, LEVEL badge, XP bar, MotivationBanner, 3 stat cards, 4 daily focus completion rings, overall daily progress.
+- **Quests (Tasks)**: UNLIMITED user-created tasks grouped by Morning/Afternoon/Evening, adaptive smart order, tick-to-complete with haptic + floating "+XP", FAB add with focus area + time slot + time picker + reminder toggle + XP.
+- **Goals**: Long-term goals per focus area with progress controls + bonus XP.
+- **Progress**: Weekly XP chart, Confidence Metric, Achievements grid.
+- **Profile**: Avatar + bio + 6 stats + Edit Profile + Focus Mode + Reset.
+- **Focus Mode**: 5-min lock timer with push-ups or breathing challenge to exit early.
+- **Library+**: 6th tab, segmented Add / My Library, "Apps coming out soon!" placeholder.
+
+## Important OS Limitation
+iOS and Android do NOT allow any app to override notification position, force them to stay visible, or draw a custom animated border on OS notifications. The rotating green/cyan border is therefore implemented as an in-app "MotivationBanner" component matching the user's visual spec; OS notifications are scheduled at MAX/time-sensitive priority for best possible heads-up behavior.
 
 ## XP & Leveling
 Cumulative thresholds per level: [0, 100, 250, 500, 900, 1500, 2500, 4000, 6000, 9000, 13000]. Max level 10.
 
 ## API
-`/api/profile`, `/api/profile/onboarding`, `/api/profile/avatar`, `/api/profile/reset`, `/api/tasks` (+ complete/uncomplete), `/api/goals` (+ progress), `/api/achievements`, `/api/stats/daily|weekly|by-area`, `/api/seed`.
+`/api/profile`, `/api/profile/onboarding`, `/api/profile/avatar`, `/api/profile/reset`, `/api/tasks` (returns `adaptive_order` + `order_source_date`), `/api/tasks/{id}/complete|uncomplete` (accepts `{date}` body), `/api/goals` (+ progress), `/api/achievements`, `/api/stats/daily|weekly|by-area`, `/api/seed`.
