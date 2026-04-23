@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   Animated,
   Alert,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -85,6 +86,8 @@ export default function Focus() {
   const ss = String(secondsLeft % 60).padStart(2, '0');
   const progress = (DURATION_SEC - secondsLeft) / DURATION_SEC;
 
+  const [challengePicker, setChallengePicker] = useState(false);
+
   const startTimer = () => {
     setSecondsLeft(DURATION_SEC);
     setMode('running');
@@ -93,15 +96,7 @@ export default function Focus() {
 
   const tryExit = () => {
     if (mode === 'running') {
-      Alert.alert(
-        'Exit Focus Mode?',
-        'Complete a quick challenge to unlock.',
-        [
-          { text: 'Keep Focusing', style: 'cancel' },
-          { text: '20 Push-ups', onPress: () => { setChallenge('pushups'); setPushupCount(0); } },
-          { text: '4 Breath Cycles', onPress: () => { setChallenge('breathing'); setBreathCycle(0); } },
-        ]
-      );
+      setChallengePicker(true);
     } else {
       router.back();
     }
@@ -329,4 +324,39 @@ const styles = StyleSheet.create({
 
   cancelChallenge: { marginTop: spacing.xl, padding: spacing.md },
   cancelChallengeText: { color: colors.textMuted, fontSize: 13 },
+
+  pickerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.lg,
+  },
+  pickerSheet: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  pickerTitle: { color: colors.text, fontSize: 20, fontWeight: '800' },
+  pickerDesc: { color: colors.textSecondary, fontSize: 13, marginTop: 6, marginBottom: spacing.lg },
+  pickerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 14,
+    borderRadius: radii.pill,
+    marginBottom: spacing.sm,
+  },
+  pickerCancel: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginTop: spacing.sm,
+  },
+  pickerBtnText: { color: colors.bg, fontSize: 15, fontWeight: '800' },
 });
