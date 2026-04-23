@@ -1,0 +1,179 @@
+{
+  "theme": "dark",
+  "archetype": "7 (Electric & Neon)",
+  "typography": {
+    "font_families": {
+      "heading": "System",
+      "body": "System"
+    },
+    "font_weights": {
+      "heading": "800",
+      "body": "400",
+      "bold": "700"
+    },
+    "scale": {
+      "h1": { "fontSize": 48, "letterSpacing": -1, "fontWeight": "900" },
+      "h2": { "fontSize": 32, "letterSpacing": -0.5, "fontWeight": "800" },
+      "h3": { "fontSize": 24, "letterSpacing": 0, "fontWeight": "700" },
+      "body": { "fontSize": 16, "lineHeight": 24, "fontWeight": "400" },
+      "small": { "fontSize": 12, "letterSpacing": 0.5, "fontWeight": "500", "textTransform": "uppercase" },
+      "xp_display": { "fontSize": 64, "letterSpacing": -2, "fontWeight": "900" }
+    }
+  },
+  "colors": {
+    "background": {
+      "main": "#05070D",
+      "surface": "#0A0E1A",
+      "surface_glass": "rgba(255, 255, 255, 0.05)",
+      "surface_glass_active": "rgba(255, 255, 255, 0.1)"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "rgba(255, 255, 255, 0.6)",
+      "muted": "rgba(255, 255, 255, 0.4)",
+      "inverse": "#05070D"
+    },
+    "accents": {
+      "primary": "#00FF88",
+      "secondary": "#00D9FF",
+      "xp_amber": "#FFB800",
+      "error": "#FF3B30",
+      "glow_green": "rgba(0, 255, 136, 0.5)",
+      "glow_blue": "rgba(0, 217, 255, 0.5)"
+    },
+    "focus_areas": {
+      "social": "#00D9FF",
+      "fitness": "#00FF88",
+      "appearance": "#FF3366",
+      "mindset": "#9D4CDD"
+    }
+  },
+  "spacing": {
+    "xs": 4,
+    "sm": 8,
+    "md": 16,
+    "lg": 24,
+    "xl": 32,
+    "xxl": 48
+  },
+  "radii": {
+    "sm": 8,
+    "md": 16,
+    "lg": 24,
+    "pill": 999
+  },
+  "shadows": {
+    "glow_primary": {
+      "shadowColor": "#00FF88",
+      "shadowOffset": { "width": 0, "height": 0 },
+      "shadowOpacity": 0.6,
+      "shadowRadius": 15,
+      "elevation": 10
+    },
+    "glow_secondary": {
+      "shadowColor": "#00D9FF",
+      "shadowOffset": { "width": 0, "height": 0 },
+      "shadowOpacity": 0.6,
+      "shadowRadius": 15,
+      "elevation": 10
+    },
+    "card": {
+      "shadowColor": "#000000",
+      "shadowOffset": { "width": 0, "height": 8 },
+      "shadowOpacity": 0.5,
+      "shadowRadius": 16,
+      "elevation": 5
+    }
+  },
+  "components": {
+    "glass_card": {
+      "backgroundColor": "rgba(255, 255, 255, 0.03)",
+      "borderRadius": 16,
+      "borderWidth": 1,
+      "borderColor": "rgba(255, 255, 255, 0.08)",
+      "padding": 16,
+      "shadows": "card",
+      "overflow": "hidden"
+    },
+    "button_primary": {
+      "backgroundColor": "#00FF88",
+      "borderRadius": 999,
+      "paddingVertical": 16,
+      "paddingHorizontal": 32,
+      "alignItems": "center",
+      "justifyContent": "center",
+      "shadows": "glow_primary"
+    },
+    "button_secondary": {
+      "backgroundColor": "transparent",
+      "borderWidth": 1,
+      "borderColor": "#00D9FF",
+      "borderRadius": 999,
+      "paddingVertical": 16,
+      "paddingHorizontal": 32,
+      "alignItems": "center",
+      "justifyContent": "center",
+      "shadows": "glow_secondary"
+    },
+    "ring_chart": {
+      "instruction": "Use react-native-svg Circle elements. Set strokeWidth to 8-12. Use strokeDasharray and strokeDashoffset to animate completion. Apply drop shadows for glow. Focus rings colors: Social (#00D9FF), Fitness (#00FF88), Appearance (#FF3366), Mindset (#9D4CDD)."
+    },
+    "bottom_tabs": {
+      "backgroundColor": "#0A0E1A",
+      "borderTopWidth": 1,
+      "borderTopColor": "rgba(255, 255, 255, 0.1)",
+      "activeTintColor": "#00FF88",
+      "inactiveTintColor": "rgba(255, 255, 255, 0.4)",
+      "paddingBottom": 24,
+      "height": 80
+    },
+    "hero_emblem": {
+      "instruction": "Build a view combining Expo vector icon 'shield' or 'diamond' overlaid on a pulsating glowing circle using Reanimated. Optional: layer the provided abstract image underneath."
+    }
+  },
+  "screens": {
+    "Home": {
+      "layout": "Scrollable dark canvas with subtle starfield background (ImageBackground). Top section: Centered glowing shield/crystal emblem, 'Level X' bold text below, and a horizontal XP progress bar (Amber #FFB800) underneath. Middle section: 4 Daily completion rings arranged in a 2x2 grid or single circular overlapping rings (Apple Watch style) for Social, Fitness, Appearance, Mindset. Bottom section: Current streak counter and today's completed tasks stats."
+    },
+    "Tasks": {
+      "layout": "List view. Header with Date and 'Daily Quests'. Categorized sections: Morning, Afternoon, Evening. Each task is a Glass Card with a circular checkbox. When checked, play a tick animation and show a '+XP' floater. Floating Action Button (FAB) at bottom right to add custom tasks. Must use testIDs for all buttons and task items."
+    },
+    "Goals": {
+      "layout": "Grid of focus areas (Social, Fitness, etc.). Tapping an area expands to show long-term goals. Each goal has a horizontal progress bar. Design: sleek cards with neon top borders corresponding to the category color."
+    },
+    "Progress": {
+      "layout": "Data-heavy dashboard. Weekly/monthly XP charts using react-native-svg line charts or bar charts with glowing accents. Confidence metric dashboard. Timeline list of level-up history."
+    },
+    "Achievements": {
+      "layout": "Grid of badges. Unlocked badges are vibrant, glowing, full opacity. Locked badges are grayscale, 0.3 opacity, flat. Badges can use @expo/vector-icons inside stylized hexagonal or circular views."
+    },
+    "Profile": {
+      "layout": "Avatar section with level ring around it. Lifetime stats (total XP, highest streak). Settings list with toggles."
+    },
+    "FocusMode": {
+      "layout": "Full-screen distraction-free mode. Massive countdown timer in the center. Requires a physical action (like tracking 10 taps quickly, or just answering a prompt) to 'unlock' if trying to exit early."
+    },
+    "AddTaskModal": {
+      "layout": "Slide-up modal with Glass Card styling. Input fields for Task Name, Time category (Morning/Afternoon/Evening), Focus Area dropdown, and Add button. Must have distinct testIDs."
+    }
+  },
+  "media_urls": {
+    "hero_emblem": {
+      "url": "https://images.pexels.com/photos/5011647/pexels-photo-5011647.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "3D cube with glowing edges, used as an abstract hero crystal if needed."
+    },
+    "starfield_background": {
+      "url": "https://images.pexels.com/photos/23522893/pexels-photo-23522893.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Intricate view of galaxy and starscape in dark cosmos, use at low opacity (10-20%) as global app background layer."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Install 'react-native-svg' and 'react-native-reanimated' (ensure babel plugin is configured) as they are critical for the glowing rings and progress bars.",
+    "Do not use Tailwind or Shadcn as this is a React Native app. Use standard React Native StyleSheet API.",
+    "Strictly follow the color palette. Background must be deep midnight (#05070D).",
+    "Cards must use the 'glass_card' design specs: dark transparent background with a subtle border and shadow.",
+    "Implement the 'testID' attribute on all interactive elements (Tasks, Buttons, Tabs, Inputs) for end-to-end testing.",
+    "For the daily completion rings, implement Apple Watch style concentric rings or a 2x2 grid of single rings using 'react-native-svg' Circle elements.",
+    "Ensure 'FocusMode' hides standard navigation and locks the user in until timer completes or challenge is done."
+  ]
+}
