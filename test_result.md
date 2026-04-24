@@ -101,3 +101,34 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: "Test the updated Tasks API endpoints on the Critique AI (LevelUp) backend. Default tasks (is_default: true) must lock focus_area / time_slot / scheduled_time / recurring fields (PUT returns 400), and cannot be deleted (DELETE returns 400). Custom (non-default) tasks can be fully edited including moving between morning/afternoon/evening slots, and can be deleted."
+
+backend:
+  - task: "Tasks API — default vs custom update/delete rules"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "Created /app/backend_test.py covering all 7 scenarios from the review request against the public API (https://xp-confidence.preview.emergentagent.com/api). Pre-existing DB contained tasks seeded before the is_default migration (no is_default flag), so the test performs POST /api/profile/reset followed by POST /api/seed to obtain properly tagged default tasks, then POSTs a custom task. Results: 12/12 assertions PASS. (1) GET /api/tasks returns tagged default + custom tasks. (2) PUT default task with {title, description, xp_value, reminder_enabled} returns 200 and updates those fields while focus_area/time_slot remain unchanged. (3) PUT default task with focus_area / time_slot / scheduled_time each return 400 with message 'Cannot change <field> on a default quest — only title, description, XP and reminder are editable.' (4) DELETE on default task returns 400 with message 'Default quests cannot be deleted — …' and task still present on subsequent GET. (5) PUT custom task with {title, time_slot=evening, focus_area=mindset, scheduled_time=20:00} returns 200 with all fields updated. (6) PUT custom task to time_slot=afternoon, scheduled_time=13:00 returns 200 and GET /api/tasks shows it in the afternoon bucket. (7) DELETE custom task returns 200 {deleted: true} and it disappears from GET /api/tasks. LOCKED_DEFAULT_FIELDS enforcement and default-delete protection are working correctly."
+
+metadata:
+  created_by: "testing_agent"
+  version: "1.0"
+  test_sequence: 1
+  run_ui: false
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "testing"
+      message: "Ran full backend test suite for the updated Tasks API (/app/backend_test.py). All 12 assertions pass against the public ingress URL. Note: the pre-existing Mongo `tasks` collection had items seeded before the `is_default` migration, so the test resets & re-seeds to obtain properly tagged defaults. If the main agent wants default tasks to persist for end users without requiring a reset, consider a one-time migration that marks existing seeded titles as is_default=true, or change POST /api/seed to upsert the flag on legacy docs. Functionality itself (LOCKED_DEFAULT_FIELDS + delete protection + custom-task full edit/move/delete) is correct."

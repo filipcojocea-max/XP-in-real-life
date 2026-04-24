@@ -32,12 +32,14 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 const SLOTS: TimeSlot[] = ['morning', 'afternoon', 'evening'];
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
+const slotDefaultHour: Record<TimeSlot, number> = { morning: 8, afternoon: 13, evening: 20 };
+
 export default function Tasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [orderSource, setOrderSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [modalTask, setModalTask] = useState<Task | null>(null); // editing
   const [showAdd, setShowAdd] = useState(false);
-  const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [actionTask, setActionTask] = useState<Task | null>(null);
   const [xpFloater, setXpFloater] = useState<{ value: number } | null>(null);
   const floatAnim = useMemo(() => new Animated.Value(0), []);
@@ -78,7 +80,6 @@ export default function Tasks() {
 
   const toggle = async (task: Task) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    // optimistic
     setTasks((prev) =>
       prev.map((t) => (t.id === task.id ? { ...t, completed: !t.completed } : t))
     );
@@ -97,7 +98,6 @@ export default function Tasks() {
       }
     } catch (e) {
       console.log('toggle err', e);
-      // revert
       setTasks((prev) =>
         prev.map((t) => (t.id === task.id ? { ...t, completed: task.completed } : t))
       );
@@ -105,24 +105,73 @@ export default function Tasks() {
   };
 
   const removeTask = (task: Task) => {
-    setActionTask(null);
+    if (task.is_default) {
+      Alert.alert('Default quest', 'Default quests cannot be deleted, only edited.');
+      return;
+    }
     Alert.alert('Delete Quest?', `Remove "${task.title}"?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
-          await api.deleteTask(task.id);
-          await cancelTaskNotification(task.id);
-          load();
+          setActionTask(null);
+          try {
+            await api.deleteTask(task.id);
+            await cancelTaskNotification(task.id);
+            load();
+          } catch (e: any) {
+            Alert.alert('Cannot delete', String(e.message || e));
+          }
         },
       },
     ]);
   };
 
+  const moveToSlot = async (task: Task, newSlot: TimeSlot) => {
+    if (task.is_default) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+      Alert.alert(
+        'Locked',
+        'Default quests are pinned to their original time slot and cannot be moved.',
+      );
+      return;
+    }
+    if (task.time_slot === newSlot) {
+      setActionTask(null);
+      return;
+    }
+    setActionTask(null);
+    // optimistic
+    setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, time_slot: newSlot } : t)));
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    try {
+      // Reset scheduled_time to slot default hour if reminders enabled
+      const hh = String(slotDefaultHour[newSlot]).padStart(2, '0');
+      const newTime = task.reminder_enabled ? `${hh}:00` : task.scheduled_time ?? null;
+      const updated = await api.updateTask(task.id, {
+        time_slot: newSlot,
+        scheduled_time: newTime,
+      });
+      if (updated.reminder_enabled && updated.scheduled_time) {
+        await scheduleTaskNotification(updated);
+      }
+      load();
+    } catch (e: any) {
+      Alert.alert('Could not move quest', String(e.message || e));
+      load();
+    }
+  };
+
   const openActions = (task: Task) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     setActionTask(task);
+  };
+
+  const openEdit = (task: Task) => {
+    Haptics.selectionAsync().catch(() => {});
+    setActionTask(null);
+    setModalTask(task);
   };
 
   const grouped = useMemo(() => {
@@ -134,12 +183,8 @@ export default function Tasks() {
   const floaterStyle = {
     opacity: floatAnim.interpolate({ inputRange: [0, 1, 2], outputRange: [0, 1, 0] }),
     transform: [
-      {
-        translateY: floatAnim.interpolate({ inputRange: [0, 2], outputRange: [0, -60] }),
-      },
-      {
-        scale: floatAnim.interpolate({ inputRange: [0, 1, 2], outputRange: [0.8, 1.1, 1] }),
-      },
+      { translateY: floatAnim.interpolate({ inputRange: [0, 2], outputRange: [0, -60] }) },
+      { scale: floatAnim.interpolate({ inputRange: [0, 1, 2], outputRange: [0.8, 1.1, 1] }) },
     ],
   };
 
@@ -158,7 +203,9 @@ export default function Tasks() {
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.kicker}>Daily Quests · Unlimited</Text>
-          <Text style={styles.title}>{new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</Text>
+          <Text style={styles.title}>
+            {new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}
+          </Text>
         </View>
         <Text testID="tasks-count" style={styles.countPill}>
           {tasks.filter((t) => t.completed).length}/{tasks.length}
@@ -171,7 +218,11 @@ export default function Tasks() {
             <Ionicons name="reorder-four" size={14} color={colors.cyan} />
             <Text style={styles.orderHintText}>
               Smart order · reshuffled from your completion pattern on{' '}
-              {new Date(orderSource).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
+              {new Date(orderSource).toLocaleDateString(undefined, {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+              })}
             </Text>
           </View>
         ) : null}
@@ -201,10 +252,7 @@ export default function Tasks() {
                   >
                     <Card
                       accent={focusMeta[t.focus_area].color}
-                      style={[
-                        styles.taskCard,
-                        t.completed && styles.taskDone,
-                      ]}
+                      style={[styles.taskCard, t.completed && styles.taskDone]}
                     >
                       <View style={styles.taskInner}>
                         <View
@@ -221,15 +269,18 @@ export default function Tasks() {
                             <Ionicons name="checkmark" size={18} color={colors.bg} />
                           ) : null}
                         </View>
-                        <View style={{ flex: 1, marginLeft: spacing.md }}>
-                          <Text
-                            style={[
-                              styles.taskTitle,
-                              t.completed && styles.taskTitleDone,
-                            ]}
-                          >
-                            {t.title}
-                          </Text>
+                        <View style={{ flex: 1, marginLeft: spacing.md, marginRight: 40 }}>
+                          <View style={styles.titleRow}>
+                            <Text
+                              style={[styles.taskTitle, t.completed && styles.taskTitleDone]}
+                              numberOfLines={1}
+                            >
+                              {t.title}
+                            </Text>
+                            {t.is_default ? (
+                              <Ionicons name="lock-closed" size={10} color={colors.textMuted} style={{ marginLeft: 6 }} />
+                            ) : null}
+                          </View>
                           {t.description ? (
                             <Text style={styles.taskDesc} numberOfLines={1}>
                               {t.description}
@@ -239,10 +290,17 @@ export default function Tasks() {
                             <View
                               style={[
                                 styles.tag,
-                                { backgroundColor: focusMeta[t.focus_area].color + '22', borderColor: focusMeta[t.focus_area].color + '55' },
+                                {
+                                  backgroundColor: focusMeta[t.focus_area].color + '22',
+                                  borderColor: focusMeta[t.focus_area].color + '55',
+                                },
                               ]}
                             >
-                              <Ionicons name={focusMeta[t.focus_area].icon as any} size={10} color={focusMeta[t.focus_area].color} />
+                              <Ionicons
+                                name={focusMeta[t.focus_area].icon as any}
+                                size={10}
+                                color={focusMeta[t.focus_area].color}
+                              />
                               <Text style={[styles.tagText, { color: focusMeta[t.focus_area].color }]}>
                                 {focusMeta[t.focus_area].label}
                               </Text>
@@ -254,10 +312,12 @@ export default function Tasks() {
                                   size={10}
                                   color={t.reminder_enabled ? colors.cyan : colors.textMuted}
                                 />
-                                <Text style={[
-                                  styles.timeTagText,
-                                  { color: t.reminder_enabled ? colors.cyan : colors.textMuted },
-                                ]}>
+                                <Text
+                                  style={[
+                                    styles.timeTagText,
+                                    { color: t.reminder_enabled ? colors.cyan : colors.textMuted },
+                                  ]}
+                                >
                                   {t.scheduled_time}
                                 </Text>
                               </View>
@@ -266,6 +326,19 @@ export default function Tasks() {
                           </View>
                         </View>
                       </View>
+
+                      {/* Top-right Edit Pencil */}
+                      <TouchableOpacity
+                        testID={`task-edit-${t.id}`}
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          openEdit(t);
+                        }}
+                        hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}
+                        style={styles.editBadge}
+                      >
+                        <Ionicons name="pencil" size={14} color={colors.cyan} />
+                      </TouchableOpacity>
                     </Card>
                   </Pressable>
                 ))
@@ -274,13 +347,16 @@ export default function Tasks() {
           );
         })}
 
-        <Text style={styles.hint}>Tip: long-press a quest to edit or delete it.</Text>
+        <Text style={styles.hint}>Tap the ✎ to edit · Long-press to move or delete</Text>
       </ScrollView>
 
       <TouchableOpacity
         testID="add-task-fab"
         style={styles.fab}
-        onPress={() => setShowAdd(true)}
+        onPress={() => {
+          setModalTask(null);
+          setShowAdd(true);
+        }}
       >
         <Ionicons name="add" size={30} color={colors.bg} />
       </TouchableOpacity>
@@ -291,11 +367,24 @@ export default function Tasks() {
         </Animated.View>
       ) : null}
 
-      <AddTaskModal
-        visible={showAdd}
-        onClose={() => setShowAdd(false)}
-        onAdded={() => {
+      <TaskActionSheet
+        task={actionTask}
+        onClose={() => setActionTask(null)}
+        onEdit={openEdit}
+        onMove={moveToSlot}
+        onDelete={removeTask}
+      />
+
+      <TaskModal
+        visible={showAdd || modalTask !== null}
+        editingTask={modalTask}
+        onClose={() => {
           setShowAdd(false);
+          setModalTask(null);
+        }}
+        onSaved={() => {
+          setShowAdd(false);
+          setModalTask(null);
           load();
         }}
       />
@@ -303,15 +392,124 @@ export default function Tasks() {
   );
 }
 
-function AddTaskModal({
-  visible,
+// ───────────────────────── ActionSheet ─────────────────────────
+function TaskActionSheet({
+  task,
   onClose,
-  onAdded,
+  onEdit,
+  onMove,
+  onDelete,
+}: {
+  task: Task | null;
+  onClose: () => void;
+  onEdit: (t: Task) => void;
+  onMove: (t: Task, s: TimeSlot) => void;
+  onDelete: (t: Task) => void;
+}) {
+  if (!task) return null;
+  const isDefault = !!task.is_default;
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose}>
+        <Pressable style={styles.actionSheet} onPress={() => {}} testID="task-action-sheet">
+          <View style={styles.sheetHandle} />
+          <View style={styles.sheetTitleRow}>
+            <Text style={styles.sheetTitle} numberOfLines={1}>
+              {task.title}
+            </Text>
+            {isDefault ? (
+              <View style={styles.lockPill}>
+                <Ionicons name="lock-closed" size={10} color={colors.amber} />
+                <Text style={styles.lockPillText}>DEFAULT</Text>
+              </View>
+            ) : null}
+          </View>
+
+          {/* Edit — always available */}
+          <TouchableOpacity
+            testID="action-edit"
+            style={styles.actionItem}
+            onPress={() => onEdit(task)}
+          >
+            <Ionicons name="pencil" size={18} color={colors.cyan} />
+            <Text style={styles.actionItemText}>Edit Quest</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+
+          {/* Move */}
+          <Text style={styles.actionGroupLabel}>
+            {isDefault ? '🔒 Cannot move — default quest' : 'Move to time slot'}
+          </Text>
+          {SLOTS.map((s) => {
+            const disabled = isDefault || task.time_slot === s;
+            const isCurrent = task.time_slot === s;
+            return (
+              <TouchableOpacity
+                key={s}
+                testID={`action-move-${s}`}
+                disabled={disabled}
+                onPress={() => onMove(task, s)}
+                style={[styles.actionItem, disabled && { opacity: 0.45 }]}
+              >
+                <Ionicons
+                  name={slotMeta[s].icon as any}
+                  size={18}
+                  color={isCurrent ? colors.green : colors.textSecondary}
+                />
+                <Text
+                  style={[
+                    styles.actionItemText,
+                    isCurrent && { color: colors.green, fontWeight: '800' },
+                  ]}
+                >
+                  {slotMeta[s].label}
+                  {isCurrent ? '  (current)' : ''}
+                </Text>
+                {!disabled ? <Ionicons name="arrow-forward" size={16} color={colors.textMuted} /> : null}
+              </TouchableOpacity>
+            );
+          })}
+
+          {/* Delete — hidden for default */}
+          {!isDefault ? (
+            <TouchableOpacity
+              testID="action-delete"
+              style={[styles.actionItem, { marginTop: spacing.sm }]}
+              onPress={() => onDelete(task)}
+            >
+              <Ionicons name="trash" size={18} color={colors.danger} />
+              <Text style={[styles.actionItemText, { color: colors.danger }]}>Delete Quest</Text>
+            </TouchableOpacity>
+          ) : null}
+
+          <TouchableOpacity
+            testID="action-cancel"
+            style={[styles.actionBtn, styles.cancelBtn, { marginTop: spacing.md }]}
+            onPress={onClose}
+          >
+            <Text style={styles.cancelText}>Cancel</Text>
+          </TouchableOpacity>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// ───────────────────────── Add / Edit Modal ─────────────────────────
+function TaskModal({
+  visible,
+  editingTask,
+  onClose,
+  onSaved,
 }: {
   visible: boolean;
+  editingTask: Task | null;
   onClose: () => void;
-  onAdded: () => void;
+  onSaved: () => void;
 }) {
+  const isEdit = !!editingTask;
+  const isDefault = !!editingTask?.is_default;
+
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [slot, setSlot] = useState<TimeSlot>('morning');
@@ -326,10 +524,22 @@ function AddTaskModal({
   const [showPicker, setShowPicker] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const slotDefaultHour: Record<TimeSlot, number> = { morning: 8, afternoon: 13, evening: 20 };
-
   useEffect(() => {
-    if (visible) {
+    if (!visible) return;
+    if (editingTask) {
+      setTitle(editingTask.title);
+      setDesc(editingTask.description || '');
+      setSlot(editingTask.time_slot);
+      setArea(editingTask.focus_area);
+      setXp(String(editingTask.xp_value));
+      setReminderOn(!!editingTask.reminder_enabled);
+      if (editingTask.scheduled_time) {
+        const [h, m] = editingTask.scheduled_time.split(':').map(Number);
+        const d = new Date();
+        d.setHours(h, m, 0, 0);
+        setScheduledDate(d);
+      }
+    } else {
       setTitle('');
       setDesc('');
       setSlot('morning');
@@ -339,11 +549,12 @@ function AddTaskModal({
       const d = new Date();
       d.setHours(8, 0, 0, 0);
       setScheduledDate(d);
-      setShowPicker(false);
     }
-  }, [visible]);
+    setShowPicker(false);
+  }, [visible, editingTask]);
 
   const onSlotChange = (s: TimeSlot) => {
+    if (isDefault) return;
     setSlot(s);
     const d = new Date(scheduledDate);
     d.setHours(slotDefaultHour[s], 0, 0, 0);
@@ -364,21 +575,45 @@ function AddTaskModal({
     setSaving(true);
     try {
       const scheduled_time = reminderOn ? formatTime(scheduledDate) : null;
-      const created = await api.createTask({
-        title: title.trim(),
-        description: desc.trim(),
-        focus_area: area,
-        time_slot: slot,
-        xp_value: parseInt(xp, 10) || 20,
-        scheduled_time,
-        reminder_enabled: reminderOn,
-      });
-      if (reminderOn && scheduled_time) {
-        await scheduleTaskNotification({ ...created, reminder_enabled: true, scheduled_time });
+      if (isEdit && editingTask) {
+        // For default tasks: only send editable fields
+        const payload: any = {
+          title: title.trim(),
+          description: desc.trim(),
+          xp_value: parseInt(xp, 10) || 20,
+          reminder_enabled: reminderOn,
+        };
+        if (!isDefault) {
+          payload.focus_area = area;
+          payload.time_slot = slot;
+          payload.scheduled_time = scheduled_time;
+        } else {
+          // default: scheduled_time locked, but reminder on/off toggle is allowed
+          // Keep existing scheduled_time by not sending it
+        }
+        const updated = await api.updateTask(editingTask.id, payload);
+        if (updated.reminder_enabled && updated.scheduled_time) {
+          await scheduleTaskNotification(updated);
+        } else {
+          await cancelTaskNotification(updated.id);
+        }
+      } else {
+        const created = await api.createTask({
+          title: title.trim(),
+          description: desc.trim(),
+          focus_area: area,
+          time_slot: slot,
+          xp_value: parseInt(xp, 10) || 20,
+          scheduled_time,
+          reminder_enabled: reminderOn,
+        });
+        if (reminderOn && scheduled_time) {
+          await scheduleTaskNotification({ ...created, reminder_enabled: true, scheduled_time });
+        }
       }
-      onAdded();
+      onSaved();
     } catch (e: any) {
-      Alert.alert('Failed to create quest', String(e.message || e));
+      Alert.alert(isEdit ? 'Failed to save' : 'Failed to create quest', String(e.message || e));
     } finally {
       setSaving(false);
     }
@@ -391,160 +626,202 @@ function AddTaskModal({
         style={styles.modalBackdrop}
       >
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={styles.modalSheet} testID="add-task-modal">
-          <View style={styles.sheetHandle} />
-          <Text style={styles.modalTitle}>New Quest</Text>
+        <ScrollView
+          style={{ width: '100%' }}
+          contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.modalSheet} testID="task-modal">
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetTitleRow}>
+              <Text style={styles.modalTitle}>
+                {isEdit ? 'Edit Quest' : 'New Quest'}
+              </Text>
+              {isDefault ? (
+                <View style={styles.lockPill}>
+                  <Ionicons name="lock-closed" size={10} color={colors.amber} />
+                  <Text style={styles.lockPillText}>DEFAULT</Text>
+                </View>
+              ) : null}
+            </View>
 
-          <Text style={styles.inputLabel}>Title</Text>
-          <TextInput
-            testID="task-input-title"
-            placeholder="e.g. 20 push-ups"
-            placeholderTextColor={colors.textMuted}
-            style={styles.input}
-            value={title}
-            onChangeText={setTitle}
-          />
+            {isDefault ? (
+              <Text style={styles.defaultNote}>
+                Focus area & time slot are locked for default quests. You can still change the title,
+                description, XP and reminder.
+              </Text>
+            ) : null}
 
-          <Text style={styles.inputLabel}>Description (optional)</Text>
-          <TextInput
-            testID="task-input-desc"
-            placeholder="Why does this matter?"
-            placeholderTextColor={colors.textMuted}
-            style={styles.input}
-            value={desc}
-            onChangeText={setDesc}
-          />
+            <Text style={styles.inputLabel}>Title</Text>
+            <TextInput
+              testID="task-input-title"
+              placeholder="e.g. 20 push-ups"
+              placeholderTextColor={colors.textMuted}
+              style={styles.input}
+              value={title}
+              onChangeText={setTitle}
+            />
 
-          <Text style={styles.inputLabel}>Time Slot</Text>
-          <View style={styles.chipRow}>
-            {SLOTS.map((s) => (
-              <TouchableOpacity
-                key={s}
-                testID={`task-slot-${s}`}
-                onPress={() => onSlotChange(s)}
-                style={[styles.chip, slot === s && styles.chipActive]}
-              >
-                <Ionicons
-                  name={slotMeta[s].icon as any}
-                  size={14}
-                  color={slot === s ? colors.bg : colors.textSecondary}
-                />
-                <Text style={[styles.chipText, slot === s && styles.chipTextActive]}>
-                  {slotMeta[s].label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+            <Text style={styles.inputLabel}>Description (optional)</Text>
+            <TextInput
+              testID="task-input-desc"
+              placeholder="Why does this matter?"
+              placeholderTextColor={colors.textMuted}
+              style={styles.input}
+              value={desc}
+              onChangeText={setDesc}
+            />
 
-          <Text style={styles.inputLabel}>Focus Area</Text>
-          <View style={styles.chipRow}>
-            {AREAS.map((a) => {
-              const m = focusMeta[a];
-              const active = area === a;
-              return (
-                <TouchableOpacity
-                  key={a}
-                  testID={`task-area-${a}`}
-                  onPress={() => setArea(a)}
-                  style={[
-                    styles.chip,
-                    {
-                      borderColor: m.color + (active ? '' : '55'),
-                      backgroundColor: active ? m.color : 'transparent',
-                    },
-                  ]}
-                >
-                  <Ionicons
-                    name={m.icon as any}
-                    size={14}
-                    color={active ? colors.bg : m.color}
-                  />
-                  <Text
+            <View style={styles.labelRow}>
+              <Text style={styles.inputLabel}>Time Slot</Text>
+              {isDefault ? <Ionicons name="lock-closed" size={11} color={colors.textMuted} /> : null}
+            </View>
+            <View style={styles.chipRow}>
+              {SLOTS.map((s) => {
+                const active = slot === s;
+                const disabled = isDefault && !active;
+                return (
+                  <TouchableOpacity
+                    key={s}
+                    testID={`task-slot-${s}`}
+                    onPress={() => onSlotChange(s)}
+                    disabled={isDefault}
                     style={[
-                      styles.chipText,
-                      { color: active ? colors.bg : m.color },
+                      styles.chip,
+                      active && styles.chipActive,
+                      disabled && { opacity: 0.35 },
                     ]}
                   >
-                    {m.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+                    <Ionicons
+                      name={slotMeta[s].icon as any}
+                      size={14}
+                      color={active ? colors.bg : colors.textSecondary}
+                    />
+                    <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                      {slotMeta[s].label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
 
-          <Text style={styles.inputLabel}>Reminder</Text>
-          <View style={styles.reminderRow}>
-            <TouchableOpacity
-              testID="task-reminder-toggle"
-              onPress={() => setReminderOn((v) => !v)}
-              style={[
-                styles.reminderToggle,
-                { backgroundColor: reminderOn ? colors.cyan : colors.surfaceGlass, borderColor: reminderOn ? colors.cyan : colors.border },
-              ]}
-            >
-              <Ionicons
-                name={reminderOn ? 'notifications' : 'notifications-off'}
-                size={16}
-                color={reminderOn ? colors.bg : colors.textMuted}
+            <View style={styles.labelRow}>
+              <Text style={styles.inputLabel}>Focus Area</Text>
+              {isDefault ? <Ionicons name="lock-closed" size={11} color={colors.textMuted} /> : null}
+            </View>
+            <View style={styles.chipRow}>
+              {AREAS.map((a) => {
+                const m = focusMeta[a];
+                const active = area === a;
+                const disabled = isDefault && !active;
+                return (
+                  <TouchableOpacity
+                    key={a}
+                    testID={`task-area-${a}`}
+                    onPress={() => !isDefault && setArea(a)}
+                    disabled={isDefault}
+                    style={[
+                      styles.chip,
+                      {
+                        borderColor: m.color + (active ? '' : '55'),
+                        backgroundColor: active ? m.color : 'transparent',
+                      },
+                      disabled && { opacity: 0.35 },
+                    ]}
+                  >
+                    <Ionicons
+                      name={m.icon as any}
+                      size={14}
+                      color={active ? colors.bg : m.color}
+                    />
+                    <Text style={[styles.chipText, { color: active ? colors.bg : m.color }]}>
+                      {m.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.inputLabel}>Reminder</Text>
+            <View style={styles.reminderRow}>
+              <TouchableOpacity
+                testID="task-reminder-toggle"
+                onPress={() => setReminderOn((v) => !v)}
+                style={[
+                  styles.reminderToggle,
+                  {
+                    backgroundColor: reminderOn ? colors.cyan : colors.surfaceGlass,
+                    borderColor: reminderOn ? colors.cyan : colors.border,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name={reminderOn ? 'notifications' : 'notifications-off'}
+                  size={16}
+                  color={reminderOn ? colors.bg : colors.textMuted}
+                />
+                <Text style={[styles.reminderText, { color: reminderOn ? colors.bg : colors.textMuted }]}>
+                  {reminderOn ? 'Daily reminder ON' : 'Reminder OFF'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                testID="task-time-picker-btn"
+                onPress={() => !isDefault && setShowPicker(true)}
+                disabled={!reminderOn || isDefault}
+                style={[
+                  styles.timePickBtn,
+                  (!reminderOn || isDefault) && { opacity: 0.4 },
+                ]}
+              >
+                <Ionicons name="time" size={14} color={colors.amber} />
+                <Text style={styles.timePickText}>{formatTime(scheduledDate)}</Text>
+              </TouchableOpacity>
+            </View>
+            {showPicker ? (
+              <DateTimePicker
+                testID="task-time-picker"
+                value={scheduledDate}
+                mode="time"
+                is24Hour
+                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                onChange={(_, d) => {
+                  if (Platform.OS !== 'ios') setShowPicker(false);
+                  if (d) setScheduledDate(d);
+                }}
+                themeVariant="dark"
               />
-              <Text style={[styles.reminderText, { color: reminderOn ? colors.bg : colors.textMuted }]}>
-                {reminderOn ? 'Daily reminder ON' : 'Reminder OFF'}
-              </Text>
-            </TouchableOpacity>
+            ) : null}
 
-            <TouchableOpacity
-              testID="task-time-picker-btn"
-              onPress={() => setShowPicker(true)}
-              disabled={!reminderOn}
-              style={[styles.timePickBtn, !reminderOn && { opacity: 0.4 }]}
-            >
-              <Ionicons name="time" size={14} color={colors.amber} />
-              <Text style={styles.timePickText}>{formatTime(scheduledDate)}</Text>
-            </TouchableOpacity>
-          </View>
-          {showPicker ? (
-            <DateTimePicker
-              testID="task-time-picker"
-              value={scheduledDate}
-              mode="time"
-              is24Hour
-              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-              onChange={(_, d) => {
-                if (Platform.OS !== 'ios') setShowPicker(false);
-                if (d) setScheduledDate(d);
-              }}
-              themeVariant="dark"
+            <Text style={styles.inputLabel}>XP Reward</Text>
+            <TextInput
+              testID="task-input-xp"
+              keyboardType="number-pad"
+              style={styles.input}
+              value={xp}
+              onChangeText={setXp}
+              placeholderTextColor={colors.textMuted}
             />
-          ) : null}
 
-          <Text style={styles.inputLabel}>XP Reward</Text>
-          <TextInput
-            testID="task-input-xp"
-            keyboardType="number-pad"
-            style={styles.input}
-            value={xp}
-            onChangeText={setXp}
-            placeholderTextColor={colors.textMuted}
-          />
-
-          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
-            <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={onClose}>
-              <Text style={styles.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              testID="task-save-btn"
-              style={[styles.actionBtn, styles.saveBtn]}
-              onPress={save}
-              disabled={saving}
-            >
-              {saving ? (
-                <ActivityIndicator color={colors.bg} />
-              ) : (
-                <Text style={styles.saveText}>Add Quest</Text>
-              )}
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
+              <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={onClose}>
+                <Text style={styles.cancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="task-save-btn"
+                style={[styles.actionBtn, styles.saveBtn]}
+                onPress={save}
+                disabled={saving}
+              >
+                {saving ? (
+                  <ActivityIndicator color={colors.bg} />
+                ) : (
+                  <Text style={styles.saveText}>{isEdit ? 'Save changes' : 'Add Quest'}</Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -574,21 +851,42 @@ const styles = StyleSheet.create({
     borderColor: colors.amber + '55',
   },
   scroll: { padding: spacing.md, paddingBottom: 120 },
+  orderHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: radii.pill,
+    backgroundColor: 'rgba(0,217,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,217,255,0.25)',
+    marginBottom: spacing.md,
+    alignSelf: 'flex-start',
+  },
+  orderHintText: { color: colors.cyan, fontSize: 11, fontWeight: '700' },
   slotHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     marginBottom: spacing.sm,
   },
-  slotTitle: { color: colors.textSecondary, fontSize: 12, fontWeight: '800', letterSpacing: 1.5, textTransform: 'uppercase' },
+  slotTitle: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+  },
   slotLine: { flex: 1, height: 1, backgroundColor: colors.border },
   slotCount: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
   emptyText: { color: colors.textMuted, fontSize: 13 },
 
   taskRow: { marginBottom: spacing.sm },
-  taskCard: { paddingVertical: spacing.md, paddingHorizontal: spacing.md },
+  taskCard: { paddingVertical: spacing.md, paddingHorizontal: spacing.md, position: 'relative' },
   taskDone: { opacity: 0.6 },
   taskInner: { flexDirection: 'row', alignItems: 'center' },
+  titleRow: { flexDirection: 'row', alignItems: 'center' },
   check: {
     width: 28,
     height: 28,
@@ -597,10 +895,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  taskTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  taskTitle: { color: colors.text, fontSize: 15, fontWeight: '700', flexShrink: 1 },
   taskTitleDone: { textDecorationLine: 'line-through', color: colors.textMuted },
   taskDesc: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
-  taskMeta: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: spacing.sm },
+  taskMeta: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: spacing.sm, flexWrap: 'wrap' },
   tag: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -633,6 +931,19 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(0,217,255,0.3)',
   },
   timeTagText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
+  editBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,217,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,217,255,0.35)',
+  },
   reminderRow: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -706,6 +1017,15 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderColor: colors.border,
   },
+  actionSheet: {
+    backgroundColor: colors.surface,
+    padding: spacing.lg,
+    paddingBottom: spacing.xxl,
+    borderTopLeftRadius: radii.lg,
+    borderTopRightRadius: radii.lg,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
   sheetHandle: {
     alignSelf: 'center',
     width: 40,
@@ -714,8 +1034,87 @@ const styles = StyleSheet.create({
     backgroundColor: colors.borderStrong,
     marginBottom: spacing.md,
   },
-  modalTitle: { color: colors.text, fontSize: 22, fontWeight: '800', marginBottom: spacing.md },
-  inputLabel: { color: colors.textSecondary, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginTop: spacing.md, marginBottom: 6 },
+  sheetTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+    gap: spacing.sm,
+  },
+  sheetTitle: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '800',
+    flex: 1,
+  },
+  lockPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: colors.amber + '18',
+    borderColor: colors.amber + '55',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radii.pill,
+  },
+  lockPillText: {
+    color: colors.amber,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+  },
+  actionGroupLabel: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+    marginTop: spacing.md,
+    marginBottom: 6,
+  },
+  actionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: 12,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.md,
+    backgroundColor: colors.surfaceGlass,
+    marginBottom: 6,
+  },
+  actionItemText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '700',
+    flex: 1,
+  },
+  defaultNote: {
+    color: colors.amber,
+    fontSize: 11,
+    fontWeight: '700',
+    backgroundColor: colors.amber + '12',
+    borderColor: colors.amber + '33',
+    borderWidth: 1,
+    padding: 10,
+    borderRadius: radii.md,
+    marginBottom: spacing.sm,
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  modalTitle: { color: colors.text, fontSize: 22, fontWeight: '800' },
+  inputLabel: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginTop: spacing.md,
+    marginBottom: 6,
+  },
   input: {
     backgroundColor: colors.surfaceGlass,
     borderRadius: radii.md,
@@ -752,4 +1151,3 @@ const styles = StyleSheet.create({
   saveBtn: { backgroundColor: colors.green },
   saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
 });
-

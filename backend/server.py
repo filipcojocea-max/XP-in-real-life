@@ -490,6 +490,14 @@ async def update_task(task_id: str, body: TaskUpdate):
 
 @api_router.delete("/tasks/{task_id}")
 async def delete_task(task_id: str):
+    existing = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Task not found")
+    if existing.get("is_default"):
+        raise HTTPException(
+            400,
+            "Default quests cannot be deleted — you can only edit the title, description, XP and reminder.",
+        )
     res = await db.tasks.delete_one({"id": task_id})
     await db.task_logs.delete_many({"task_id": task_id})
     if res.deleted_count == 0:

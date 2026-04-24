@@ -2,6 +2,7 @@ import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../src/theme';
 import { Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type IconProps = { color: string; size: number };
 
@@ -13,6 +14,13 @@ const ProfileIcon = (p: IconProps) => <Ionicons name="person-circle" {...p} />;
 const LibraryIcon = (p: IconProps) => <Ionicons name="sparkles" {...p} />;
 
 export default function TabsLayout() {
+  const insets = useSafeAreaInsets();
+  // Reserve room for the Android gesture/nav bar (or iOS home indicator).
+  // When the device has no system nav (e.g. buttons), we keep a sensible minimum.
+  const minPad = Platform.OS === 'ios' ? 20 : 8;
+  const bottomPad = Math.max(insets.bottom, minPad);
+  const baseHeight = Platform.OS === 'ios' ? 60 : 58;
+
   return (
     <Tabs
       screenOptions={{
@@ -23,8 +31,8 @@ export default function TabsLayout() {
           backgroundColor: colors.surface,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: Platform.OS === 'ios' ? 88 : 68,
-          paddingBottom: Platform.OS === 'ios' ? 28 : 10,
+          height: baseHeight + bottomPad,
+          paddingBottom: bottomPad,
           paddingTop: 8,
         },
         tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
