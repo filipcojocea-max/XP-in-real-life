@@ -227,6 +227,10 @@ class TaskUpdate(BaseModel):
     reminder_enabled: Optional[bool] = None
 
 
+# Fields that are LOCKED for default (seeded) tasks
+LOCKED_DEFAULT_FIELDS = {"focus_area", "time_slot", "scheduled_time", "recurring"}
+
+
 class GoalCreate(BaseModel):
     title: str
     description: Optional[str] = ""
@@ -466,12 +470,20 @@ async def create_task(body: TaskCreate):
 
 @api_router.put("/tasks/{task_id}")
 async def update_task(task_id: str, body: TaskUpdate):
+    existing = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Task not found")
     update = {k: v for k, v in body.dict().items() if v is not None}
     if not update:
         raise HTTPException(400, "No fields to update")
-    res = await db.tasks.update_one({"id": task_id}, {"$set": update})
-    if res.matched_count == 0:
-        raise HTTPException(404, "Task not found")
+    if existing.get("is_default"):
+        blocked = [k for k in update.keys() if k in LOCKED_DEFAULT_FIELDS]
+        if blocked:
+            raise HTTPException(
+                400,
+                f"Cannot change {', '.join(blocked)} on a default quest — only title, description, XP and reminder are editable.",
+            )
+    await db.tasks.update_one({"id": task_id}, {"$set": update})
     task = await db.tasks.find_one({"id": task_id}, {"_id": 0})
     return task
 
@@ -703,7 +715,7 @@ async def seed_defaults():
     ]
     now = now_iso()
     docs = [
-        {**d, "id": str(uuid.uuid4()), "recurring": True, "reminder_enabled": True, "created_at": now}
+        {**d, "id": str(uuid.uuid4()), "recurring": True, "reminder_enabled": True, "is_default": True, "created_at": now}
         for d in defaults
     ]
     await db.tasks.insert_many(docs)

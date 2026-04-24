@@ -37,6 +37,8 @@ export default function Tasks() {
   const [orderSource, setOrderSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [actionTask, setActionTask] = useState<Task | null>(null);
   const [xpFloater, setXpFloater] = useState<{ value: number } | null>(null);
   const floatAnim = useMemo(() => new Animated.Value(0), []);
 
@@ -103,6 +105,7 @@ export default function Tasks() {
   };
 
   const removeTask = (task: Task) => {
+    setActionTask(null);
     Alert.alert('Delete Quest?', `Remove "${task.title}"?`, [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -115,6 +118,11 @@ export default function Tasks() {
         },
       },
     ]);
+  };
+
+  const openActions = (task: Task) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    setActionTask(task);
   };
 
   const grouped = useMemo(() => {
@@ -187,7 +195,7 @@ export default function Tasks() {
                   <Pressable
                     key={t.id}
                     testID={`task-row-${t.id}`}
-                    onLongPress={() => removeTask(t)}
+                    onLongPress={() => openActions(t)}
                     onPress={() => toggle(t)}
                     style={({ pressed }) => [styles.taskRow, pressed && { opacity: 0.85 }]}
                   >
@@ -266,7 +274,7 @@ export default function Tasks() {
           );
         })}
 
-        <Text style={styles.hint}>Tip: long-press a quest to delete it.</Text>
+        <Text style={styles.hint}>Tip: long-press a quest to edit or delete it.</Text>
       </ScrollView>
 
       <TouchableOpacity
@@ -670,6 +678,81 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.7,
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 0 },
+    elevation: 10,
+  },
+
+  xpFloater: {
+    position: 'absolute',
+    top: '45%',
+    alignSelf: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    backgroundColor: colors.amber,
+  },
+  xpFloaterText: { color: colors.bg, fontSize: 20, fontWeight: '900', letterSpacing: 1 },
+
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: colors.surface,
+    padding: spacing.lg,
+    paddingBottom: spacing.xxl,
+    borderTopLeftRadius: radii.lg,
+    borderTopRightRadius: radii.lg,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.borderStrong,
+    marginBottom: spacing.md,
+  },
+  modalTitle: { color: colors.text, fontSize: 22, fontWeight: '800', marginBottom: spacing.md },
+  inputLabel: { color: colors.textSecondary, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginTop: spacing.md, marginBottom: 6 },
+  input: {
+    backgroundColor: colors.surfaceGlass,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 12,
+    color: colors.text,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  chipActive: { backgroundColor: colors.green, borderColor: colors.green },
+  chipText: { color: colors.textSecondary, fontSize: 13, fontWeight: '700' },
+  chipTextActive: { color: colors.bg },
+  actionBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: radii.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelBtn: { backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border },
+  cancelText: { color: colors.textSecondary, fontWeight: '700' },
+  saveBtn: { backgroundColor: colors.green },
+  saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
+});
+ffset: { width: 0, height: 0 },
     elevation: 10,
   },
 

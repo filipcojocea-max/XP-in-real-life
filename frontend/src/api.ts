@@ -45,6 +45,7 @@ export type Task = {
   recurring: boolean;
   scheduled_time?: string | null;
   reminder_enabled?: boolean;
+  is_default?: boolean;
   completed?: boolean;
   created_at: string;
 };
