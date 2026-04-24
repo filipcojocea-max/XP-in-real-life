@@ -1,22 +1,39 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
-    "version": "1.0.0",
+    "name": "XP in Real Life",
+    "slug": "xp-confidence",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "scheme": "xpconfidence",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "app.emergent.xpconfidencec2316dfc",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
+        "NSCameraUsageDescription": "Take a profile photo to personalize your account",
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "app.emergent.xpconfidencec2316dfc",
+      "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#000"
+        "backgroundColor": "#000000"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "android.permission.READ_MEDIA_IMAGES"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -28,16 +45,35 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
+          "image": "./assets/images/splash-image.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#000"
+          "backgroundColor": "#000000"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#00FF88"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Upload a profile photo to personalize your account",
+          "cameraPermission": "Take a profile photo to personalize your account"
         }
       ],
       "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "01d15a73-3ec3-4943-b480-c44fedeb05c1"
+      }
+    },
+    "owner": "emergent"
   }
 }
