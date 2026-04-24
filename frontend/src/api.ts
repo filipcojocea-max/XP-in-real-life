@@ -83,6 +83,23 @@ export type DailyStats = {
 
 export type WeeklyStats = { days: { date: string; day: string; xp: number; tasks: number }[] };
 
+export type OnboardingPayload = {
+  name?: string;
+  main_goals?: string[];
+  experience_level?: string;
+  productivity_score?: number;
+  loves?: string[];
+  loves_other?: string;
+  focused_time?: string;
+  focused_window?: string;
+  good_habits?: string[];
+  good_habits_other?: string;
+  bad_habits?: string[];
+  bad_habits_other?: string;
+  age_range?: string;
+  gender?: string;
+};
+
 export const api = {
   getProfile: () => req<Profile>('/profile'),
   updateProfile: (name: string) =>
