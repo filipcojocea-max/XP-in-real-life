@@ -1,244 +1,343 @@
 """
-Backend tests for the Sleep Coach mini-app endpoints.
-Tests run against the public ingress URL.
+Backend test suite for the new auth + per-user data isolation system.
+Tests against the public ingress URL.
 """
+import os
 import sys
+import time
+import uuid
+import json
 import requests
 
 BASE = "https://xp-confidence.preview.emergentagent.com/api"
 
-PASS = []
-FAIL = []
+# Use unique emails per run to avoid clashing with existing accounts
+RUN_ID = uuid.uuid4().hex[:8]
+CAROL_EMAIL = f"carol+{RUN_ID}@test.com"
+DAN_EMAIL = f"dan+{RUN_ID}@test.com"
+ED_EMAIL = f"ed+{RUN_ID}@test.com"
+
+results = []  # list of (name, ok, msg)
 
 
-def ok(name, detail=""):
-    PASS.append(name)
-    print(f"PASS  {name}  {detail}")
+def record(name, ok, msg=""):
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name}{(' — ' + msg) if msg else ''}")
+    results.append((name, ok, msg))
+    return ok
 
 
-def fail(name, detail=""):
-    FAIL.append((name, detail))
-    print(f"FAIL  {name}  {detail}")
-
-
-def section(title):
-    print("\n" + "=" * 70)
-    print(title)
-    print("=" * 70)
-
-
-def assert_true(cond, name, detail=""):
-    if cond:
-        ok(name, detail)
-    else:
-        fail(name, detail)
-    return cond
+def auth_headers(token):
+    return {"Authorization": f"Bearer {token}"}
 
 
 def main():
-    section("0. Reset sleep state")
-    r = requests.post(f"{BASE}/sleep/reset", timeout=30)
-    assert_true(r.status_code == 200, "POST /sleep/reset returns 200", str(r.status_code))
-    assert_true(r.json().get("reset") is True, "reset payload contains reset:true", str(r.json()))
+    s = requests.Session()
+    s.headers.update({"Content-Type": "application/json"})
 
-    section("1. GET /sleep/profile (not onboarded)")
-    r = requests.get(f"{BASE}/sleep/profile", timeout=30)
-    assert_true(r.status_code == 200, "GET /sleep/profile returns 200", str(r.status_code))
-    j = r.json()
-    assert_true(j.get("onboarded") is False, "onboarded == false", str(j.get("onboarded")))
-    qs = j.get("questions") or []
-    assert_true(isinstance(qs, list) and len(qs) == 19,
-                f"questions array has 19 items (got {len(qs)})")
-    types_seen = set()
-    schema_ok = True
-    for q in qs:
-        if not all(k in q for k in ("id", "type", "q")):
-            schema_ok = False
-            fail("question schema (id/type/q)", str(q))
+    # ================================================================
+    # 1. Register Carol — expect 200 + dev_code, no token
+    # ================================================================
+    r = s.post(f"{BASE}/auth/register", json={
+        "full_name": "Carol",
+        "email": CAROL_EMAIL,
+        "password": "pass1",
+    })
+    body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    ok = r.status_code == 200 and "dev_code" in body and "token" not in body
+    record("1. Register Carol returns dev_code, no token", ok,
+           f"status={r.status_code}, body_keys={list(body.keys())}")
+    if not ok:
+        print("Cannot continue without registration; aborting"); print(body); sys.exit(1)
+    carol_dev_code = body["dev_code"]
+
+    # ================================================================
+    # 2. Verify with wrong code — expect 400
+    # ================================================================
+    r = s.post(f"{BASE}/auth/verify", json={"email": CAROL_EMAIL, "code": "000000"})
+    record("2. Verify with wrong code returns 400", r.status_code == 400,
+           f"status={r.status_code}, body={r.text[:160]}")
+
+    # ================================================================
+    # 3. Verify with correct code — expect 200, token + user
+    # ================================================================
+    r = s.post(f"{BASE}/auth/verify", json={"email": CAROL_EMAIL, "code": carol_dev_code})
+    body = r.json() if r.ok else {}
+    ok = (r.status_code == 200 and "token" in body and "user" in body
+          and body["user"].get("email") == CAROL_EMAIL.lower())
+    record("3. Verify with correct code returns 200 + token + user", ok,
+           f"status={r.status_code}, body={list(body.keys()) if body else r.text[:200]}")
+    if not ok:
+        print("Cannot continue without token; aborting"); sys.exit(1)
+    carol_token = body["token"]
+    carol_user_id = body["user"]["id"]
+
+    # ================================================================
+    # 4. Auth/me with token — expect 200 with user details
+    # ================================================================
+    r = s.get(f"{BASE}/auth/me", headers=auth_headers(carol_token))
+    body = r.json() if r.ok else {}
+    ok = (r.status_code == 200 and body.get("email") == CAROL_EMAIL.lower()
+          and body.get("verified") is True and body.get("full_name") == "Carol")
+    record("4. GET /auth/me with token returns user details", ok,
+           f"status={r.status_code}, body={body if body else r.text[:200]}")
+
+    # ================================================================
+    # 5. Auth/me without token — expect 401
+    # ================================================================
+    r = s.get(f"{BASE}/auth/me")
+    record("5. GET /auth/me without token returns 401", r.status_code == 401,
+           f"status={r.status_code}, body={r.text[:160]}")
+
+    # ================================================================
+    # 6. Login Carol — expect 200 with token
+    # ================================================================
+    r = s.post(f"{BASE}/auth/login", json={"email": CAROL_EMAIL, "password": "pass1"})
+    body = r.json() if r.ok else {}
+    ok = r.status_code == 200 and "token" in body and "user" in body
+    record("6. Login with correct credentials returns token", ok,
+           f"status={r.status_code}, keys={list(body.keys()) if body else r.text[:200]}")
+    if ok:
+        carol_token = body["token"]  # use fresh token
+
+    # ================================================================
+    # 7. Login wrong password — expect 401
+    # ================================================================
+    r = s.post(f"{BASE}/auth/login", json={"email": CAROL_EMAIL, "password": "wrongpw"})
+    record("7. Login with wrong password returns 401", r.status_code == 401,
+           f"status={r.status_code}, body={r.text[:160]}")
+
+    # ================================================================
+    # 8. Per-user task isolation
+    # ================================================================
+    # Register + verify Dan
+    r = s.post(f"{BASE}/auth/register", json={
+        "full_name": "Dan",
+        "email": DAN_EMAIL,
+        "password": "pass2",
+    })
+    body = r.json()
+    if "dev_code" not in body:
+        record("8a. Register Dan", False, f"status={r.status_code}, body={body}")
+        sys.exit(1)
+    dan_dev_code = body["dev_code"]
+    r = s.post(f"{BASE}/auth/verify", json={"email": DAN_EMAIL, "code": dan_dev_code})
+    body = r.json()
+    if "token" not in body:
+        record("8b. Verify Dan", False, f"status={r.status_code}, body={body}")
+        sys.exit(1)
+    dan_token = body["token"]
+    record("8a-b. Register + verify Dan", True, "")
+
+    # Carol completes one task (a default)
+    r = s.get(f"{BASE}/tasks", headers=auth_headers(carol_token))
+    tasks_data = r.json()
+    carol_tasks = tasks_data.get("tasks", [])
+    if len(carol_tasks) < 8:
+        record("8c. Carol has 8 default tasks seeded", False,
+               f"got {len(carol_tasks)} tasks")
+    else:
+        record("8c. Carol has 8 default tasks seeded", True, f"{len(carol_tasks)} tasks")
+
+    task_a = carol_tasks[0]
+    r = s.post(f"{BASE}/tasks/{task_a['id']}/complete",
+               headers=auth_headers(carol_token), json={})
+    ok_complete = r.status_code == 200
+    record("8d. Carol completes task A", ok_complete,
+           f"status={r.status_code}, body={r.text[:200]}")
+
+    # Carol's profile XP > 0
+    r = s.get(f"{BASE}/profile", headers=auth_headers(carol_token))
+    carol_prof = r.json()
+    record("8e. Carol's profile XP > 0", carol_prof.get("total_xp", 0) > 0,
+           f"xp={carol_prof.get('total_xp')}")
+
+    # Dan's profile XP == 0
+    r = s.get(f"{BASE}/profile", headers=auth_headers(dan_token))
+    dan_prof = r.json()
+    record("8f. Dan's profile XP == 0 (isolation)", dan_prof.get("total_xp", -1) == 0,
+           f"xp={dan_prof.get('total_xp')}")
+
+    # Bonus: Dan's task list shouldn't contain Carol's completed task
+    r = s.get(f"{BASE}/tasks", headers=auth_headers(dan_token))
+    dan_tasks = r.json().get("tasks", [])
+    carol_task_ids = {t["id"] for t in carol_tasks}
+    dan_task_ids = {t["id"] for t in dan_tasks}
+    record("8g. Dan's task ids disjoint from Carol's", carol_task_ids.isdisjoint(dan_task_ids),
+           f"overlap={carol_task_ids & dan_task_ids}")
+
+    # ================================================================
+    # 9. 11-task limit for Dan
+    # ================================================================
+    creates = []
+    fail_at = None
+    for i in range(11):
+        r = s.post(f"{BASE}/tasks", headers=auth_headers(dan_token), json={
+            "title": f"Custom quest {i+1}",
+            "description": "test",
+            "focus_area": "fitness",
+            "time_slot": "morning",
+            "xp_value": 20,
+        })
+        if r.status_code != 200:
+            fail_at = (i + 1, r.status_code, r.text[:200])
             break
-        types_seen.add(q["type"])
-    if schema_ok:
-        ok("each question has id/type/q")
-    expected_types = {"scale", "time", "single", "multi", "text"}
-    assert_true(expected_types.issubset(types_seen),
-                "all expected question types present", str(types_seen))
+        creates.append(r.json())
+    if fail_at:
+        record("9a. Dan can create 11 custom tasks", False,
+               f"failed at #{fail_at[0]}: status={fail_at[1]}, body={fail_at[2]}")
+    else:
+        record("9a. Dan can create 11 custom tasks", True, f"created {len(creates)}")
 
-    section("2. POST /sleep/onboarding")
-    answers = {
+    # 12th should fail with 400
+    r = s.post(f"{BASE}/tasks", headers=auth_headers(dan_token), json={
+        "title": "Custom quest 12",
+        "description": "test",
+        "focus_area": "fitness",
+        "time_slot": "morning",
+        "xp_value": 20,
+    })
+    body_text = r.text
+    ok = r.status_code == 400 and ("11-quest" in body_text or "11" in body_text)
+    record("9b. 12th custom task returns 400 with 11-quest message", ok,
+           f"status={r.status_code}, body={body_text[:240]}")
+
+    # ================================================================
+    # 10. Once-per-day uncomplete blocked for Carol
+    # ================================================================
+    r = s.post(f"{BASE}/tasks/{task_a['id']}/uncomplete",
+               headers=auth_headers(carol_token), json={})
+    body_text = r.text
+    ok = r.status_code == 400 and ("once per day" in body_text.lower()
+                                    or "once a day" in body_text.lower()
+                                    or "completed once" in body_text.lower())
+    record("10. Uncomplete returns 400 with once-per-day message", ok,
+           f"status={r.status_code}, body={body_text[:240]}")
+
+    # ================================================================
+    # 11. Default task delete blocked for Carol
+    # ================================================================
+    # Find a default task in Carol's list
+    default_task = None
+    for t in carol_tasks:
+        if t.get("is_default"):
+            default_task = t
+            break
+    if not default_task:
+        record("11. Default task delete returns 400", False,
+               "No default task found in Carol's list")
+    else:
+        r = s.delete(f"{BASE}/tasks/{default_task['id']}",
+                     headers=auth_headers(carol_token))
+        ok = r.status_code == 400 and "default" in r.text.lower()
+        record("11. Default task delete returns 400", ok,
+               f"status={r.status_code}, body={r.text[:240]}")
+
+    # ================================================================
+    # 12. Wake-time setter
+    # ================================================================
+    r = s.put(f"{BASE}/profile", headers=auth_headers(carol_token),
+              json={"wake_time": "06:30"})
+    ok_put = r.status_code == 200 and r.json().get("wake_time") == "06:30"
+    record("12a. PUT /profile {wake_time:'06:30'}", ok_put,
+           f"status={r.status_code}, wake_time={r.json().get('wake_time') if r.ok else r.text[:160]}")
+    r = s.get(f"{BASE}/profile", headers=auth_headers(carol_token))
+    ok_get = r.status_code == 200 and r.json().get("wake_time") == "06:30"
+    record("12b. GET /profile shows wake_time='06:30'", ok_get,
+           f"status={r.status_code}, wake_time={r.json().get('wake_time') if r.ok else r.text[:160]}")
+
+    # ================================================================
+    # 13. Custom date list_tasks
+    # ================================================================
+    r = s.get(f"{BASE}/tasks?date=2026-04-25", headers=auth_headers(carol_token))
+    body = r.json() if r.ok else {}
+    ok = (r.status_code == 200 and "tasks" in body
+          and isinstance(body["tasks"], list) and body.get("date") == "2026-04-25")
+    record("13. GET /tasks?date=2026-04-25 returns tasks list", ok,
+           f"status={r.status_code}, keys={list(body.keys()) if body else r.text[:200]}")
+
+    # ================================================================
+    # 14. Resend verification
+    # ================================================================
+    r = s.post(f"{BASE}/auth/register", json={
+        "full_name": "Ed",
+        "email": ED_EMAIL,
+        "password": "pass3",
+    })
+    body = r.json()
+    ok_reg = r.status_code == 200 and "dev_code" in body
+    record("14a. Register Ed returns dev_code", ok_reg,
+           f"status={r.status_code}, body_keys={list(body.keys())}")
+    first_code = body.get("dev_code")
+    r = s.post(f"{BASE}/auth/resend", json={"email": ED_EMAIL})
+    body = r.json() if r.ok else {}
+    ok = r.status_code == 200 and "dev_code" in body
+    record("14b. POST /auth/resend returns new dev_code", ok,
+           f"status={r.status_code}, body={body if body else r.text[:200]}")
+    if ok:
+        record("14c. Resent dev_code is fresh (may differ from initial)",
+               True,  # we don't strictly assert difference; codes are random and could collide rarely
+               f"first={first_code}, resent={body.get('dev_code')}")
+
+    # ================================================================
+    # 15. Sleep coach per-user isolation
+    # ================================================================
+    sample_answers = {
         "struggle_level": 7,
         "avg_hours": 6,
-        "bedtime": "11:30 PM",
-        "wake_time": "7:00 AM",
+        "bedtime": "23:30",
+        "wake_time": "06:30",
         "wakes_at_night": "Sometimes",
         "racing_thoughts": "Often",
-        "screens_before_bed": "In bed",
+        "screens_before_bed": "Right up to bed",
         "caffeine_cutoff": "Before 6pm",
         "alcohol": "Occasionally",
         "exercise": "A few times/week",
         "exercise_time": "Evening",
-        "room_temp": "Comfortable",
+        "room_temp": "Warm",
         "room_dark": "Some light",
         "noise": "Some noise",
-        "relaxing_activities": ["Reading", "Stretching", "Tea"],
-        "likes_milk": "Love it",
-        "warm_drinks": ["Chamomile tea", "Warm milk"],
-        "tried_before": "Melatonin worked briefly",
+        "relaxing_activities": ["Reading", "Breathing exercises"],
+        "likes_milk": "It's okay",
+        "warm_drinks": ["Chamomile tea"],
+        "tried_before": "Tried melatonin briefly, didn't help much.",
         "main_goal": "Fall asleep faster",
     }
-    r = requests.post(f"{BASE}/sleep/onboarding", json={"answers": answers}, timeout=120)
-    assert_true(r.status_code == 200, "POST /sleep/onboarding returns 200", str(r.status_code))
-    j = r.json()
-    profile = j.get("profile") or {}
-    plan = profile.get("plan", "")
-    routine = profile.get("routine", [])
-    assert_true(isinstance(plan, str) and len(plan) > 100,
-                f"plan is non-empty string > 100 chars (len={len(plan)})")
-    assert_true(isinstance(routine, list) and len(routine) >= 4,
-                f"routine has >= 4 items (got {len(routine)})")
-    if routine:
-        first = routine[0]
-        keys_ok = all(k in first for k in ("time", "title", "description", "icon"))
-        assert_true(keys_ok, "routine items have time/title/description/icon", str(first))
-    assert_true(profile.get("check_ins") == [], "check_ins initialized empty",
-                str(profile.get("check_ins")))
-    assert_true(profile.get("answers", {}).get("main_goal") == "Fall asleep faster",
-                "answers persisted")
-    print(f"     plan preview: {plan[:200]}…")
+    r = s.post(f"{BASE}/sleep/onboarding", headers=auth_headers(carol_token),
+               json={"answers": sample_answers}, timeout=60)
+    ok_onb = r.status_code == 200
+    record("15a. Carol completes /sleep/onboarding", ok_onb,
+           f"status={r.status_code}, body={r.text[:200] if not ok_onb else 'ok'}")
 
-    section("3. GET /sleep/profile (after onboarding)")
-    r = requests.get(f"{BASE}/sleep/profile", timeout=30)
-    assert_true(r.status_code == 200, "GET /sleep/profile returns 200")
-    j = r.json()
-    assert_true(j.get("onboarded") is True, "onboarded == true after onboarding")
-    assert_true(isinstance(j.get("profile"), dict), "profile object present")
-    assert_true(isinstance(j.get("questions"), list) and len(j["questions"]) == 19,
-                "questions array still returned (19)")
-    assert_true(j.get("show_checkin_prompt") is True,
-                "show_checkin_prompt is true (no check-in today yet)",
-                str(j.get("show_checkin_prompt")))
+    # Dan's sleep profile should still be onboarded:false
+    r = s.get(f"{BASE}/sleep/profile", headers=auth_headers(dan_token))
+    body = r.json() if r.ok else {}
+    ok = r.status_code == 200 and body.get("onboarded") is False
+    record("15b. Dan's /sleep/profile returns onboarded:false (per-user isolation)", ok,
+           f"status={r.status_code}, onboarded={body.get('onboarded') if body else r.text[:200]}")
 
-    section("4. POST /sleep/checkin")
-    r = requests.post(f"{BASE}/sleep/checkin",
-                     json={"rating": 8, "hours": 7.5, "notes": "Slept well"},
-                     timeout=30)
-    assert_true(r.status_code == 200, "POST /sleep/checkin returns 200", str(r.status_code))
-    j = r.json()
-    assert_true(j.get("saved") is True, "saved == true")
-    entry = j.get("entry") or {}
-    for k in ("date", "rating", "hours", "notes", "ts"):
-        assert_true(k in entry, f"entry has '{k}' key")
-    assert_true(entry.get("rating") == 8, "entry.rating == 8")
-    assert_true(entry.get("hours") == 7.5, "entry.hours == 7.5")
+    # And Carol's should be onboarded:true
+    r = s.get(f"{BASE}/sleep/profile", headers=auth_headers(carol_token))
+    body = r.json() if r.ok else {}
+    ok = r.status_code == 200 and body.get("onboarded") is True
+    record("15c. Carol's /sleep/profile returns onboarded:true", ok,
+           f"status={r.status_code}, onboarded={body.get('onboarded') if body else r.text[:200]}")
 
-    r = requests.get(f"{BASE}/sleep/profile", timeout=30)
-    j = r.json()
-    cis = (j.get("profile") or {}).get("check_ins", [])
-    assert_true(len(cis) == 1, f"check_ins length == 1 (got {len(cis)})")
-    assert_true(j.get("show_checkin_prompt") is False,
-                "show_checkin_prompt is false after check-in",
-                str(j.get("show_checkin_prompt")))
-
-    section("5. POST /sleep/chat (first message)")
-    r = requests.post(f"{BASE}/sleep/chat",
-                     json={"message": "What if I can't fall asleep tonight?"},
-                     timeout=120)
-    assert_true(r.status_code == 200, "POST /sleep/chat returns 200", str(r.status_code))
-    j = r.json()
-    user = j.get("user") or {}
-    asst = j.get("assistant") or {}
-    assert_true(user.get("role") == "user", f"user.role == 'user' (got {user.get('role')})")
-    assert_true(bool(user.get("content")), "user.content non-empty")
-    assert_true(asst.get("role") == "assistant",
-                f"assistant.role == 'assistant' (got {asst.get('role')})")
-    asst_content = asst.get("content", "")
-    assert_true(len(asst_content) >= 50,
-                f"assistant.content is helpful (>= 50 chars, got {len(asst_content)})")
-    if "hiccup connecting" in asst_content.lower() or "llm key not configured" in asst_content.lower():
-        fail("LLM responded successfully (not a fallback error message)", asst_content[:200])
-    else:
-        ok("assistant content does not look like LLM fallback error")
-    print(f"     assistant preview: {asst_content[:200]}…")
-
-    section("6. GET /sleep/chat (history with 2 msgs)")
-    r = requests.get(f"{BASE}/sleep/chat", timeout=30)
-    assert_true(r.status_code == 200, "GET /sleep/chat returns 200")
-    msgs = (r.json() or {}).get("messages") or []
-    assert_true(len(msgs) == 2, f"history has 2 messages (got {len(msgs)})")
-    if len(msgs) == 2:
-        assert_true(msgs[0]["role"] == "user" and msgs[1]["role"] == "assistant",
-                    "messages ordered user→assistant")
-
-    section("7. POST /sleep/chat (second turn) + history grows to 4")
-    r = requests.post(f"{BASE}/sleep/chat",
-                     json={"message": "Should I take a nap?"},
-                     timeout=120)
-    assert_true(r.status_code == 200, "POST /sleep/chat (turn 2) returns 200")
-    j = r.json()
-    asst2 = (j.get("assistant") or {}).get("content", "")
-    assert_true(len(asst2) >= 30, f"second assistant reply non-empty (got {len(asst2)})")
-    print(f"     assistant preview: {asst2[:200]}…")
-    r = requests.get(f"{BASE}/sleep/chat", timeout=30)
-    msgs = (r.json() or {}).get("messages") or []
-    assert_true(len(msgs) == 4, f"history has 4 messages (got {len(msgs)})")
-
-    section("8. POST /sleep/regenerate")
-    r = requests.get(f"{BASE}/sleep/profile", timeout=30)
-    pre = (r.json() or {}).get("profile") or {}
-    pre_plan = pre.get("plan", "")
-    pre_routine_len = len(pre.get("routine", []))
-
-    r = requests.post(f"{BASE}/sleep/regenerate",
-                     json={"message": "milk gives me indigestion, find an alternative"},
-                     timeout=120)
-    assert_true(r.status_code == 200, "POST /sleep/regenerate returns 200", str(r.status_code))
-    j = r.json()
-    profile2 = j.get("profile") or {}
-    new_plan = profile2.get("plan", "")
-    new_routine = profile2.get("routine", [])
-    assert_true(isinstance(new_plan, str) and len(new_plan) > 100,
-                f"regenerated plan non-empty (len={len(new_plan)})")
-    assert_true(isinstance(new_routine, list) and len(new_routine) >= 4,
-                f"regenerated routine has >= 4 items (got {len(new_routine)})")
-    print(f"     plan changed: {new_plan != pre_plan}")
-    print(f"     pre routine len={pre_routine_len}, new routine len={len(new_routine)}")
-    cis2 = profile2.get("check_ins", [])
-    assert_true(len(cis2) == 1, f"check_ins preserved after regenerate (got {len(cis2)})")
-
-    section("9. GET /sleep/health-mock")
-    r = requests.get(f"{BASE}/sleep/health-mock", timeout=30)
-    assert_true(r.status_code == 200, "GET /sleep/health-mock returns 200")
-    j = r.json()
-    assert_true(j.get("connected") is False, "connected == false")
-    assert_true(j.get("source") == "Simulated data",
-                f"source == 'Simulated data' (got {j.get('source')})")
-    nights = j.get("nights") or []
-    assert_true(len(nights) == 7, f"nights has 7 entries (got {len(nights)})")
-    if nights:
-        first = nights[0]
-        for k in ("date", "day", "total_hours", "deep_hours", "rem_hours", "light_hours", "score"):
-            assert_true(k in first, f"night entry has '{k}'")
-    for k in ("avg_total_hours", "avg_score", "best_night", "worst_night"):
-        assert_true(k in j, f"top-level field '{k}' present")
-
-    section("10. POST /sleep/reset")
-    r = requests.post(f"{BASE}/sleep/reset", timeout=30)
-    assert_true(r.status_code == 200, "POST /sleep/reset returns 200")
-    r = requests.get(f"{BASE}/sleep/profile", timeout=30)
-    j = r.json()
-    assert_true(j.get("onboarded") is False, "onboarded == false after reset",
-                str(j.get("onboarded")))
-    r = requests.get(f"{BASE}/sleep/chat", timeout=30)
-    msgs = (r.json() or {}).get("messages") or []
-    assert_true(len(msgs) == 0, f"chat cleared after reset (got {len(msgs)})")
-
-    section("RESULTS")
-    print(f"PASSED: {len(PASS)}")
-    print(f"FAILED: {len(FAIL)}")
-    if FAIL:
-        for n, d in FAIL:
-            print(f" - {n}: {d}")
-        sys.exit(1)
+    # ================================================================
+    # SUMMARY
+    # ================================================================
+    print("\n" + "=" * 60)
+    passed = sum(1 for _, ok, _ in results if ok)
+    total = len(results)
+    print(f"RESULT: {passed}/{total} assertions passed")
+    print("=" * 60)
+    failed = [(n, m) for n, ok, m in results if not ok]
+    if failed:
+        print("\nFAILED:")
+        for n, m in failed:
+            print(f"  - {n}: {m}")
+    return 0 if not failed else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

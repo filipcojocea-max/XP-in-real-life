@@ -1,12 +1,22 @@
 import type { FocusArea, TimeSlot } from './theme';
+import { getAuthToken, fireUnauthorized } from './AuthContext';
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 
 async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE}/api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  });
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((opts.headers as Record<string, string>) || {}),
+  };
+  const token = getAuthToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${BASE}/api${path}`, { ...opts, headers });
+  if (res.status === 401) {
+    // Token expired/invalid → drop session
+    fireUnauthorized();
+    const text = await res.text().catch(() => '');
+    throw new Error(`Session expired — please sign in again. ${text}`);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`API ${res.status}: ${text || path}`);
@@ -33,7 +43,34 @@ export type Profile = {
   onboarding: Record<string, any>;
   bio: string;
   avatar_base64: string | null;
+  wake_time?: string;
 };
+
+/**
+ * Compute the user's "current day" date string (YYYY-MM-DD) based on local time
+ * and their wake-up time. The day rolls over 2 hours BEFORE wake-time.
+ *
+ *   wake_time = "07:00" → boundary = 05:00. Before 5 AM = yesterday's day.
+ */
+export function userDate(wake_time: string = '07:00'): string {
+  const [wh = 7, wm = 0] = wake_time.split(':').map((x) => parseInt(x, 10));
+  // boundary = wake_time - 2 hours (handle wrap)
+  let bh = wh - 2;
+  let bm = wm;
+  if (bh < 0) bh += 24;
+  const now = new Date();
+  const beforeBoundary =
+    now.getHours() < bh || (now.getHours() === bh && now.getMinutes() < bm);
+  const d = new Date(now);
+  if (beforeBoundary) {
+    d.setDate(d.getDate() - 1);
+  }
+  // Format as YYYY-MM-DD in local time (not UTC)
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 export type Task = {
   id: string;
@@ -101,9 +138,33 @@ export type OnboardingPayload = {
 };
 
 export const api = {
+  // Auth
+  authRegister: (full_name: string, email: string, password: string) =>
+    req<{ message: string; email: string; dev_code?: string }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ full_name, email, password }),
+    }),
+  authVerify: (email: string, code: string) =>
+    req<{ token: string; user: { id: string; full_name: string; email: string; verified: boolean } }>('/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    }),
+  authLogin: (email: string, password: string) =>
+    req<any>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  authResend: (email: string) =>
+    req<{ message: string; dev_code?: string }>('/auth/resend', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+  authMe: () => req<{ id: string; full_name: string; email: string; verified: boolean }>('/auth/me'),
   getProfile: () => req<Profile>('/profile'),
   updateProfile: (name: string) =>
     req<Profile>('/profile', { method: 'PUT', body: JSON.stringify({ name }) }),
+  updateWakeTime: (wake_time: string) =>
+    req<Profile>('/profile', { method: 'PUT', body: JSON.stringify({ wake_time }) }),
   resetProfile: () => req<Profile>('/profile/reset', { method: 'POST' }),
   completeOnboarding: (payload: OnboardingPayload) =>
     req<Profile>('/profile/onboarding', { method: 'PUT', body: JSON.stringify(payload) }),

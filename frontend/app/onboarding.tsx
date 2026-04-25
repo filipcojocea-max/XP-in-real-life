@@ -54,8 +54,8 @@ const LOVES_OPTS = ['Walking', 'Running', 'Reading', 'Gaming', 'Cooking', 'Music
 const TIME_OPTS = ['Twilight', 'Morning', 'Midday', 'Afternoon', 'Evening', 'Night', 'Midnight'];
 const GOOD_OPTS = ['Good Sleep', 'Walking', 'Exercising', 'Reading', 'Journaling', 'Meditation', 'Eating Healthy', 'Drinking Water', 'Waking Up Early'];
 const BAD_OPTS = ['Too Much Video Games', 'Scrolling Social Media', 'Staying Up Late', 'Junk Food', 'Procrastinating', 'Skipping Workouts', 'Smoking'];
-const AGE_OPTS = ['12-16', '17-20', '21-25', '25-30', '31-40', '41+'];
-const GENDER_OPTS = ['Boy', 'Girl', 'Other'];
+const AGE_OPTS = ['10-14', '15-17', '18-20', '21-25', '25+'];
+const GENDER_OPTS = ['Male', 'Female'];
 
 export default function Onboarding() {
   const router = useRouter();

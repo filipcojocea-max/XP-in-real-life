@@ -102,9 +102,21 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Test the new Sleep Coach mini-app backend endpoints (FastAPI + MongoDB + emergentintegrations LLM via gpt-4o-mini): GET/POST /api/sleep/profile, /api/sleep/onboarding, /api/sleep/checkin, /api/sleep/chat (GET+POST multi-turn), /api/sleep/regenerate, /api/sleep/health-mock, /api/sleep/reset."
+user_problem_statement: "Test the new auth + per-user data isolation system on http://localhost:8001/api. Email/password auth with JWT (TTL=365d), email verification (6-digit code, dev_code returned in dev mode), per-user data scoping via Depends(get_user_or_legacy), 11 custom-task limit per user, once-per-day uncomplete blocked, default-task delete blocked, wake_time setter, custom-date tasks listing, sleep-coach per-user isolation."
 
 backend:
+  - task: "Auth + per-user data isolation (register/verify/login/me/resend, JWT, scoped tasks/profile/sleep, 11-task limit, uncomplete blocked, default-delete blocked, wake_time, custom-date tasks)"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "testing"
+          comment: "Ran full auth + isolation suite via /app/backend_test.py against https://xp-confidence.preview.emergentagent.com/api. 25/26 assertions PASS, 1 CRITICAL FAIL. PASSING: (1) register returns dev_code (no token); (2) verify with wrong code → 400 'Wrong code. Please try again.'; (3) verify with correct dev_code → 200 with token+user; (4) GET /auth/me with Bearer → 200 returns full_name/email/verified=true; (5) GET /auth/me without auth → 401 'Not authenticated'; (6) login with correct creds → 200 with fresh token; (7) login with wrong pw → 401 'Wrong email or password.'; (8) per-user task isolation verified — Carol completed a default task and her profile XP=15 while a freshly-registered Dan has XP=0 and disjoint task ids; (9b) 12th custom task POST returns 400 with the expected 11-quest message; (10) /tasks/{id}/uncomplete returns 400 with once-per-day message; (11) DELETE on a default task returns 400 'Default quests cannot be deleted'; (12) PUT /profile {wake_time:'06:30'} succeeds and GET /profile reflects wake_time='06:30'; (13) GET /tasks?date=2026-04-25 returns 200 with date+tasks list; (14) /auth/resend returns a new dev_code for an unverified user; (15) Carol completes /sleep/onboarding while Dan's /sleep/profile still returns {onboarded:false} confirming sleep is per-user. ❌ CRITICAL FAIL — 11-task limit is NOT user-scoped: in /app/backend/server.py line ~746 `create_task` does `db.tasks.count_documents({\"is_default\": {\"$ne\": True}})` with NO user_id filter. As a result, once any user (or pre-existing legacy data) has ≥11 non-default tasks anywhere in the DB, NO user can create even a single custom task. Dan's #1 custom task POST already returned 400 'You\\'ve hit the 11-quest limit.' because the global custom-task collection already contained ≥11 docs (from earlier tests). FIX: change to `db.tasks.count_documents({\"user_id\": user_id, \"is_default\": {\"$ne\": True}})`. This breaks the per-user isolation contract and is blocking every newly-registered user from creating quests."
+
   - task: "Tasks API — default vs custom update/delete rules"
     implemented: true
     working: true
@@ -136,7 +148,8 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Auth + per-user data isolation (register/verify/login/me/resend, JWT, scoped tasks/profile/sleep, 11-task limit, uncomplete blocked, default-delete blocked, wake_time, custom-date tasks)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -145,4 +158,4 @@ agent_communication:
     - agent: "testing"
       message: "Ran full backend test suite for the updated Tasks API (/app/backend_test.py). All 12 assertions pass against the public ingress URL. Note: the pre-existing Mongo `tasks` collection had items seeded before the `is_default` migration, so the test resets & re-seeds to obtain properly tagged defaults. If the main agent wants default tasks to persist for end users without requiring a reset, consider a one-time migration that marks existing seeded titles as is_default=true, or change POST /api/seed to upsert the flag on legacy docs. Functionality itself (LOCKED_DEFAULT_FIELDS + delete protection + custom-task full edit/move/delete) is correct."
     - agent: "testing"
-      message: "Sleep Coach backend tested end-to-end against https://xp-confidence.preview.emergentagent.com/api. /app/backend_test.py was overwritten with a 10-section sleep suite. EMERGENT_LLM_KEY is configured and the LLM (gpt-4o-mini) responds successfully — no fallback paths were exercised. 63/63 assertions PASS: questions list (19, all types present), onboarding generates a real personalized plan (~1188 chars) and routine (5 items with proper schema), check-in flow toggles show_checkin_prompt correctly, multi-turn chat persists 2→4 messages with contextual LLM replies, regenerate updates plan/routine while preserving check_ins, health-mock returns 7 deterministic nights with all expected fields, and reset clears both sleep_profile and sleep_chat. No issues found — main agent can summarise and finish for this scope."
+      message: "Auth + per-user data isolation tested end-to-end (/app/backend_test.py, 26 assertions, 25 PASS / 1 CRITICAL FAIL). All auth flows work (register→dev_code, verify wrong/correct, /auth/me with+without token, login, login wrong pw, resend), per-user XP isolation verified (Carol XP=15 after completing default; Dan XP=0 with disjoint task ids), once-per-day uncomplete returns 400, default-task DELETE returns 400, wake_time PUT/GET roundtrip works, custom-date /tasks?date=2026-04-25 returns 200, sleep onboarding is per-user (Carol onboarded; Dan onboarded:false). 🚨 CRITICAL BUG — the 11-custom-task limit is NOT user-scoped in /app/backend/server.py L746: `db.tasks.count_documents({\"is_default\": {\"$ne\": True}})` is missing `user_id`. As soon as the global custom-task collection has ≥11 docs (already true on this DB), every newly-registered user is blocked from creating a single custom quest. Fix: change to `db.tasks.count_documents({\"user_id\": user_id, \"is_default\": {\"$ne\": True}})`. Test 9b (the 12th-task block) returns the right 400 message, but test 9a (Dan's 1st custom task) was rejected for the wrong reason because the counter is global. After the one-line fix this whole task should pass."

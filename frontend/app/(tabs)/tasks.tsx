@@ -19,7 +19,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect } from 'expo-router';
 import Card from '../../src/components/Card';
-import { api, Task } from '../../src/api';
+import { api, Task, userDate } from '../../src/api';
 import { colors, focusMeta, slotMeta, spacing, radii, FocusArea, TimeSlot } from '../../src/theme';
 import {
   ensureNotificationPermission,
@@ -34,6 +34,15 @@ const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
 const slotDefaultHour: Record<TimeSlot, number> = { morning: 8, afternoon: 13, evening: 20 };
 
+function addHoursStr(hhmm: string, delta: number): string {
+  const [h = 7, m = 0] = hhmm.split(':').map((x) => parseInt(x, 10));
+  let nh = h + delta;
+  if (nh < 0) nh += 24;
+  if (nh >= 24) nh -= 24;
+  const mm = String(m).padStart(2, '0');
+  return `${String(nh).padStart(2, '0')}:${mm}`;
+}
+
 export default function Tasks() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [orderSource, setOrderSource] = useState<string | null>(null);
@@ -42,12 +51,19 @@ export default function Tasks() {
   const [showAdd, setShowAdd] = useState(false);
   const [actionTask, setActionTask] = useState<Task | null>(null);
   const [xpFloater, setXpFloater] = useState<{ value: number } | null>(null);
+  const [wakeTime, setWakeTime] = useState<string>('07:00');
+  const [customCount, setCustomCount] = useState<number>(0);
   const floatAnim = useMemo(() => new Animated.Value(0), []);
 
   const load = useCallback(async () => {
     try {
-      const r = await api.listTasks();
+      const prof = await api.getProfile().catch(() => null);
+      const wt = prof?.wake_time || '07:00';
+      setWakeTime(wt);
+      const today = userDate(wt);
+      const r = await api.listTasks(today);
       setTasks(r.tasks);
+      setCustomCount(r.tasks.filter((t) => !t.is_default).length);
       setOrderSource(r.adaptive_order ? r.order_source_date ?? null : null);
       syncAllTaskNotifications(r.tasks).catch(() => {});
     } catch (e) {
@@ -79,27 +95,33 @@ export default function Tasks() {
   };
 
   const toggle = async (task: Task) => {
+    // Once-per-day rule: completed tasks cannot be un-ticked. They auto-reset.
+    if (task.completed) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+      Alert.alert(
+        'Already done today',
+        `Quests can only be completed once per day. They'll reset automatically 2 hours before your wake-up time (${wakeTime}).`,
+      );
+      return;
+    }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     setTasks((prev) =>
-      prev.map((t) => (t.id === task.id ? { ...t, completed: !t.completed } : t))
+      prev.map((t) => (t.id === task.id ? { ...t, completed: true } : t))
     );
     try {
-      if (task.completed) {
-        await api.uncompleteTask(task.id);
-      } else {
-        const res = await api.completeTask(task.id);
-        showXp(res.xp_awarded);
-        if (res.leveled_up) {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-          Alert.alert('LEVEL UP!', `You reached Level ${res.new_level}. Keep climbing.`);
-        } else if (res.newly_unlocked_achievements.length > 0) {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-        }
+      const today = userDate(wakeTime);
+      const res = await api.completeTask(task.id, today);
+      showXp(res.xp_awarded);
+      if (res.leveled_up) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        Alert.alert('LEVEL UP!', `You reached Level ${res.new_level}. Keep climbing.`);
+      } else if (res.newly_unlocked_achievements.length > 0) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       }
     } catch (e) {
       console.log('toggle err', e);
       setTasks((prev) =>
-        prev.map((t) => (t.id === task.id ? { ...t, completed: task.completed } : t))
+        prev.map((t) => (t.id === task.id ? { ...t, completed: false } : t))
       );
     }
   };
@@ -202,9 +224,12 @@ export default function Tasks() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.kicker}>Daily Quests · Unlimited</Text>
+          <Text style={styles.kicker}>Daily Quests · Resets {wakeTime ? `${addHoursStr(wakeTime, -2)}` : ''}</Text>
           <Text style={styles.title}>
             {new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}
+          </Text>
+          <Text style={styles.customCount} testID="tasks-custom-count">
+            {customCount} / 11 custom quests
           </Text>
         </View>
         <Text testID="tasks-count" style={styles.countPill}>
@@ -839,6 +864,7 @@ const styles = StyleSheet.create({
   },
   kicker: { color: colors.green, fontSize: 12, letterSpacing: 2, fontWeight: '800' },
   title: { color: colors.text, fontSize: 22, fontWeight: '800', marginTop: 2 },
+  customCount: { color: colors.cyan, fontSize: 11, fontWeight: '800', marginTop: 4, letterSpacing: 0.5 },
   countPill: {
     color: colors.amber,
     fontWeight: '800',
