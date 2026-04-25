@@ -742,8 +742,8 @@ async def list_tasks(date: Optional[str] = None, user_id: str = Depends(get_user
 
 @api_router.post("/tasks")
 async def create_task(body: TaskCreate, user_id: str = Depends(get_user_or_legacy)):
-    # enforce 11-custom-task limit (defaults don't count)
-    custom_count = await db.tasks.count_documents({"is_default": {"$ne": True}})
+    # enforce 11-custom-task limit per-user (defaults don't count)
+    custom_count = await db.tasks.count_documents({"user_id": user_id, "is_default": {"$ne": True}})
     if custom_count >= MAX_CUSTOM_TASKS:
         raise HTTPException(
             400,
@@ -751,6 +751,7 @@ async def create_task(body: TaskCreate, user_id: str = Depends(get_user_or_legac
         )
     task = {
         "id": str(uuid.uuid4()),
+        "user_id": user_id,
         "title": body.title,
         "description": body.description or "",
         "focus_area": body.focus_area,
@@ -815,6 +816,7 @@ async def complete_task(task_id: str, body: CompleteTaskBody, user_id: str = Dep
         return {"already_completed": True, "task": task}
     log = {
         "id": str(uuid.uuid4()),
+        "user_id": user_id,
         "task_id": task_id,
         "date": target_date,
         "focus_area": task["focus_area"],
@@ -866,6 +868,7 @@ async def list_goals(user_id: str = Depends(get_user_or_legacy)):
 async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legacy)):
     goal = {
         "id": str(uuid.uuid4()),
+        "user_id": user_id,
         "title": body.title,
         "description": body.description or "",
         "focus_area": body.focus_area,

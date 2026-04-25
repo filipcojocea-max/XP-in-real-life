@@ -43,3 +43,20 @@ Cumulative thresholds per level: [0, 100, 250, 500, 900, 1500, 2500, 4000, 6000,
 - New routes: `/sleep/_layout.tsx`, `/sleep/index.tsx`, `/sleep/onboarding.tsx`
 - New backend endpoints: `/api/sleep/profile`, `/api/sleep/onboarding`, `/api/sleep/checkin`, `/api/sleep/chat`, `/api/sleep/regenerate`, `/api/sleep/health-mock`, `/api/sleep/reset`
 - All 63 backend assertions passed in testing (real LLM calls succeeded; multi-turn context persisted; regeneration verified)
+
+## Update (Apr 2026) — Multi-user Auth + Daily Reset + Task Limits
+- **Auth system**: register / verify / login / resend / me with bcrypt + JWT (365-day TTL).
+  Email verification: 6-digit code, 30-min expiry. SMTP optional (set SMTP_HOST/USER/PASS).
+  In dev mode the code is returned in the response body & logged to backend.err.log.
+- **Per-user data isolation**: all routes use `Depends(get_user_or_legacy)` — token's user_id
+  scopes profile / tasks / goals / task_logs / sleep_profile / sleep_chat. Each new user
+  gets their own seeded 8 default tasks.
+- **Frontend auth**: AuthContext with SecureStore (web fallback to AsyncStorage), AuthGate in
+  root layout redirects to /auth/login when no token, to / when authed. New screens:
+  /auth/login, /auth/register, /auth/verify.
+- **Daily reset**: Tasks list uses `userDate(wake_time)` which rolls the day at `wake_time - 2h`.
+  No manual refresh button — purely automatic. Wake time editable via PUT /api/profile.
+- **11-task limit**: per-user cap on custom (non-default) tasks.
+- **Once-per-day tick**: uncomplete endpoint always returns 400. Frontend toggle blocks un-tick.
+- **Onboarding tweaks**: age options now `10-14`, `15-17`, `18-20`, `21-25`, `25+`;
+  gender options `Male`, `Female` only.
