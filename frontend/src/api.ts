@@ -149,4 +149,93 @@ export const api = {
   statsWeekly: () => req<WeeklyStats>('/stats/weekly'),
   statsByArea: () =>
     req<{ by_area: Record<FocusArea, number> }>('/stats/by-area'),
+
+  // ──────── Sleep Coach ────────
+  sleepProfile: () =>
+    req<{
+      onboarded: boolean;
+      profile?: SleepProfile;
+      questions: SleepQuestion[];
+      show_checkin_prompt?: boolean;
+    }>('/sleep/profile'),
+  sleepOnboard: (answers: Record<string, any>) =>
+    req<{ profile: SleepProfile }>('/sleep/onboarding', {
+      method: 'POST',
+      body: JSON.stringify({ answers }),
+    }),
+  sleepRegenerate: (message?: string) =>
+    req<{ profile: SleepProfile }>('/sleep/regenerate', {
+      method: 'POST',
+      body: JSON.stringify({ message: message || '' }),
+    }),
+  sleepCheckin: (rating: number, hours?: number, notes?: string) =>
+    req<{ saved: boolean; entry: SleepCheckin }>('/sleep/checkin', {
+      method: 'POST',
+      body: JSON.stringify({ rating, hours, notes: notes || '' }),
+    }),
+  sleepChatHistory: () =>
+    req<{ messages: SleepChatMsg[] }>('/sleep/chat'),
+  sleepChatSend: (message: string) =>
+    req<{ user: SleepChatMsg; assistant: SleepChatMsg }>('/sleep/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+  sleepReset: () => req<{ reset: boolean }>('/sleep/reset', { method: 'POST' }),
+  sleepHealthMock: () => req<SleepHealthMock>('/sleep/health-mock'),
+};
+
+export type SleepQuestion = {
+  id: string;
+  type: 'scale' | 'time' | 'single' | 'multi' | 'text';
+  q: string;
+  min?: number;
+  max?: number;
+  options?: string[];
+};
+export type SleepRoutineItem = {
+  time: string;
+  title: string;
+  description: string;
+  icon: string;
+};
+export type SleepCheckin = {
+  date: string;
+  rating: number;
+  hours?: number | null;
+  notes?: string;
+  ts: string;
+};
+export type SleepProfile = {
+  user_id: string;
+  answers: Record<string, any>;
+  plan: string;
+  routine: SleepRoutineItem[];
+  check_ins: SleepCheckin[];
+  last_checkin_date?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type SleepChatMsg = {
+  user_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  ts: string;
+};
+export type SleepHealthNight = {
+  date: string;
+  day: string;
+  total_hours: number;
+  deep_hours: number;
+  rem_hours: number;
+  light_hours: number;
+  score: number;
+};
+export type SleepHealthMock = {
+  connected: boolean;
+  source: string;
+  nights: SleepHealthNight[];
+  avg_total_hours: number;
+  avg_score: number;
+  best_night: SleepHealthNight;
+  worst_night: SleepHealthNight;
 };

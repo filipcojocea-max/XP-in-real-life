@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { router } from 'expo-router';
 import { colors, spacing, radii } from '../../src/theme';
 
 type Tab = 'add' | 'mine';
@@ -69,21 +70,61 @@ export default function Library() {
         showsVerticalScrollIndicator={false}
       >
         {tab === 'add' ? (
-          <View testID="library-add-empty" style={styles.emptyWrap}>
-            <View style={styles.emptyGlow}>
-              <Ionicons name="rocket" size={52} color={colors.amber} />
-            </View>
-            <Text style={styles.emptyTitle}>Apps coming out soon!</Text>
-            <Text style={styles.emptyDesc}>
-              Bonus mini-apps for anxiety, social skills, posture, nutrition and more are on the way. Unlock them here the moment they launch.
-            </Text>
+          <View>
+            {/* Sleep mini-app — featured */}
+            <TouchableOpacity
+              testID="library-card-sleep"
+              activeOpacity={0.85}
+              onPress={() => router.push('/sleep' as any)}
+              style={styles.featureCard}
+            >
+              <View style={styles.featureGlow} />
+              <View style={styles.featureRow}>
+                <View style={styles.featureIcon}>
+                  <Ionicons name="moon" size={32} color={colors.cyan} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.featureKickerRow}>
+                    <Text style={styles.featureKicker}>NEW · AI COACH</Text>
+                    <View style={styles.unlockedPill}>
+                      <Ionicons name="checkmark" size={10} color={colors.green} />
+                      <Text style={styles.unlockedText}>UNLOCKED</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.featureTitle}>Improve Sleeping</Text>
+                  <Text style={styles.featureDesc}>
+                    Smart questionnaire → personalized routine. Chat with Luna, your CBT-I sleep coach. Evidence-based tips that actually work.
+                  </Text>
+                  <View style={styles.tagRow}>
+                    <View style={styles.featTag}>
+                      <Ionicons name="bed" size={10} color={colors.cyan} />
+                      <Text style={styles.featTagText}>Personalized plan</Text>
+                    </View>
+                    <View style={styles.featTag}>
+                      <Ionicons name="chatbubbles" size={10} color={colors.cyan} />
+                      <Text style={styles.featTagText}>AI coach chat</Text>
+                    </View>
+                    <View style={styles.featTag}>
+                      <Ionicons name="pulse" size={10} color={colors.cyan} />
+                      <Text style={styles.featTagText}>Sleep insights</Text>
+                    </View>
+                  </View>
+                  <View style={styles.featureCta}>
+                    <Text style={styles.featureCtaText}>Open mini-app</Text>
+                    <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+                  </View>
+                </View>
+              </View>
+            </TouchableOpacity>
 
+            {/* Coming soon row */}
+            <Text style={styles.sectionLabel}>Coming soon</Text>
             <View style={styles.previewGrid}>
               {[
-                { icon: 'fitness', label: 'Coming soon' },
-                { icon: 'flame', label: 'Coming soon' },
-                { icon: 'heart', label: 'Coming soon' },
-                { icon: 'moon', label: 'Coming soon' },
+                { icon: 'fitness', label: 'Posture Coach' },
+                { icon: 'flame', label: 'Anxiety Reset' },
+                { icon: 'heart', label: 'Affirmations' },
+                { icon: 'restaurant', label: 'Nutrition' },
               ].map((p, i) => (
                 <View key={i} style={styles.lockedCard}>
                   <View style={styles.lockedIcon}>
@@ -96,29 +137,24 @@ export default function Library() {
                 </View>
               ))}
             </View>
-
-            <View style={styles.notifyBadge}>
-              <Ionicons name="notifications" size={14} color={colors.cyan} />
-              <Text style={styles.notifyText}>We'll notify you on launch</Text>
-            </View>
           </View>
         ) : (
-          <View testID="library-mine-empty" style={styles.emptyWrap}>
-            <View style={[styles.emptyGlow, { backgroundColor: colors.green + '18', borderColor: colors.green }]}>
-              <Ionicons name="albums" size={52} color={colors.green} />
-            </View>
-            <Text style={styles.emptyTitle}>Your library is empty</Text>
-            <Text style={styles.emptyDesc}>
-              Apps you unlock will appear here for quick access, anytime.
-            </Text>
-
+          <View>
+            {/* My library — show Sleep as installed */}
             <TouchableOpacity
-              testID="library-browse-btn"
-              style={styles.browseBtn}
-              onPress={() => setTab('add')}
+              testID="library-mine-sleep"
+              activeOpacity={0.85}
+              onPress={() => router.push('/sleep' as any)}
+              style={styles.mineCard}
             >
-              <Ionicons name="arrow-back" size={16} color={colors.bg} />
-              <Text style={styles.browseText}>Browse Add</Text>
+              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12 }]}>
+                <Ionicons name="moon" size={24} color={colors.cyan} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.mineTitle}>Improve Sleeping</Text>
+                <Text style={styles.mineDesc}>Personalized sleep coach · AI chat</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </TouchableOpacity>
           </View>
         )}
@@ -270,4 +306,102 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   browseText: { color: colors.bg, fontWeight: '800', fontSize: 14 },
+
+  // ── Featured mini-app card ──
+  featureCard: {
+    position: 'relative',
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.cyan + '55',
+    padding: spacing.md,
+    overflow: 'hidden',
+  },
+  featureGlow: {
+    position: 'absolute',
+    top: -40,
+    right: -40,
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: colors.cyan + '22',
+  },
+  featureRow: { flexDirection: 'row', gap: spacing.md, alignItems: 'flex-start' },
+  featureIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 16,
+    backgroundColor: colors.cyan + '22',
+    borderWidth: 1,
+    borderColor: colors.cyan + '88',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  featureKickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: 4,
+  },
+  featureKicker: { color: colors.cyan, fontSize: 10, fontWeight: '900', letterSpacing: 2 },
+  unlockedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: colors.green + '22',
+    borderWidth: 1,
+    borderColor: colors.green + '66',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+  },
+  unlockedText: { color: colors.green, fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  featureTitle: { color: colors.text, fontSize: 19, fontWeight: '900', letterSpacing: -0.3 },
+  featureDesc: { color: colors.textSecondary, fontSize: 12, lineHeight: 18, marginTop: 4 },
+  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: spacing.sm },
+  featTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radii.pill,
+    backgroundColor: colors.cyan + '15',
+    borderWidth: 1,
+    borderColor: colors.cyan + '33',
+  },
+  featTagText: { color: colors.cyan, fontSize: 10, fontWeight: '700' },
+  featureCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: spacing.md,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    backgroundColor: colors.cyan,
+  },
+  featureCtaText: { color: colors.bg, fontWeight: '800', fontSize: 13, letterSpacing: 0.3 },
+
+  sectionLabel: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    marginTop: spacing.xl,
+    marginBottom: spacing.sm,
+  },
+  mineCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.cyan + '55',
+  },
+  mineTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
+  mineDesc: { color: colors.textSecondary, fontSize: 12, marginTop: 2 },
 });

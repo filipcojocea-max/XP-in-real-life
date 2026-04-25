@@ -733,6 +733,318 @@ async def seed_defaults():
 
 
 # ------------------------------------------------------------------
+# Sleep Coach Mini-App
+# ------------------------------------------------------------------
+SLEEP_USER_ID = "main"  # single-user mode
+
+SLEEP_QUESTIONS = [
+    {"id": "struggle_level", "type": "scale", "min": 1, "max": 10, "q": "How much do you struggle to fall asleep at night? (1 = never, 10 = every night)"},
+    {"id": "avg_hours", "type": "scale", "min": 3, "max": 12, "q": "How many hours of sleep do you typically get?"},
+    {"id": "bedtime", "type": "time", "q": "What time do you usually try to go to bed?"},
+    {"id": "wake_time", "type": "time", "q": "What time do you usually wake up?"},
+    {"id": "wakes_at_night", "type": "single", "options": ["Never", "Sometimes", "Often", "Every night"], "q": "Do you wake up during the night?"},
+    {"id": "racing_thoughts", "type": "single", "options": ["Rarely", "Sometimes", "Often", "Always"], "q": "How often do racing thoughts keep you awake?"},
+    {"id": "screens_before_bed", "type": "single", "options": ["No screens 1+ hr", "30 min before", "Right up to bed", "In bed"], "q": "When do you stop using screens before bed?"},
+    {"id": "caffeine_cutoff", "type": "single", "options": ["Morning only", "Before 2pm", "Before 6pm", "Anytime / no limit"], "q": "When is your last caffeine of the day?"},
+    {"id": "alcohol", "type": "single", "options": ["Never", "Occasionally", "A few nights/week", "Most nights"], "q": "How often do you drink alcohol in the evening?"},
+    {"id": "exercise", "type": "single", "options": ["Daily", "A few times/week", "Rarely", "Never"], "q": "How often do you exercise?"},
+    {"id": "exercise_time", "type": "single", "options": ["Morning", "Afternoon", "Evening", "Late night", "I don't exercise"], "q": "When do you usually exercise?"},
+    {"id": "room_temp", "type": "single", "options": ["Cool (60-67°F)", "Comfortable", "Warm", "Hot"], "q": "How warm is your bedroom at night?"},
+    {"id": "room_dark", "type": "single", "options": ["Pitch black", "Mostly dark", "Some light", "Lots of light"], "q": "How dark is your bedroom?"},
+    {"id": "noise", "type": "single", "options": ["Silent", "White noise", "Some noise", "Very noisy"], "q": "How quiet is your sleep environment?"},
+    {"id": "relaxing_activities", "type": "multi", "options": ["Reading", "Drawing", "Journaling", "Music", "Podcasts", "Meditation", "Stretching", "Bath/shower", "Tea", "Breathing exercises"], "q": "What activities do you find relaxing? (pick all that apply)"},
+    {"id": "likes_milk", "type": "single", "options": ["Love it", "It's okay", "Don't really like it", "Lactose intolerant"], "q": "Do you like drinking milk?"},
+    {"id": "warm_drinks", "type": "multi", "options": ["Chamomile tea", "Warm milk", "Honey water", "Decaf coffee", "Herbal tea", "I don't drink warm drinks"], "q": "Which warm drinks would you enjoy before bed?"},
+    {"id": "tried_before", "type": "text", "q": "Anything you've tried that helped (or didn't)? (optional)"},
+    {"id": "main_goal", "type": "single", "options": ["Fall asleep faster", "Sleep through the night", "Wake up rested", "Sleep more hours", "All of the above"], "q": "Your main sleep goal?"},
+]
+
+
+class SleepOnboardingPayload(BaseModel):
+    answers: dict
+
+
+class SleepCheckinPayload(BaseModel):
+    rating: int  # 1-10 quality
+    hours: Optional[float] = None
+    notes: Optional[str] = ""
+
+
+class SleepChatPayload(BaseModel):
+    message: str
+
+
+def _sleep_user_filter():
+    return {"user_id": SLEEP_USER_ID}
+
+
+async def _generate_sleep_plan(answers: dict) -> dict:
+    """Use LLM to generate a personalized sleep plan + routine items based on answers."""
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        if not api_key:
+            return _fallback_plan(answers)
+
+        system = (
+            "You are an expert evidence-based sleep coach (CBT-I trained). "
+            "Generate a JSON object with exactly two keys: "
+            "'plan' (a friendly markdown string ~250 words with 4-6 specific personalized recommendations based on the user's answers), "
+            "and 'routine' (a JSON array of 4-7 routine items, each with keys: time (e.g. '9:00 PM' or '~30 min before bed'), title (short), description (1 sentence), icon (one of: 'bed','moon','book','musical-notes','water','cafe','flame','walk','leaf','time','phone-portrait','flash-off')). "
+            "Pull only from the activities and drinks the user actually likes. "
+            "Use evidence-based interventions: stimulus control, sleep restriction, cool dark room (60-67°F), "
+            "screen cutoff, caffeine cutoff (8+ hrs before bed), wind-down routine, breathing exercises (4-7-8 box breathing), "
+            "consistent wake time, light morning exposure. "
+            "Do NOT recommend warm milk or herbal teas the user dislikes or is intolerant to. "
+            "Output strict JSON only, no markdown fences."
+        )
+        user_text = f"User's sleep questionnaire answers:\n{answers}\n\nGenerate the personalized JSON plan now."
+
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"sleep-plan-{uuid.uuid4()}",
+            system_message=system,
+        ).with_model("openai", "gpt-4o-mini")
+
+        response = await chat.send_message(UserMessage(text=user_text))
+        # Try to extract JSON
+        import json, re
+        text = response.strip()
+        # strip code fences if any
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        try:
+            data = json.loads(text)
+            if "plan" in data and "routine" in data:
+                return data
+        except Exception:
+            logger.exception("LLM JSON parse failed; raw=%s", text[:500])
+        return _fallback_plan(answers)
+    except Exception:
+        logger.exception("sleep plan LLM failure")
+        return _fallback_plan(answers)
+
+
+def _fallback_plan(answers: dict) -> dict:
+    likes_milk = answers.get("likes_milk") in ("Love it", "It's okay")
+    relax = answers.get("relaxing_activities") or []
+    warm_drinks = answers.get("warm_drinks") or []
+    routine = [
+        {"time": "~3 hours before bed", "title": "Caffeine cutoff", "description": "No coffee, tea or energy drinks. Caffeine has a 5-6 hour half-life.", "icon": "flash-off"},
+        {"time": "~1 hour before bed", "title": "Dim the lights", "description": "Lower lights & switch screens to night mode to cue melatonin release.", "icon": "moon"},
+        {"time": "~45 min before bed", "title": "Light stretch", "description": "5-10 min of gentle stretches to release muscle tension.", "icon": "walk"},
+        {"time": "~30 min before bed", "title": "Wind-down activity", "description": f"Try {(relax[0] if relax else 'reading')} — calming, no screens.", "icon": "book"},
+    ]
+    if likes_milk or "Warm milk" in warm_drinks:
+        routine.append({"time": "~20 min before bed", "title": "Warm milk", "description": "Tryptophan + ritual = signal to your brain it's bedtime.", "icon": "cafe"})
+    elif warm_drinks and "I don't drink warm drinks" not in warm_drinks:
+        routine.append({"time": "~20 min before bed", "title": warm_drinks[0], "description": "A warm caffeine-free drink helps trigger sleepiness.", "icon": "cafe"})
+    routine.append({"time": "In bed", "title": "4-7-8 Breathing", "description": "Inhale 4s, hold 7s, exhale 8s. Repeat 4 times. Activates parasympathetic.", "icon": "leaf"})
+    plan = (
+        "**Your personalized sleep plan**\n\n"
+        "Based on your answers, here's an evidence-based routine tuned to you:\n\n"
+        "1. **Consistent schedule** — same wake time every day (yes, weekends too) anchors your circadian rhythm.\n"
+        "2. **Cool, dark room** — aim for 60-67°F and blackout darkness; even small amounts of light fragment sleep.\n"
+        "3. **Wind-down ritual** — pick activities you actually enjoy from your relaxing list and do them every night.\n"
+        "4. **No screens 30-60 min before bed** — blue light suppresses melatonin.\n"
+        "5. **Caffeine cutoff at least 8 hours before bed** — even if you don't feel it, it disrupts deep sleep.\n"
+        "6. **If you can't sleep in 20 min, get out of bed** — read a paper book in dim light then come back. Don't lie there worrying.\n\n"
+        "Your routine card on the right has timing tuned to *you*. Tap the Coach tab when something isn't working — we'll iterate."
+    )
+    return {"plan": plan, "routine": routine}
+
+
+async def _build_coach_system(profile: Optional[dict]) -> str:
+    base = (
+        "You are 'Luna', a warm, evidence-based AI sleep coach. "
+        "You sound like a calm, supportive friend who happens to be a CBT-I expert. "
+        "Keep replies concise (3-5 sentences usually), use plain language, no medical disclaimers in every message. "
+        "Reference the user's specific habits/preferences when relevant. "
+        "If they ask for a tip, give one specific, actionable tip with the *why* in 1 sentence. "
+        "If they want to change something, suggest a concrete swap. "
+        "Never recommend prescription meds or supplements without a doctor. "
+        "Encourage consistency over perfection."
+    )
+    if profile:
+        ans = profile.get("answers", {})
+        relax = ans.get("relaxing_activities") or []
+        likes_milk = ans.get("likes_milk")
+        struggle = ans.get("struggle_level")
+        bed = ans.get("bedtime")
+        wake = ans.get("wake_time")
+        base += (
+            f"\n\nUser context (use sparingly, don't quote the survey):\n"
+            f"- Struggles to fall asleep: {struggle}/10\n"
+            f"- Bed/wake target: {bed} → {wake}\n"
+            f"- Likes milk: {likes_milk}\n"
+            f"- Enjoys: {', '.join(relax) if relax else 'unspecified'}\n"
+            f"- Goal: {ans.get('main_goal', 'better sleep')}"
+        )
+    return base
+
+
+@api_router.get("/sleep/profile")
+async def sleep_profile():
+    p = await db.sleep_profile.find_one(_sleep_user_filter(), {"_id": 0})
+    if not p:
+        return {"onboarded": False, "questions": SLEEP_QUESTIONS}
+    # Determine if we should show "How did you sleep?" prompt:
+    # show if last check-in was for a date earlier than today.
+    last = p.get("last_checkin_date")
+    today = today_str()
+    show_checkin = last != today
+    return {"onboarded": True, "profile": p, "questions": SLEEP_QUESTIONS, "show_checkin_prompt": show_checkin}
+
+
+@api_router.post("/sleep/onboarding")
+async def sleep_onboarding(body: SleepOnboardingPayload):
+    answers = body.answers or {}
+    plan_obj = await _generate_sleep_plan(answers)
+    doc = {
+        "user_id": SLEEP_USER_ID,
+        "answers": answers,
+        "plan": plan_obj.get("plan", ""),
+        "routine": plan_obj.get("routine", []),
+        "check_ins": [],
+        "last_checkin_date": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.sleep_profile.replace_one(_sleep_user_filter(), doc, upsert=True)
+    # also clear chat history on fresh onboarding
+    await db.sleep_chat.delete_many(_sleep_user_filter())
+    saved = await db.sleep_profile.find_one(_sleep_user_filter(), {"_id": 0})
+    return {"profile": saved}
+
+
+@api_router.post("/sleep/regenerate")
+async def sleep_regenerate(body: Optional[SleepChatPayload] = None):
+    p = await db.sleep_profile.find_one(_sleep_user_filter(), {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Onboard first")
+    feedback = (body.message if body else "") or ""
+    answers = dict(p.get("answers", {}))
+    if feedback:
+        answers["_recent_feedback"] = feedback
+    plan_obj = await _generate_sleep_plan(answers)
+    await db.sleep_profile.update_one(
+        _sleep_user_filter(),
+        {"$set": {"plan": plan_obj.get("plan", ""), "routine": plan_obj.get("routine", []), "updated_at": now_iso()}},
+    )
+    saved = await db.sleep_profile.find_one(_sleep_user_filter(), {"_id": 0})
+    return {"profile": saved}
+
+
+@api_router.post("/sleep/checkin")
+async def sleep_checkin(body: SleepCheckinPayload):
+    p = await db.sleep_profile.find_one(_sleep_user_filter())
+    if not p:
+        raise HTTPException(404, "Onboard first")
+    entry = {
+        "date": today_str(),
+        "rating": int(body.rating),
+        "hours": body.hours,
+        "notes": body.notes or "",
+        "ts": now_iso(),
+    }
+    await db.sleep_profile.update_one(
+        _sleep_user_filter(),
+        {"$push": {"check_ins": {"$each": [entry], "$slice": -60}}, "$set": {"last_checkin_date": entry["date"], "updated_at": now_iso()}},
+    )
+    return {"saved": True, "entry": entry}
+
+
+@api_router.get("/sleep/chat")
+async def sleep_chat_history():
+    msgs = await db.sleep_chat.find(_sleep_user_filter(), {"_id": 0}).sort("ts", 1).to_list(500)
+    return {"messages": msgs}
+
+
+@api_router.post("/sleep/chat")
+async def sleep_chat_send(body: SleepChatPayload):
+    text = (body.message or "").strip()
+    if not text:
+        raise HTTPException(400, "Empty message")
+    profile = await db.sleep_profile.find_one(_sleep_user_filter(), {"_id": 0})
+    # save user message
+    user_msg = {"user_id": SLEEP_USER_ID, "role": "user", "content": text, "ts": now_iso()}
+    await db.sleep_chat.insert_one(dict(user_msg))
+
+    reply = ""
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        if not api_key:
+            reply = "(LLM key not configured — please ask the agent for help.)"
+        else:
+            system = await _build_coach_system(profile)
+            # Use the existing chat history as context (last 20 turns for token budget)
+            history = await db.sleep_chat.find(_sleep_user_filter(), {"_id": 0}).sort("ts", 1).to_list(500)
+            # We'll roll history into the system prompt as a compact transcript
+            recent = history[-20:]
+            transcript = "\n".join(
+                f"{m['role'].upper()}: {m['content']}" for m in recent[:-1]  # exclude the just-saved user msg
+            )
+            sys_with_history = system + (f"\n\n--- Recent conversation ---\n{transcript}" if transcript else "")
+            chat = LlmChat(
+                api_key=api_key,
+                session_id=f"sleep-chat-{SLEEP_USER_ID}-{uuid.uuid4()}",
+                system_message=sys_with_history,
+            ).with_model("openai", "gpt-4o-mini")
+            reply = await chat.send_message(UserMessage(text=text))
+    except Exception:
+        logger.exception("sleep chat LLM failed")
+        reply = "Sorry, I had a hiccup connecting just now. Try again in a sec — I'm here when you need me."
+
+    asst_msg = {"user_id": SLEEP_USER_ID, "role": "assistant", "content": reply, "ts": now_iso()}
+    await db.sleep_chat.insert_one(dict(asst_msg))
+    user_msg.pop("_id", None)
+    asst_msg.pop("_id", None)
+    return {"user": user_msg, "assistant": asst_msg}
+
+
+@api_router.post("/sleep/reset")
+async def sleep_reset():
+    await db.sleep_profile.delete_many(_sleep_user_filter())
+    await db.sleep_chat.delete_many(_sleep_user_filter())
+    return {"reset": True}
+
+
+@api_router.get("/sleep/health-mock")
+async def sleep_health_mock():
+    """Simulated health-app data while real HealthKit/Health Connect is gated behind a native build."""
+    import random
+    rng = random.Random(today_str())  # deterministic for the day
+    nights = []
+    for i in range(7):
+        d = (datetime.now(timezone.utc).date() - timedelta(days=6 - i))
+        total = round(rng.uniform(5.5, 8.4), 1)
+        deep = round(total * rng.uniform(0.13, 0.22), 1)
+        rem = round(total * rng.uniform(0.18, 0.27), 1)
+        light = round(total - deep - rem, 1)
+        nights.append({
+            "date": d.isoformat(),
+            "day": d.strftime("%a"),
+            "total_hours": total,
+            "deep_hours": deep,
+            "rem_hours": rem,
+            "light_hours": max(light, 0.1),
+            "score": int(rng.uniform(62, 92)),
+        })
+    avg_total = round(sum(n["total_hours"] for n in nights) / len(nights), 1)
+    avg_score = int(sum(n["score"] for n in nights) / len(nights))
+    return {
+        "connected": False,
+        "source": "Simulated data",
+        "nights": nights,
+        "avg_total_hours": avg_total,
+        "avg_score": avg_score,
+        "best_night": max(nights, key=lambda n: n["score"]),
+        "worst_night": min(nights, key=lambda n: n["score"]),
+    }
+
+
+# ------------------------------------------------------------------
 # App setup
 # ------------------------------------------------------------------
 app.include_router(api_router)

@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Test the updated Tasks API endpoints on the Critique AI (LevelUp) backend. Default tasks (is_default: true) must lock focus_area / time_slot / scheduled_time / recurring fields (PUT returns 400), and cannot be deleted (DELETE returns 400). Custom (non-default) tasks can be fully edited including moving between morning/afternoon/evening slots, and can be deleted."
+user_problem_statement: "Test the new Sleep Coach mini-app backend endpoints (FastAPI + MongoDB + emergentintegrations LLM via gpt-4o-mini): GET/POST /api/sleep/profile, /api/sleep/onboarding, /api/sleep/checkin, /api/sleep/chat (GET+POST multi-turn), /api/sleep/regenerate, /api/sleep/health-mock, /api/sleep/reset."
 
 backend:
   - task: "Tasks API — default vs custom update/delete rules"
@@ -117,10 +117,22 @@ backend:
           agent: "testing"
           comment: "Created /app/backend_test.py covering all 7 scenarios from the review request against the public API (https://xp-confidence.preview.emergentagent.com/api). Pre-existing DB contained tasks seeded before the is_default migration (no is_default flag), so the test performs POST /api/profile/reset followed by POST /api/seed to obtain properly tagged default tasks, then POSTs a custom task. Results: 12/12 assertions PASS. (1) GET /api/tasks returns tagged default + custom tasks. (2) PUT default task with {title, description, xp_value, reminder_enabled} returns 200 and updates those fields while focus_area/time_slot remain unchanged. (3) PUT default task with focus_area / time_slot / scheduled_time each return 400 with message 'Cannot change <field> on a default quest — only title, description, XP and reminder are editable.' (4) DELETE on default task returns 400 with message 'Default quests cannot be deleted — …' and task still present on subsequent GET. (5) PUT custom task with {title, time_slot=evening, focus_area=mindset, scheduled_time=20:00} returns 200 with all fields updated. (6) PUT custom task to time_slot=afternoon, scheduled_time=13:00 returns 200 and GET /api/tasks shows it in the afternoon bucket. (7) DELETE custom task returns 200 {deleted: true} and it disappears from GET /api/tasks. LOCKED_DEFAULT_FIELDS enforcement and default-delete protection are working correctly."
 
+  - task: "Sleep Coach mini-app — full backend flow (profile/onboarding/checkin/chat/regenerate/health-mock/reset)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "Rewrote /app/backend_test.py to cover all 10 sleep endpoints from the review request and ran it against the public ingress (https://xp-confidence.preview.emergentagent.com/api). EMERGENT_LLM_KEY is set in /app/backend/.env and the LLM (openai gpt-4o-mini via emergentintegrations) was reached successfully on every call. Results: 63/63 assertions PASS. Step-by-step: (1) POST /sleep/reset → 200 {reset:true}. (2) GET /sleep/profile (cold) → {onboarded:false, questions:[19 items]}; all expected types present (scale/time/single/multi/text), each q has id/type/q. (3) POST /sleep/onboarding with the realistic 19-field answers payload → 200; profile.plan length=1188 chars, profile.routine has 5 items each with time/title/description/icon, check_ins=[], answers persisted. (4) GET /sleep/profile (warm) → {onboarded:true, profile:{...}, questions:[19], show_checkin_prompt:true}. (5) POST /sleep/checkin {rating:8, hours:7.5, notes:'Slept well'} → 200 {saved:true, entry:{date,rating:8,hours:7.5,notes,ts}}; subsequent GET shows check_ins length=1 and show_checkin_prompt:false. (6) POST /sleep/chat 'What if I can't fall asleep tonight?' → 200; assistant reply 371 chars, contextually appropriate (mentions getting out of bed / quiet activity), not a fallback error. (7) GET /sleep/chat → 2 messages ordered user→assistant. (8) POST /sleep/chat 'Should I take a nap?' → 200; assistant reply 328 chars referencing nap timing. GET /sleep/chat now returns 4 messages confirming multi-turn persistence. (9) POST /sleep/regenerate {message:'milk gives me indigestion, find an alternative'} → 200; new plan length=1023 chars, routine grew from 5 to 7 items, plan text differs from previous, check_ins preserved (still 1). (10) GET /sleep/health-mock → 200 {connected:false, source:'Simulated data', nights:[7 entries each with date/day/total_hours/deep_hours/rem_hours/light_hours/score], avg_total_hours, avg_score, best_night, worst_night}. (11) POST /sleep/reset followed by GET /sleep/profile → onboarded:false; GET /sleep/chat → empty messages array. LLM integration, JSON parsing of plan/routine, MongoDB persistence (sleep_profile + sleep_chat collections), check-in prompt logic, and reset semantics are all working correctly."
+
 metadata:
   created_by: "testing_agent"
-  version: "1.0"
-  test_sequence: 1
+  version: "1.1"
+  test_sequence: 2
   run_ui: false
 
 test_plan:
@@ -132,3 +144,5 @@ test_plan:
 agent_communication:
     - agent: "testing"
       message: "Ran full backend test suite for the updated Tasks API (/app/backend_test.py). All 12 assertions pass against the public ingress URL. Note: the pre-existing Mongo `tasks` collection had items seeded before the `is_default` migration, so the test resets & re-seeds to obtain properly tagged defaults. If the main agent wants default tasks to persist for end users without requiring a reset, consider a one-time migration that marks existing seeded titles as is_default=true, or change POST /api/seed to upsert the flag on legacy docs. Functionality itself (LOCKED_DEFAULT_FIELDS + delete protection + custom-task full edit/move/delete) is correct."
+    - agent: "testing"
+      message: "Sleep Coach backend tested end-to-end against https://xp-confidence.preview.emergentagent.com/api. /app/backend_test.py was overwritten with a 10-section sleep suite. EMERGENT_LLM_KEY is configured and the LLM (gpt-4o-mini) responds successfully — no fallback paths were exercised. 63/63 assertions PASS: questions list (19, all types present), onboarding generates a real personalized plan (~1188 chars) and routine (5 items with proper schema), check-in flow toggles show_checkin_prompt correctly, multi-turn chat persists 2→4 messages with contextual LLM replies, regenerate updates plan/routine while preserving check_ins, health-mock returns 7 deterministic nights with all expected fields, and reset clears both sleep_profile and sleep_chat. No issues found — main agent can summarise and finish for this scope."
