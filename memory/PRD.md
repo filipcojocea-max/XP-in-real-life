@@ -31,3 +31,15 @@ Cumulative thresholds per level: [0, 100, 250, 500, 900, 1500, 2500, 4000, 6000,
 
 ## API
 `/api/profile`, `/api/profile/onboarding`, `/api/profile/avatar`, `/api/profile/reset`, `/api/tasks` (returns `adaptive_order` + `order_source_date`), `/api/tasks/{id}/complete|uncomplete` (accepts `{date}` body), `/api/goals` (+ progress), `/api/achievements`, `/api/stats/daily|weekly|by-area`, `/api/seed`.
+
+## Update (Apr 2026) — Library+ "Improve Sleeping" Mini-App
+- Added AI-powered sleep coach mini-app under Library+ → Add tab
+- 19-question evidence-based intake (CBT-I aligned: caffeine, screens, room env, racing thoughts, relaxation prefs, milk preference, etc.)
+- Backend uses `emergentintegrations` LLM library with OpenAI gpt-4o-mini via EMERGENT_LLM_KEY for:
+  - Personalized sleep plan generation (plan + routine items as JSON)
+  - Multi-turn AI coach chat ("Luna") with conversation history + sleep profile context
+- 3 sub-tabs: **Plan** (personalized routine + recent check-ins + "let's try something else" regenerate), **Coach** (chat with Luna), **Sleep Data** (simulated dashboard — Apple Health/Google Fit gated behind native build)
+- Daily "How was your sleep?" check-in modal — appears on next app entry (not via push notification, per user req)
+- New routes: `/sleep/_layout.tsx`, `/sleep/index.tsx`, `/sleep/onboarding.tsx`
+- New backend endpoints: `/api/sleep/profile`, `/api/sleep/onboarding`, `/api/sleep/checkin`, `/api/sleep/chat`, `/api/sleep/regenerate`, `/api/sleep/health-mock`, `/api/sleep/reset`
+- All 63 backend assertions passed in testing (real LLM calls succeeded; multi-turn context persisted; regeneration verified)
