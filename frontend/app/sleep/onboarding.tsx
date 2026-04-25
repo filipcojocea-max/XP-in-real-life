@@ -1,12 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
-  ActivityIndicator, Alert, Platform, KeyboardAvoidingView,
+  ActivityIndicator, Alert, Platform, KeyboardAvoidingView, Modal, Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Haptics from 'expo-haptics';
 import { api, SleepQuestion } from '../../src/api';
 import { colors, spacing, radii } from '../../src/theme';
@@ -141,21 +140,10 @@ export default function SleepOnboarding() {
                 testID={`sleep-time-${q.id}`}
               >
                 <Ionicons name="time" size={18} color={colors.cyan} />
-                <Text style={styles.timeBtnText}>{value ? value : 'Pick a time'}</Text>
+                <Text style={styles.timeBtnText}>{value ? value : 'Tap to pick a time'}</Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.cyan} />
               </TouchableOpacity>
-              {showPicker?.field === q.id ? (
-                <DateTimePicker
-                  value={parseTime(value) || new Date()}
-                  mode="time"
-                  is24Hour={false}
-                  display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                  onChange={(_, d) => {
-                    if (Platform.OS !== 'ios') setShowPicker(null);
-                    if (d) setAnswer(q.id, formatTime(d));
-                  }}
-                  themeVariant="dark"
-                />
-              ) : null}
+              <Text style={styles.timeHint}>Tap above to choose your usual {q.id === 'bedtime' ? 'bedtime' : 'wake-up time'}.</Text>
             </View>
           ) : null}
 
@@ -221,6 +209,17 @@ export default function SleepOnboarding() {
           ) : null}
         </ScrollView>
 
+        {/* Cross-platform Time Picker Modal */}
+        <SimpleTimePickerModal
+          visible={!!showPicker}
+          initial={value}
+          onClose={() => setShowPicker(null)}
+          onConfirm={(t) => {
+            if (showPicker) setAnswer(showPicker.field, t);
+            setShowPicker(null);
+          }}
+        />
+
         {/* Bottom actions */}
         <View style={styles.bottomBar}>
           <TouchableOpacity
@@ -247,25 +246,181 @@ export default function SleepOnboarding() {
 function slugify(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
-function parseTime(v?: string): Date | null {
-  if (!v) return null;
-  const m = v.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
-  if (!m) return null;
-  let h = parseInt(m[1], 10);
-  const mm = parseInt(m[2], 10);
-  const ampm = (m[3] || '').toUpperCase();
-  if (ampm === 'PM' && h < 12) h += 12;
-  if (ampm === 'AM' && h === 12) h = 0;
-  const d = new Date();
-  d.setHours(h, mm, 0, 0);
-  return d;
+function parseTime(v?: any): { h: number; m: number; ampm: 'AM' | 'PM' } {
+  if (typeof v === 'string') {
+    const m = v.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+    if (m) {
+      let h = parseInt(m[1], 10);
+      const mm = parseInt(m[2], 10);
+      let ampm = (m[3] || '').toUpperCase() as 'AM' | 'PM';
+      if (!ampm) {
+        ampm = h >= 12 ? 'PM' : 'AM';
+        if (h > 12) h -= 12;
+        if (h === 0) h = 12;
+      }
+      return { h: h === 0 ? 12 : h, m: mm, ampm };
+    }
+  }
+  return { h: 10, m: 0, ampm: 'PM' };
 }
-function formatTime(d: Date): string {
-  let h = d.getHours();
-  const m = String(d.getMinutes()).padStart(2, '0');
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12 || 12;
-  return `${h}:${m} ${ampm}`;
+function fmt(h: number, m: number, ampm: 'AM' | 'PM'): string {
+  const mm = String(m).padStart(2, '0');
+  return `${h}:${mm} ${ampm}`;
+}
+
+// ───────── Cross-platform time picker ─────────
+function SimpleTimePickerModal({
+  visible, initial, onClose, onConfirm,
+}: {
+  visible: boolean;
+  initial?: string;
+  onClose: () => void;
+  onConfirm: (formatted: string) => void;
+}) {
+  const init = parseTime(initial);
+  const [h, setH] = useState<number>(init.h);
+  const [m, setM] = useState<number>(init.m);
+  const [ampm, setAmpm] = useState<'AM' | 'PM'>(init.ampm);
+
+  useEffect(() => {
+    if (visible) {
+      const v = parseTime(initial);
+      setH(v.h);
+      setM(v.m);
+      setAmpm(v.ampm);
+    }
+  }, [visible, initial]);
+
+  const bump = (which: 'h' | 'm', delta: number) => {
+    Haptics.selectionAsync().catch(() => {});
+    if (which === 'h') {
+      setH((prev) => {
+        const n = prev + delta;
+        if (n < 1) return 12;
+        if (n > 12) return 1;
+        return n;
+      });
+    } else {
+      setM((prev) => {
+        const n = prev + delta;
+        if (n < 0) return 55;
+        if (n > 59) return 0;
+        return n;
+      });
+    }
+  };
+
+  const presets = [
+    { label: '9:30 PM', h: 9, m: 30, ampm: 'PM' as const },
+    { label: '10:00 PM', h: 10, m: 0, ampm: 'PM' as const },
+    { label: '10:30 PM', h: 10, m: 30, ampm: 'PM' as const },
+    { label: '11:00 PM', h: 11, m: 0, ampm: 'PM' as const },
+    { label: '11:30 PM', h: 11, m: 30, ampm: 'PM' as const },
+    { label: '12:00 AM', h: 12, m: 0, ampm: 'AM' as const },
+    { label: '6:00 AM', h: 6, m: 0, ampm: 'AM' as const },
+    { label: '6:30 AM', h: 6, m: 30, ampm: 'AM' as const },
+    { label: '7:00 AM', h: 7, m: 0, ampm: 'AM' as const },
+    { label: '7:30 AM', h: 7, m: 30, ampm: 'AM' as const },
+    { label: '8:00 AM', h: 8, m: 0, ampm: 'AM' as const },
+  ];
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.timeBackdrop} onPress={onClose}>
+        <Pressable style={styles.timeSheet} onPress={() => {}}>
+          <View style={styles.sheetHandle} />
+          <Text style={styles.timeTitle}>Pick a time</Text>
+
+          {/* Big preview */}
+          <View style={styles.timePreviewWrap}>
+            <Text style={styles.timePreview}>
+              {String(h)}:<Text style={styles.timePreviewMin}>{String(m).padStart(2, '0')}</Text>
+            </Text>
+            <View style={styles.ampmCol}>
+              <TouchableOpacity
+                onPress={() => { setAmpm('AM'); Haptics.selectionAsync().catch(() => {}); }}
+                style={[styles.ampmBtn, ampm === 'AM' && styles.ampmBtnActive]}
+                testID="time-ampm-am"
+              >
+                <Text style={[styles.ampmText, ampm === 'AM' && styles.ampmTextActive]}>AM</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => { setAmpm('PM'); Haptics.selectionAsync().catch(() => {}); }}
+                style={[styles.ampmBtn, ampm === 'PM' && styles.ampmBtnActive]}
+                testID="time-ampm-pm"
+              >
+                <Text style={[styles.ampmText, ampm === 'PM' && styles.ampmTextActive]}>PM</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Bumper rows */}
+          <View style={styles.bumperRow}>
+            <View style={styles.bumperCol}>
+              <Text style={styles.bumperLabel}>HOUR</Text>
+              <View style={styles.bumperGroup}>
+                <TouchableOpacity testID="time-h-down" onPress={() => bump('h', -1)} style={styles.bumperBtn}>
+                  <Ionicons name="remove" size={22} color={colors.cyan} />
+                </TouchableOpacity>
+                <Text style={styles.bumperValue}>{h}</Text>
+                <TouchableOpacity testID="time-h-up" onPress={() => bump('h', 1)} style={styles.bumperBtn}>
+                  <Ionicons name="add" size={22} color={colors.cyan} />
+                </TouchableOpacity>
+              </View>
+            </View>
+            <View style={styles.bumperCol}>
+              <Text style={styles.bumperLabel}>MIN</Text>
+              <View style={styles.bumperGroup}>
+                <TouchableOpacity testID="time-m-down" onPress={() => bump('m', -5)} style={styles.bumperBtn}>
+                  <Ionicons name="remove" size={22} color={colors.cyan} />
+                </TouchableOpacity>
+                <Text style={styles.bumperValue}>{String(m).padStart(2, '0')}</Text>
+                <TouchableOpacity testID="time-m-up" onPress={() => bump('m', 5)} style={styles.bumperBtn}>
+                  <Ionicons name="add" size={22} color={colors.cyan} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+
+          {/* Quick presets */}
+          <Text style={styles.bumperLabel}>QUICK PICKS</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 4 }}>
+            {presets.map((p) => {
+              const active = h === p.h && m === p.m && ampm === p.ampm;
+              return (
+                <TouchableOpacity
+                  key={p.label}
+                  testID={`time-preset-${slugify(p.label)}`}
+                  onPress={() => { setH(p.h); setM(p.m); setAmpm(p.ampm); Haptics.selectionAsync().catch(() => {}); }}
+                  style={[styles.presetChip, active && styles.presetChipActive]}
+                >
+                  <Text style={[styles.presetChipText, active && styles.presetChipTextActive]}>{p.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+
+          {/* Actions */}
+          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
+            <TouchableOpacity onPress={onClose} style={[styles.timeActionBtn, styles.timeCancelBtn]}>
+              <Text style={styles.timeCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              testID="time-confirm"
+              onPress={() => {
+                Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+                onConfirm(fmt(h, m, ampm));
+              }}
+              style={[styles.timeActionBtn, styles.timeConfirmBtn]}
+            >
+              <Ionicons name="checkmark" size={18} color={colors.bg} />
+              <Text style={styles.timeConfirmText}>Use {fmt(h, m, ampm)}</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -321,7 +476,87 @@ const styles = StyleSheet.create({
     padding: spacing.md, borderRadius: radii.md,
     backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.cyan + '55',
   },
-  timeBtnText: { color: colors.cyan, fontSize: 16, fontWeight: '800' },
+  timeBtnText: { color: colors.cyan, fontSize: 16, fontWeight: '800', flex: 1 },
+  timeHint: {
+    color: colors.textMuted, fontSize: 11, marginTop: 6, marginLeft: 4,
+  },
+
+  // ── Time picker modal ──
+  timeBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end',
+  },
+  timeSheet: {
+    backgroundColor: colors.surface, padding: spacing.lg, paddingBottom: spacing.xxl,
+    borderTopLeftRadius: radii.lg, borderTopRightRadius: radii.lg,
+    borderTopWidth: 1, borderColor: colors.border,
+  },
+  sheetHandle: {
+    alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
+    backgroundColor: colors.borderStrong, marginBottom: spacing.md,
+  },
+  timeTitle: {
+    color: colors.text, fontSize: 20, fontWeight: '900', marginBottom: spacing.sm, textAlign: 'center',
+  },
+  timePreviewWrap: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: spacing.md, marginVertical: spacing.md,
+  },
+  timePreview: {
+    color: colors.cyan, fontSize: 56, fontWeight: '900', letterSpacing: -2,
+    fontVariant: ['tabular-nums'],
+  },
+  timePreviewMin: { color: colors.text, fontSize: 56, fontWeight: '900' },
+  ampmCol: { gap: 6 },
+  ampmBtn: {
+    paddingHorizontal: 14, paddingVertical: 6, borderRadius: radii.md,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceGlass,
+    minWidth: 50, alignItems: 'center',
+  },
+  ampmBtnActive: { backgroundColor: colors.cyan, borderColor: colors.cyan },
+  ampmText: { color: colors.textSecondary, fontSize: 13, fontWeight: '900' },
+  ampmTextActive: { color: colors.bg },
+
+  bumperRow: {
+    flexDirection: 'row', justifyContent: 'space-around',
+    marginVertical: spacing.md, gap: spacing.md,
+  },
+  bumperCol: { flex: 1, alignItems: 'center' },
+  bumperLabel: {
+    color: colors.textMuted, fontSize: 10, fontWeight: '900',
+    letterSpacing: 1.5, marginBottom: 6,
+  },
+  bumperGroup: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border,
+    borderRadius: radii.md, paddingHorizontal: spacing.sm,
+  },
+  bumperBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  bumperValue: {
+    color: colors.text, fontSize: 22, fontWeight: '900',
+    minWidth: 40, textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+
+  presetChip: {
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderRadius: radii.pill,
+    backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border,
+  },
+  presetChipActive: { backgroundColor: colors.cyan, borderColor: colors.cyan },
+  presetChipText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
+  presetChipTextActive: { color: colors.bg, fontWeight: '900' },
+
+  timeActionBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, paddingVertical: 14, borderRadius: radii.pill,
+  },
+  timeCancelBtn: { backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border },
+  timeCancelText: { color: colors.textSecondary, fontWeight: '700' },
+  timeConfirmBtn: { backgroundColor: colors.cyan },
+  timeConfirmText: { color: colors.bg, fontWeight: '900', fontSize: 13 },
 
   textInput: {
     minHeight: 100, color: colors.text, fontSize: 15,
