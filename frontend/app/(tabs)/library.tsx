@@ -117,6 +117,52 @@ export default function Library() {
               </View>
             </TouchableOpacity>
 
+            {/* Challenge Tasks mini-app — featured */}
+            <TouchableOpacity
+              testID="library-card-challenges"
+              activeOpacity={0.85}
+              onPress={() => router.push('/challenges' as any)}
+              style={[styles.featureCard, { marginTop: spacing.md, borderColor: colors.green + '55' }]}
+            >
+              <View style={[styles.featureGlow, { backgroundColor: colors.green + '22' }]} />
+              <View style={styles.featureRow}>
+                <View style={[styles.featureIcon, { backgroundColor: colors.green + '22', borderColor: colors.green + '88' }]}>
+                  <Ionicons name="flash" size={32} color={colors.green} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.featureKickerRow}>
+                    <Text style={[styles.featureKicker, { color: colors.green }]}>NEW · DAILY GROWTH</Text>
+                    <View style={styles.unlockedPill}>
+                      <Ionicons name="checkmark" size={10} color={colors.green} />
+                      <Text style={styles.unlockedText}>UNLOCKED</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.featureTitle}>Challenge Tasks</Text>
+                  <Text style={styles.featureDesc}>
+                    A new uncomfortable challenge every day. Step outside your comfort zone, reflect on it, and earn XP for real growth.
+                  </Text>
+                  <View style={styles.tagRow}>
+                    <View style={[styles.featTag, { backgroundColor: colors.green + '15', borderColor: colors.green + '33' }]}>
+                      <Ionicons name="sparkles" size={10} color={colors.green} />
+                      <Text style={[styles.featTagText, { color: colors.green }]}>Daily quote</Text>
+                    </View>
+                    <View style={[styles.featTag, { backgroundColor: colors.green + '15', borderColor: colors.green + '33' }]}>
+                      <Ionicons name="trophy" size={10} color={colors.green} />
+                      <Text style={[styles.featTagText, { color: colors.green }]}>Up to 60 XP</Text>
+                    </View>
+                    <View style={[styles.featTag, { backgroundColor: colors.green + '15', borderColor: colors.green + '33' }]}>
+                      <Ionicons name="time" size={10} color={colors.green} />
+                      <Text style={[styles.featTagText, { color: colors.green }]}>History log</Text>
+                    </View>
+                  </View>
+                  <View style={[styles.featureCta, { backgroundColor: colors.green }]}>
+                    <Text style={styles.featureCtaText}>Open mini-app</Text>
+                    <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+                  </View>
+                </View>
+              </View>
+            </TouchableOpacity>
+
             {/* Coming soon row */}
             <Text style={styles.sectionLabel}>Coming soon</Text>
             <View style={styles.previewGrid}>
@@ -139,7 +185,7 @@ export default function Library() {
             </View>
           </View>
         ) : (
-          <View>
+          <View style={{ gap: spacing.sm }}>
             {/* My library — show Sleep as installed */}
             <TouchableOpacity
               testID="library-mine-sleep"
@@ -153,6 +199,23 @@ export default function Library() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.mineTitle}>Improve Sleeping</Text>
                 <Text style={styles.mineDesc}>Personalized sleep coach · AI chat</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+
+            {/* Challenge Tasks installed */}
+            <TouchableOpacity
+              testID="library-mine-challenges"
+              activeOpacity={0.85}
+              onPress={() => router.push('/challenges' as any)}
+              style={[styles.mineCard, { borderColor: colors.green + '55' }]}
+            >
+              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: colors.green + '22', borderColor: colors.green + '88' }]}>
+                <Ionicons name="flash" size={24} color={colors.green} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.mineTitle}>Challenge Tasks</Text>
+                <Text style={styles.mineDesc}>Daily growth challenges · XP rewards</Text>
               </View>
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </TouchableOpacity>

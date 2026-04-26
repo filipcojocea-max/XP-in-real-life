@@ -56,6 +56,7 @@ export default function RootLayout() {
             <Stack.Screen name="focus" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
             <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
             <Stack.Screen name="sleep" />
+            <Stack.Screen name="challenges" />
           </Stack>
         </AuthGate>
       </View>
