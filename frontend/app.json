@@ -2,7 +2,7 @@
   "expo": {
     "name": "XP in Real Life",
     "slug": "xp-confidence",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "orientation": "portrait",
     "icon": "./asseyouts/images/icon.png",
     "scheme": "xpconfidence",
@@ -23,7 +23,7 @@
     },
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
-      "versionCode": 103,
+      "versionCode": 104,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"

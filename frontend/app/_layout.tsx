@@ -15,11 +15,15 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     if (loading) return;
     const inAuthGroup = segments[0] === 'auth';
     if (!hasAccess && !inAuthGroup) {
+      // No session at all → must sign in / register / continue anon
       router.replace('/auth/login');
-    } else if (hasAccess && inAuthGroup) {
+    } else if (token && inAuthGroup) {
+      // Real account already logged in → don't show auth pages
       router.replace('/');
     }
-  }, [loading, hasAccess, segments, router]);
+    // NOTE: anon users are intentionally NOT redirected away from /auth/*.
+    // They should be able to visit Sign In / Register at any time to upgrade.
+  }, [loading, hasAccess, token, segments, router]);
 
   if (loading) {
     return (

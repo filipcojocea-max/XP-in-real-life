@@ -244,7 +244,7 @@ export default function Tasks() {
         {isAnonymous ? (
           <TouchableOpacity
             testID="anon-signin-banner"
-            onPress={() => router.push('/auth/register' as any)}
+            onPress={() => router.push('/auth/login' as any)}
             style={styles.anonBanner}
           >
             <Ionicons name="cloud-offline" size={18} color={colors.amber} />
