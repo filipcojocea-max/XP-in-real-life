@@ -94,6 +94,14 @@ export default function Login() {
             </>}
           </TouchableOpacity>
 
+          {/* Forgot password link */}
+          <Link href="/auth/forgot-password" asChild>
+            <TouchableOpacity testID="login-forgot" style={styles.forgotBtn}>
+              <Ionicons name="key-outline" size={14} color={colors.cyan} />
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </TouchableOpacity>
+          </Link>
+
           <View style={styles.linkRow}>
             <Text style={styles.linkLabel}>New here? </Text>
             <Link href="/auth/register" asChild>
@@ -187,5 +195,19 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     flex: 1,
     lineHeight: 18,
+  },
+  forgotBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 12,
+    marginTop: spacing.sm,
+  },
+  forgotText: {
+    color: colors.cyan,
+    fontSize: 13,
+    fontWeight: '800',
+    textDecorationLine: 'underline',
   },
 });

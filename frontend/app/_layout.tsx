@@ -14,10 +14,13 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === 'auth';
+    // Reset-password is reachable even when already logged in (someone clicks
+    // the magic link from an old email while signed in elsewhere).
+    const isResetPage = inAuthGroup && segments[1] === 'reset-password';
     if (!hasAccess && !inAuthGroup) {
       // No session at all → must sign in / register / continue anon
       router.replace('/auth/login');
-    } else if (token && inAuthGroup) {
+    } else if (token && inAuthGroup && !isResetPage) {
       // Real account already logged in → don't show auth pages
       router.replace('/');
     }

@@ -185,6 +185,32 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ email }),
     }),
+  authForgotPassword: (email: string, app_origin?: string) =>
+    req<{
+      message: string;
+      email: string;
+      email_delivered: boolean;
+      dev_code?: string;
+      dev_link?: string;
+    }>('/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email, app_origin }),
+    }),
+  authResetPasswordVerifyToken: (token: string) =>
+    req<{ valid: boolean; email: string }>('/auth/reset-password-verify-token', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
+  authResetPasswordWithCode: (email: string, code: string, new_password: string) =>
+    req<{ token: string; user: any }>('/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ email, code, new_password }),
+    }),
+  authResetPasswordWithToken: (token: string, new_password: string) =>
+    req<{ token: string; user: any }>('/auth/reset-password-token', {
+      method: 'POST',
+      body: JSON.stringify({ token, new_password }),
+    }),
   authMe: () => req<{ id: string; full_name: string; email: string; verified: boolean }>('/auth/me'),
   getProfile: () => req<Profile>('/profile'),
   updateProfile: (name: string) =>

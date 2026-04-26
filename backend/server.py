@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -75,6 +75,12 @@ def decode_token(token: str) -> dict:
 def _gen_code() -> str:
     """6-digit numeric verification code."""
     return f"{random.randint(0, 999999):06d}"
+
+
+def _gen_reset_token() -> str:
+    """Long, URL-safe, single-use token for the password-reset magic link."""
+    import secrets
+    return secrets.token_urlsafe(32)
 
 
 # ─────────────── Email security: validation + delivery ───────────────
@@ -573,6 +579,26 @@ class ResendPayload(BaseModel):
     email: EmailStr
 
 
+class ForgotPasswordPayload(BaseModel):
+    email: EmailStr
+    app_origin: Optional[str] = None  # frontend origin (e.g. https://app.example.com)
+
+
+class ResetPasswordWithCodePayload(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=10)
+    new_password: str = Field(min_length=5)
+
+
+class ResetPasswordWithTokenPayload(BaseModel):
+    token: str = Field(min_length=10)
+    new_password: str = Field(min_length=5)
+
+
+class VerifyResetTokenPayload(BaseModel):
+    token: str = Field(min_length=10)
+
+
 def _serialize_user(u: dict) -> dict:
     return {
         "id": u.get("_id"),
@@ -723,6 +749,252 @@ async def auth_me(user_id: str = Depends(get_current_user)):
     if not user:
         raise HTTPException(404, "User not found")
     return _serialize_user(user)
+
+
+# ─────────────── Password Reset (forgot password) ───────────────
+def _send_password_reset_email(
+    email: str, code: str, link: str, full_name: str = ""
+) -> bool:
+    """Send the password-reset email containing BOTH:
+       a) a clickable magic-link button to /auth/reset-password?token=...
+       b) a 6-digit fallback code for manual entry inside the app
+
+       Returns True if Resend actually delivered, False if dev-mode log only.
+       Raises if Resend is configured but the send fails (so caller can refuse).
+    """
+    auth_log = logging.getLogger("auth")
+    api_key = os.environ.get("RESEND_API_KEY")
+    if not api_key:
+        auth_log.warning(
+            "[DEV-EMAIL] PWD-RESET → %s  link=%s  code=%s",
+            email, link, code,
+        )
+        return False
+    try:
+        import resend  # type: ignore
+        resend.api_key = api_key
+        sender = os.environ.get("RESEND_FROM", "XP in Real Life <onboarding@resend.dev>")
+        html = (
+            f"<div style='font-family:-apple-system,Segoe UI,sans-serif;background:#0b0d12;"
+            f"color:#fff;padding:32px;border-radius:12px;max-width:480px;margin:auto'>"
+            f"<h2 style='color:#5cffb1;margin:0 0 6px'>Reset your password 🔑</h2>"
+            f"<p style='color:#aab1c2;margin:0 0 24px'>"
+            f"Hi {full_name or 'there'} — we got a request to reset your XP in Real Life password. "
+            f"Choose either option below:</p>"
+
+            f"<div style='background:#11151c;border:1px solid #1f2733;border-radius:8px;"
+            f"padding:18px;margin-bottom:14px'>"
+            f"<p style='color:#aab1c2;font-size:11px;letter-spacing:1.2px;font-weight:800;"
+            f"margin:0 0 10px;text-transform:uppercase'>Option 1 · Tap the link</p>"
+            f"<a href='{link}' style='display:inline-block;background:#5cffb1;color:#0b0d12;"
+            f"padding:14px 28px;border-radius:8px;font-weight:900;text-decoration:none;"
+            f"letter-spacing:0.4px'>🔓 Reset Password</a>"
+            f"<p style='color:#7a8294;font-size:11px;margin:12px 0 0'>"
+            f"Or copy this URL: <span style='color:#5fd2ff'>{link}</span></p>"
+            f"</div>"
+
+            f"<div style='background:#11151c;border:1px solid #1f2733;border-radius:8px;"
+            f"padding:18px;margin-bottom:14px'>"
+            f"<p style='color:#aab1c2;font-size:11px;letter-spacing:1.2px;font-weight:800;"
+            f"margin:0 0 10px;text-transform:uppercase'>Option 2 · Use this 6-digit code in the app</p>"
+            f"<div style='font-size:36px;font-weight:900;letter-spacing:10px;color:#5fd2ff;"
+            f"text-align:center;font-variant:tabular-nums;padding:14px 0;"
+            f"background:#0b0d12;border-radius:6px'>{code}</div>"
+            f"</div>"
+
+            f"<p style='color:#7a8294;font-size:12px;margin:24px 0 0;line-height:1.5'>"
+            f"Both options expire in 30 minutes. If you didn't request this, just ignore this "
+            f"email — your password won't change.</p>"
+            f"</div>"
+        )
+        text = (
+            f"Hi {full_name or 'there'},\n\n"
+            "We got a request to reset your XP in Real Life password.\n\n"
+            f"Option 1 — open this link:\n{link}\n\n"
+            f"Option 2 — paste this code in the app: {code}\n\n"
+            "Both expire in 30 minutes.\n\n"
+            "If you didn't request this, ignore this email."
+        )
+        resend.Emails.send({
+            "from": sender,
+            "to": [email],
+            "subject": "Reset your XP in Real Life password",
+            "html": html,
+            "text": text,
+        })
+        auth_log.info("Password-reset email sent to %s", email)
+        return True
+    except Exception as e:
+        auth_log.exception("Resend send failed for reset to %s: %s", email, e)
+        raise
+
+
+def _build_reset_link(token: str, email: str, request: Request, app_origin: Optional[str]) -> str:
+    """Build the magic link the user clicks in the email.
+       Priority: explicit app_origin → request Origin/Referer header → APP_URL env.
+    """
+    origin: Optional[str] = (app_origin or "").strip().rstrip("/") or None
+    if not origin:
+        # Try the Origin / Referer header from the calling browser
+        h = request.headers.get("origin") or request.headers.get("referer") or ""
+        if h:
+            from urllib.parse import urlparse
+            p = urlparse(h)
+            if p.scheme and p.netloc:
+                origin = f"{p.scheme}://{p.netloc}"
+    if not origin:
+        origin = (os.environ.get("APP_URL") or "").rstrip("/") or "http://localhost:3000"
+    from urllib.parse import quote
+    return f"{origin}/auth/reset-password?token={quote(token)}&email={quote(email)}"
+
+
+@api_router.post("/auth/forgot-password")
+async def auth_forgot_password(body: ForgotPasswordPayload, request: Request):
+    """Step 1: user enters email. We:
+       a) check the email is actually registered
+       b) generate a fresh 6-digit code AND a long URL token
+       c) email both the link and the code
+    """
+    email_norm = body.email.lower().strip()
+    user = await db.users.find_one({"email": email_norm})
+    if not user:
+        raise HTTPException(
+            404,
+            "We couldn't find an account with that email. "
+            "Double-check it, or register a new account.",
+        )
+    code = _gen_code()
+    token = _gen_reset_token()
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "reset_code": code,
+            "reset_token": token,
+            "reset_expires": expires,
+        }},
+    )
+    link = _build_reset_link(token, email_norm, request, body.app_origin)
+    sent_real = False
+    try:
+        sent_real = _send_password_reset_email(
+            email_norm, code, link, user.get("full_name", "")
+        )
+    except Exception as e:
+        raise HTTPException(
+            400,
+            f"We couldn't deliver the reset email to {email_norm}. ({str(e)[:120]})",
+        )
+    response = {
+        "message": (
+            "Reset email sent. Check your inbox (and spam folder) — it includes a link AND a 6-digit code."
+            if sent_real else
+            "Reset email sent. Check backend logs in dev mode."
+        ),
+        "email": email_norm,
+        "email_delivered": sent_real,
+    }
+    if not os.environ.get("RESEND_API_KEY"):
+        # dev mode: surface code + link so the tester can verify without an inbox
+        response["dev_code"] = code
+        response["dev_link"] = link
+    return response
+
+
+@api_router.post("/auth/reset-password-verify-token")
+async def auth_reset_password_verify_token(body: VerifyResetTokenPayload):
+    """Optional helper: lets the reset-password screen check a magic-link token
+       BEFORE asking the user for a new password. Returns the email so the UI
+       can display 'Resetting password for foo@bar.com'.
+    """
+    user = await db.users.find_one({"reset_token": body.token})
+    if not user:
+        raise HTTPException(400, "This reset link is invalid or has already been used.")
+    expires = user.get("reset_expires")
+    if not expires:
+        raise HTTPException(400, "This reset link has expired.")
+    try:
+        exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > exp_dt:
+            raise HTTPException(400, "This reset link has expired. Request a new one.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "This reset link is invalid.")
+    return {"valid": True, "email": user.get("email")}
+
+
+@api_router.post("/auth/reset-password")
+async def auth_reset_password(body: ResetPasswordWithCodePayload):
+    """Reset using the email + 6-digit code combo (Option 2 in the email)."""
+    email_norm = body.email.lower().strip()
+    user = await db.users.find_one({"email": email_norm})
+    if not user:
+        raise HTTPException(404, "No account with that email.")
+    stored_code = user.get("reset_code")
+    expires = user.get("reset_expires")
+    if not stored_code or not expires:
+        raise HTTPException(400, "No active password-reset request. Tap 'Forgot password?' again.")
+    try:
+        exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > exp_dt:
+            raise HTTPException(400, "This reset code has expired. Request a new one.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "Reset request is invalid.")
+    if body.code.strip() != stored_code:
+        raise HTTPException(400, "That code is incorrect. Double-check the email.")
+    # Update password + invalidate the reset code/token
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "password_hash": hash_password(body.new_password),
+            "verified": True,  # email ownership is proven by receiving the code
+        },
+        "$unset": {
+            "reset_code": "",
+            "reset_token": "",
+            "reset_expires": "",
+        }},
+    )
+    user = await db.users.find_one({"_id": user["_id"]})
+    token = make_token(user["_id"], email_norm)
+    return {"token": token, "user": _serialize_user(user)}
+
+
+@api_router.post("/auth/reset-password-token")
+async def auth_reset_password_token(body: ResetPasswordWithTokenPayload):
+    """Reset using the magic-link token (Option 1 in the email)."""
+    user = await db.users.find_one({"reset_token": body.token})
+    if not user:
+        raise HTTPException(400, "This reset link is invalid or has already been used.")
+    expires = user.get("reset_expires")
+    if not expires:
+        raise HTTPException(400, "This reset link has expired.")
+    try:
+        exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > exp_dt:
+            raise HTTPException(400, "This reset link has expired. Request a new one.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "Reset request is invalid.")
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "password_hash": hash_password(body.new_password),
+            "verified": True,
+        },
+        "$unset": {
+            "reset_code": "",
+            "reset_token": "",
+            "reset_expires": "",
+        }},
+    )
+    user = await db.users.find_one({"_id": user["_id"]})
+    token = make_token(user["_id"], user.get("email"))
+    return {"token": token, "user": _serialize_user(user)}
 
 
 # ------------------------------------------------------------------
