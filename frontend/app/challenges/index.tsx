@@ -20,9 +20,11 @@ import {
   ChallengeTodayResp,
   ChallengeCompletion,
   ChallengeStatus,
+  Profile,
 } from '../../src/api';
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
+import MorningTimePicker from '../../src/components/MorningTimePicker';
 
 export default function ChallengesScreen() {
   const [today, setToday] = useState<ChallengeTodayResp | null>(null);
@@ -30,12 +32,24 @@ export default function ChallengesScreen() {
   const [loading, setLoading] = useState(true);
   const [showChallengeModal, setShowChallengeModal] = useState(false);
   const [showReflectModal, setShowReflectModal] = useState(false);
+  const [showMorningModal, setShowMorningModal] = useState(false);
+  const [profile, setProfile] = useState<Profile | null>(null);
   const [acting, setActing] = useState(false);
   const [now, setNow] = useState<Date>(new Date());
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      // Fetch profile first so we can decide whether to gate with the
+      // morning-time picker BEFORE we surface today's challenge.
+      const prof = await api.getProfile();
+      setProfile(prof);
+      if (!prof.morning_setup_done) {
+        // Skip loading challenges until the user picks a morning time.
+        setShowMorningModal(true);
+        setLoading(false);
+        return;
+      }
       const [t, p] = await Promise.all([api.challengeToday(), api.challengePast()]);
       setToday(t);
       setPast(p.completions);
@@ -45,6 +59,18 @@ export default function ChallengesScreen() {
       setLoading(false);
     }
   }, []);
+
+  const onSaveMorningTime = async (wakeTime: string) => {
+    try {
+      const prof = await api.completeMorningSetup(wakeTime);
+      setProfile(prof);
+      setShowMorningModal(false);
+      // Reload challenges using the new morning boundary.
+      await load();
+    } catch (e: any) {
+      showAlert('Could not save', String(e?.message || e));
+    }
+  };
 
   useEffect(() => {
     load();
@@ -87,6 +113,29 @@ export default function ChallengesScreen() {
       setActing(false);
     }
   };
+
+  // Show the one-time morning-time picker on the very first open of the
+  // mini-app. Until the user taps "Done", we render an empty backdrop with
+  // the picker on top so they can't interact with anything else.
+  if (showMorningModal) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn}>
+            <Ionicons name="chevron-back" size={22} color={colors.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Challenge Tasks</Text>
+          <View style={{ width: 36 }} />
+        </View>
+        <MorningTimePicker
+          initialTime={profile?.wake_time}
+          doneLabel="Done"
+          footnote="You can change this anytime from Profile."
+          onDone={onSaveMorningTime}
+        />
+      </SafeAreaView>
+    );
+  }
 
   if (loading || !today) {
     return (
