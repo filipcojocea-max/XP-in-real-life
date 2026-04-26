@@ -87,34 +87,27 @@ export default function ProfileScreen() {
     ]);
   };
 
-  const handleSignOut = () => {
-    const doSignOut = async () => {
-      try {
-        await signOut();
-      } finally {
-        // AuthGate will normally route to /auth/login when token is gone, but
-        // we replace explicitly to avoid any flicker through tabs.
-        router.replace('/auth/login');
-      }
-    };
+  const [signingOut, setSigningOut] = useState(false);
 
-    if (Platform.OS === 'web') {
-      // eslint-disable-next-line no-alert
-      const ok = window.confirm(
-        'Sign out?\n\nYou\'ll need to log back in to access your account on this device.'
-      );
-      if (ok) doSignOut();
-      return;
+  const handleSignOut = async () => {
+    // No confirmation dialog: sign-out is non-destructive and the previous
+    // Alert.alert/window.confirm flow was unreliable on some platforms.
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await signOut();
+    } catch (e) {
+      console.log('signOut error', e);
     }
-
-    Alert.alert(
-      'Sign out?',
-      "You'll need to log back in to access your account on this device.",
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign Out', style: 'destructive', onPress: doSignOut },
-      ]
-    );
+    // Always route to the login screen so the user sees something change
+    // even if the AuthGate hasn't reacted to the state update yet.
+    try {
+      router.replace('/auth/login');
+    } catch (e) {
+      console.log('signOut nav error', e);
+    } finally {
+      setSigningOut(false);
+    }
   };
 
   if (loading || !profile) {
@@ -312,15 +305,23 @@ export default function ProfileScreen() {
           ) : (
             <TouchableOpacity
               testID="profile-signout-btn"
-              style={[styles.actionRow, { marginTop: 0 }]}
+              style={[styles.actionRow, { marginTop: 0 }, signingOut && { opacity: 0.6 }]}
               onPress={handleSignOut}
+              disabled={signingOut}
+              activeOpacity={0.7}
             >
               <View style={[styles.actionIcon, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '55' }]}>
-                <Ionicons name="log-out" size={18} color={colors.amber} />
+                {signingOut ? (
+                  <ActivityIndicator size="small" color={colors.amber} />
+                ) : (
+                  <Ionicons name="log-out" size={18} color={colors.amber} />
+                )}
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.actionTitle}>Sign Out</Text>
-                <Text style={styles.actionDesc}>Log out of your account</Text>
+                <Text style={styles.actionTitle}>{signingOut ? 'Signing out…' : 'Sign Out'}</Text>
+                <Text style={styles.actionDesc}>
+                  {signingOut ? 'See you soon, hero.' : 'Log out of your account'}
+                </Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
             </TouchableOpacity>
