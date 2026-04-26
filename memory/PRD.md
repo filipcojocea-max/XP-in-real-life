@@ -60,3 +60,15 @@ Cumulative thresholds per level: [0, 100, 250, 500, 900, 1500, 2500, 4000, 6000,
 - **Once-per-day tick**: uncomplete endpoint always returns 400. Frontend toggle blocks un-tick.
 - **Onboarding tweaks**: age options now `10-14`, `15-17`, `18-20`, `21-25`, `25+`;
   gender options `Male`, `Female` only.
+
+## Update (Apr 2026) — Anon mode + 200-level system + XP cap
+- **"Continue without signing in"** option on Login. Generates a per-device anon-id stored in
+  SecureStore, sent as `X-Anonymous-Id` header. Backend treats it as a separate user.
+- **In-app banner** on Quests tab: *"Sign in to save your progress"* shown only when anon.
+- **Un-tick restored**: tapping a completed task removes the XP and the task_log; profile XP
+  rolls back; achievements unaffected (don't re-lock).
+- **Custom task XP cap = 20**: backend clamps create_task and update_task xp_value to [5,20]
+  for non-default tasks. Default seeded tasks bypass the cap (e.g. Workout session = 40 XP).
+- **200-level system** replacing old 10-level: cum_xp(L) = round(49.6 * L^1.87); max 1,000,000 XP.
+  L1=0, L5=1006, L10=3677, L25=20400, L50=74569, L100=272572, L150=581798, L200=996340.
+  New `GET /api/levels` endpoint exposes the full table.
