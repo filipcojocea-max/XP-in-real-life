@@ -100,20 +100,12 @@ export default function Login() {
           <TouchableOpacity
             testID="login-anon"
             onPress={async () => {
-              Alert.alert(
-                'Continue without an account?',
-                "You can use everything in the app, but your XP and progress will only live on this device. If you uninstall or switch devices, it'll be gone.\n\nCreate an account anytime from Profile to save your progress for good.",
-                [
-                  { text: 'Cancel', style: 'cancel' },
-                  {
-                    text: 'Continue',
-                    onPress: async () => {
-                      await continueAnonymously();
-                      router.replace('/');
-                    },
-                  },
-                ],
-              );
+              try {
+                await continueAnonymously();
+                router.replace('/');
+              } catch (e: any) {
+                Alert.alert('Could not continue', String(e.message || e));
+              }
             }}
             style={styles.anonBtn}
           >
@@ -121,7 +113,7 @@ export default function Login() {
             <Text style={styles.anonText}>Continue without signing in</Text>
           </TouchableOpacity>
           <Text style={styles.anonHint}>
-            Progress is saved on this device only. Sign up later to back it up.
+            Progress is saved on this device only. Sign up later from Profile to back it up.
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>

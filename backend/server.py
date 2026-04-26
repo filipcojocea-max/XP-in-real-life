@@ -290,6 +290,11 @@ async def get_or_create_profile_for(user_id: str, full_name: str = "Hero") -> di
             "created_at": now_iso(),
         }
         await db.profile.insert_one(prof)
+        # Auto-seed default tasks for the new profile (fresh users — including anon mode — get the starter set)
+        try:
+            await seed_default_tasks_for_user(user_id)
+        except Exception:
+            logger.exception("auto-seed failed for %s", user_id)
     return prof
 
 
@@ -1095,7 +1100,7 @@ async def seed_default_tasks_for_user(user_id: str) -> int:
 
 
 @api_router.post("/seed")
-async def seed_defaults(user_id: str = Depends(get_current_user)):
+async def seed_defaults(user_id: str = Depends(get_user_or_legacy)):
     n = await seed_default_tasks_for_user(user_id)
     return {"seeded": n > 0, "count": n}
 

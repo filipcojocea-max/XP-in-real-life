@@ -72,3 +72,11 @@ Cumulative thresholds per level: [0, 100, 250, 500, 900, 1500, 2500, 4000, 6000,
 - **200-level system** replacing old 10-level: cum_xp(L) = round(49.6 * L^1.87); max 1,000,000 XP.
   L1=0, L5=1006, L10=3677, L25=20400, L50=74569, L100=272572, L150=581798, L200=996340.
   New `GET /api/levels` endpoint exposes the full table.
+
+## Update (Apr 2026) — Anon mode bugfix
+- Removed broken `Alert.alert` confirm dialog (it doesn't render buttons reliably on web).
+  Tapping "Continue without signing in" now goes straight into the app.
+- `get_or_create_profile_for()` auto-seeds default tasks on profile creation, so anon users get
+  the 8-quest starter set immediately on first launch.
+- `/api/seed` switched from strict `get_current_user` to `get_user_or_legacy` so anon clients
+  can also call it (defensive — they shouldn't need to since auto-seed runs).
