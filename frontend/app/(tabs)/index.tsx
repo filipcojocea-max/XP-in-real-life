@@ -35,6 +35,10 @@ export default function Home() {
       // Only redirect to onboarding when this load happens because the Home
       // screen is actually focused. Otherwise, navigating to a sibling tab
       // (e.g. /auth/login from the anon banner) would be hijacked here.
+      if (allowRedirect && !p.morning_setup_done) {
+        router.replace('/morning-setup');
+        return;
+      }
       if (allowRedirect && !p.onboarding_complete) {
         router.replace('/onboarding');
         return;

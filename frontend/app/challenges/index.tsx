@@ -302,20 +302,35 @@ function PastChallengeCard({ c, onDelete }: { c: ChallengeCompletion; onDelete: 
   const dateStr = new Date(c.completed_at).toLocaleDateString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric',
   });
+  const isUncompleted = !!c.auto_uncompleted;
+  const accent = isUncompleted ? colors.danger : colors.cyan;
   return (
-    <View style={styles.pastCard}>
+    <View style={[styles.pastCard, isUncompleted && { borderColor: colors.danger + '55' }]}>
       <TouchableOpacity style={styles.pastHead} onPress={() => setOpen(!open)} activeOpacity={0.7}>
-        <View style={[styles.challengeIconBubble, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
-          <Ionicons name={c.challenge_icon as any} size={16} color={colors.cyan} />
+        <View style={[styles.challengeIconBubble, { backgroundColor: accent + '22', borderColor: accent + '55' }]}>
+          <Ionicons
+            name={(isUncompleted ? 'close-circle' : c.challenge_icon) as any}
+            size={16}
+            color={accent}
+          />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.pastTitle}>{c.challenge_title}</Text>
-          <Text style={styles.pastSub}>{dateStr}{c.challenge_tagline ? ` · ${c.challenge_tagline}` : ''}</Text>
+          <Text style={styles.pastTitle} numberOfLines={1}>{c.challenge_title}</Text>
+          <Text style={styles.pastSub} numberOfLines={1}>
+            {dateStr}{c.challenge_tagline ? ` · ${c.challenge_tagline}` : ''}
+          </Text>
         </View>
-        <View style={[styles.xpPill, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '55' }]}>
-          <Ionicons name="flash" size={11} color={colors.amber} />
-          <Text style={styles.xpPillText}>+{c.xp_awarded}</Text>
-        </View>
+        {isUncompleted ? (
+          <View style={styles.uncompletedPill} testID="past-uncompleted-pill">
+            <Ionicons name="close" size={11} color={colors.danger} />
+            <Text style={styles.uncompletedPillText}>UNCOMPLETED</Text>
+          </View>
+        ) : (
+          <View style={[styles.xpPill, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '55' }]}>
+            <Ionicons name="flash" size={11} color={colors.amber} />
+            <Text style={styles.xpPillText}>+{c.xp_awarded}</Text>
+          </View>
+        )}
         <Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={18} color={colors.textMuted} />
       </TouchableOpacity>
       {!open ? (
@@ -328,19 +343,30 @@ function PastChallengeCard({ c, onDelete }: { c: ChallengeCompletion; onDelete: 
 
           <View style={styles.pastDivider} />
 
-          <PastField label="Did you complete it?" value={c.completed ? 'Yes' : 'No'} icon="checkmark-circle" color={c.completed ? colors.green : colors.danger} />
-          <PastField label="How was it?" value={c.how_text || '—'} multi />
-          <PastField label="Difficulty" value={c.difficulty === 'difficult' ? 'Difficult' : 'Easy'} icon="flash" color={c.difficulty === 'difficult' ? colors.amber : colors.cyan} />
-          <PastField label="Your experience" value={c.experience_text || '—'} multi />
-
-          <View style={styles.ratingRow}>
-            <Text style={styles.pastFieldLabel}>Rating</Text>
-            <View style={{ flexDirection: 'row', gap: 2 }}>
-              {[1, 2, 3, 4, 5].map((s) => (
-                <Ionicons key={s} name={s <= c.rating ? 'star' : 'star-outline'} size={16} color={colors.amber} />
-              ))}
+          {isUncompleted ? (
+            <View style={styles.uncompletedNotice}>
+              <Ionicons name="time" size={14} color={colors.danger} />
+              <Text style={styles.uncompletedNoticeText}>
+                The 24-hour window expired before this challenge was completed.
+              </Text>
             </View>
-          </View>
+          ) : (
+            <>
+              <PastField label="Did you complete it?" value={c.completed ? 'Yes' : 'No'} icon="checkmark-circle" color={c.completed ? colors.green : colors.danger} />
+              <PastField label="How was it?" value={c.how_text || '—'} multi />
+              <PastField label="Difficulty" value={c.difficulty === 'difficult' ? 'Difficult' : 'Easy'} icon="flash" color={c.difficulty === 'difficult' ? colors.amber : colors.cyan} />
+              <PastField label="Your experience" value={c.experience_text || '—'} multi />
+
+              <View style={styles.ratingRow}>
+                <Text style={styles.pastFieldLabel}>Rating</Text>
+                <View style={{ flexDirection: 'row', gap: 2 }}>
+                  {[1, 2, 3, 4, 5].map((s) => (
+                    <Ionicons key={s} name={s <= c.rating ? 'star' : 'star-outline'} size={16} color={colors.amber} />
+                  ))}
+                </View>
+              </View>
+            </>
+          )}
 
           <TouchableOpacity style={styles.deleteBtn} onPress={onDelete}>
             <Ionicons name="trash" size={14} color={colors.danger} />
@@ -722,6 +748,23 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   xpPillText: { color: colors.amber, fontSize: 11, fontWeight: '900', letterSpacing: 0.3 },
+  uncompletedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    backgroundColor: colors.danger + '15',
+    borderColor: colors.danger + '55',
+  },
+  uncompletedPillText: {
+    color: colors.danger,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
   viewMoreBtn: {
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.md,
@@ -734,6 +777,24 @@ const styles = StyleSheet.create({
   },
   pastDesc: { color: colors.textSecondary, fontSize: 13, lineHeight: 19 },
   pastDivider: { height: 1, backgroundColor: colors.border, marginVertical: spacing.md },
+  uncompletedNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: colors.danger + '15',
+    borderColor: colors.danger + '55',
+    borderWidth: 1,
+    borderRadius: radii.md,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 4,
+  },
+  uncompletedNoticeText: {
+    color: colors.danger,
+    fontSize: 12,
+    fontWeight: '700',
+    flex: 1,
+  },
   pastFieldLabel: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.4, textTransform: 'uppercase' },
   pastFieldValue: { color: colors.text, fontSize: 13, fontWeight: '700' },
   ratingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },

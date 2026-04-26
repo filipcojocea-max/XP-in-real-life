@@ -367,6 +367,7 @@ async def get_or_create_profile_for(user_id: str, full_name: str = "Hero") -> di
             "bio": "",
             "avatar_base64": None,
             "wake_time": "07:00",
+            "morning_setup_done": False,
             "created_at": now_iso(),
         }
         await db.profile.insert_one(prof)
@@ -406,6 +407,7 @@ def serialize_profile(prof: dict) -> dict:
         "bio": prof.get("bio", ""),
         "avatar_base64": prof.get("avatar_base64"),
         "wake_time": prof.get("wake_time", "07:00"),
+        "morning_setup_done": prof.get("morning_setup_done", False),
         "created_at": prof.get("created_at"),
     }
 
@@ -550,6 +552,7 @@ def _clamp_goal_xp(unit: Optional[str], xp: Optional[int]) -> int:
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     wake_time: Optional[str] = None  # "HH:MM" 24h — used to compute daily reset boundary (wake - 2h)
+    morning_setup_done: Optional[bool] = None  # set true after the very-first "morning time" question
 
 
 class CompleteTaskBody(BaseModel):
@@ -1878,8 +1881,77 @@ def _greeting_for_now() -> str:
     return "Good night"
 
 
-def _today_iso() -> str:
-    return datetime.now().date().isoformat()
+def _parse_hhmm(s: str | None, default: tuple[int, int] = (7, 0)) -> tuple[int, int]:
+    try:
+        h, m = (s or "").split(":")
+        return max(0, min(23, int(h))), max(0, min(59, int(m)))
+    except Exception:
+        return default
+
+
+def _challenge_day_for_user(now_dt: datetime, wake_str: str | None) -> "datetime.date":
+    """Return the 'challenge day' the user is currently in.
+    A challenge day starts at wake_str and lasts 24h. If `now` is before
+    today's wake-time, we are still in yesterday's challenge day."""
+    wake_h, wake_m = _parse_hhmm(wake_str)
+    today_wake = now_dt.replace(hour=wake_h, minute=wake_m, second=0, microsecond=0)
+    if now_dt < today_wake:
+        return (now_dt - timedelta(days=1)).date()
+    return now_dt.date()
+
+
+async def _wake_for_user(user_id: str) -> str:
+    prof = await db.profile.find_one({"_id": user_id})
+    return (prof or {}).get("wake_time") or "07:00"
+
+
+async def _autoroll_uncompleted_challenges(user_id: str, current_day: "datetime.date") -> None:
+    """For any challenge_state docs older than the current challenge day where
+    the user did NOT complete the challenge, write an `Uncompleted` past entry
+    and remove the stale state doc. This makes the mini-app self-cleaning even
+    if the user never re-opens it for several days."""
+    current_iso = current_day.isoformat()
+    cur = db.challenge_state.find({
+        "user_id": user_id,
+        "date": {"$lt": current_iso},
+        "status": {"$ne": "completed"},
+    })
+    async for state in cur:
+        ch_id = state.get("challenge_id")
+        ch = find_challenge(ch_id) if ch_id else None
+        if not ch:
+            # Best-effort: rebuild from the seeded RNG using the original date
+            try:
+                from datetime import date as _d
+                d = _d.fromisoformat(state.get("date"))
+                ch = get_today_challenge(user_id, d)
+            except Exception:
+                ch = {"id": "unknown", "title": "Unknown Challenge",
+                      "tagline": "", "description": "", "icon": "flash"}
+        doc = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "date": state.get("date"),
+            "challenge_id": ch.get("id", "unknown"),
+            "challenge_title": ch.get("title", "Unknown Challenge"),
+            "challenge_tagline": ch.get("tagline", ""),
+            "challenge_description": ch.get("description", ""),
+            "challenge_icon": ch.get("icon", "flash"),
+            "completed": False,
+            "auto_uncompleted": True,
+            "how_text": "",
+            "difficulty": "easy",
+            "experience_text": "",
+            "rating": 0,
+            "xp_awarded": 0,
+            "completed_at": now_iso(),
+        }
+        await db.challenge_completions.insert_one(doc)
+    # Now nuke all stale state docs (regardless of original status)
+    await db.challenge_state.delete_many({
+        "user_id": user_id,
+        "date": {"$lt": current_iso},
+    })
 
 
 class ChallengeRejectPayload(BaseModel):
@@ -1896,12 +1968,18 @@ class ChallengeCompletePayload(BaseModel):
 
 @api_router.get("/challenge/today")
 async def challenge_today(user_id: str = Depends(get_user_or_legacy)):
-    """Returns today's quote, challenge, current state and the greeting."""
-    today = _today_iso()
-    today_d = datetime.now().date()
-    quote = get_today_quote(user_id, today_d)
-    ch = get_today_challenge(user_id, today_d)
-    # Look up the user's state for today (accept/reject/complete)
+    """Returns today's quote, challenge, current state and the greeting.
+    Honors the user's `wake_time` so the 24-hour cycle starts at their morning.
+    """
+    wake = await _wake_for_user(user_id)
+    now_dt = datetime.now()
+    cur_day = _challenge_day_for_user(now_dt, wake)
+    # Self-clean stale state → past as Uncompleted
+    await _autoroll_uncompleted_challenges(user_id, cur_day)
+
+    today = cur_day.isoformat()
+    quote = get_today_quote(user_id, cur_day)
+    ch = get_today_challenge(user_id, cur_day)
     state_doc = await db.challenge_state.find_one(
         {"user_id": user_id, "date": today}
     )
@@ -1913,13 +1991,17 @@ async def challenge_today(user_id: str = Depends(get_user_or_legacy)):
         "challenge": ch,
         "status": status,        # ready | accepted | rejected | completed
         "completed_id": (state_doc or {}).get("completed_doc_id"),
+        "wake_time": wake,
     }
 
 
 @api_router.post("/challenge/accept")
 async def challenge_accept(user_id: str = Depends(get_user_or_legacy)):
-    today = _today_iso()
-    ch = get_today_challenge(user_id, datetime.now().date())
+    wake = await _wake_for_user(user_id)
+    cur_day = _challenge_day_for_user(datetime.now(), wake)
+    await _autoroll_uncompleted_challenges(user_id, cur_day)
+    today = cur_day.isoformat()
+    ch = get_today_challenge(user_id, cur_day)
     await db.challenge_state.update_one(
         {"user_id": user_id, "date": today},
         {"$set": {
@@ -1936,8 +2018,11 @@ async def challenge_accept(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.post("/challenge/reject")
 async def challenge_reject(user_id: str = Depends(get_user_or_legacy)):
-    today = _today_iso()
-    ch = get_today_challenge(user_id, datetime.now().date())
+    wake = await _wake_for_user(user_id)
+    cur_day = _challenge_day_for_user(datetime.now(), wake)
+    await _autoroll_uncompleted_challenges(user_id, cur_day)
+    today = cur_day.isoformat()
+    ch = get_today_challenge(user_id, cur_day)
     await db.challenge_state.update_one(
         {"user_id": user_id, "date": today},
         {"$set": {
@@ -1957,8 +2042,11 @@ async def challenge_complete(
     body: ChallengeCompletePayload,
     user_id: str = Depends(get_user_or_legacy),
 ):
-    today = _today_iso()
-    ch = get_today_challenge(user_id, datetime.now().date())
+    wake = await _wake_for_user(user_id)
+    cur_day = _challenge_day_for_user(datetime.now(), wake)
+    await _autoroll_uncompleted_challenges(user_id, cur_day)
+    today = cur_day.isoformat()
+    ch = get_today_challenge(user_id, cur_day)
     # Difficulty-based XP: easy=30, difficult=60. Don't award if !completed.
     awarded_xp = 0
     if body.completed:
@@ -1974,6 +2062,7 @@ async def challenge_complete(
         "challenge_description": ch["description"],
         "challenge_icon": ch.get("icon", "flash"),
         "completed": bool(body.completed),
+        "auto_uncompleted": False,
         "how_text": (body.how_text or "").strip(),
         "difficulty": (body.difficulty or "easy").lower(),
         "experience_text": (body.experience_text or "").strip(),

@@ -68,6 +68,7 @@ export type Profile = {
   bio: string;
   avatar_base64: string | null;
   wake_time?: string;
+  morning_setup_done?: boolean;
 };
 
 /**
@@ -240,6 +241,11 @@ export const api = {
     req<Profile>('/profile', { method: 'PUT', body: JSON.stringify({ name }) }),
   updateWakeTime: (wake_time: string) =>
     req<Profile>('/profile', { method: 'PUT', body: JSON.stringify({ wake_time }) }),
+  completeMorningSetup: (wake_time: string) =>
+    req<Profile>('/profile', {
+      method: 'PUT',
+      body: JSON.stringify({ wake_time, morning_setup_done: true }),
+    }),
   resetProfile: () => req<Profile>('/profile/reset', { method: 'POST' }),
   completeOnboarding: (payload: OnboardingPayload) =>
     req<Profile>('/profile/onboarding', { method: 'PUT', body: JSON.stringify(payload) }),
@@ -418,6 +424,7 @@ export type ChallengeCompletion = {
   challenge_description: string;
   challenge_icon: string;
   completed: boolean;
+  auto_uncompleted?: boolean;
   how_text: string;
   difficulty: 'easy' | 'difficult';
   experience_text: string;
