@@ -129,12 +129,58 @@ export async function hasGrantedPermissions(): Promise<boolean> {
 export async function requestPermissions(): Promise<boolean> {
   const hc = tryLoadHC();
   if (!hc) throw new Error('Health Connect is not available on this device.');
-  await hc.initialize();
-  const granted = await hc.requestPermission(REQUIRED_PERMISSIONS);
-  // Sometimes the call returns immediately while the user is still on the
-  // permission screen. Re-check explicitly.
-  if (Array.isArray(granted) && granted.length > 0) return true;
+  try {
+    await hc.initialize();
+  } catch (e) {
+    throw new Error('Health Connect could not be initialized. Make sure the Health Connect app is installed and up to date.');
+  }
+  // Some manufacturers (Samsung One UI) still crash the app with a native
+  // SecurityException if any single record-type in the request list isn't
+  // declared in AndroidManifest.xml. To stay safe even when one of the
+  // permissions is rolled out late by Health Connect, ask for permissions
+  // one at a time and just skip the ones that throw — the user will still
+  // be granted the ones that succeeded.
+  let anyGranted = false;
+  for (const perm of REQUIRED_PERMISSIONS) {
+    try {
+      const out = await hc.requestPermission([perm]);
+      if (Array.isArray(out) && out.length > 0) anyGranted = true;
+    } catch (e) {
+      // Swallow — we'll re-check via getGrantedPermissions below.
+      console.log('[HC] requestPermission failed for', perm, e);
+    }
+  }
+  if (anyGranted) return true;
   return await hasGrantedPermissions();
+}
+
+/**
+ * Opens the system Health Connect "permissions for this app" screen, used
+ * as a manual fallback when the in-app permission dialog gets dismissed
+ * or denied.
+ */
+export async function openHealthConnectSettings(): Promise<void> {
+  const hc = tryLoadHC();
+  if (hc && typeof hc.openHealthConnectSettings === 'function') {
+    try {
+      await hc.openHealthConnectSettings();
+      return;
+    } catch (e) {
+      console.log('[HC] openHealthConnectSettings failed', e);
+    }
+  }
+  // Fallback: deep-link the Health Connect app or its Play Store page.
+  try {
+    const Linking = require('expo-linking');
+    await Linking.openURL('package:com.google.android.apps.healthdata');
+  } catch {
+    try {
+      const Linking = require('expo-linking');
+      await Linking.openURL('https://play.google.com/store/apps/details?id=com.google.android.apps.healthdata');
+    } catch {
+      // last resort: silently no-op
+    }
+  }
 }
 
 // ── Stage helpers ────────────────────────────────────────────────────────

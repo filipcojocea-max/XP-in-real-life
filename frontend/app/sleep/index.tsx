@@ -17,6 +17,7 @@ import {
 import {
   fetchSleepWeek,
   requestPermissions as requestHealthConnectPermissions,
+  openHealthConnectSettings,
   HealthConnectAvailability,
   SleepWeekStats,
   RawSleepSession,
@@ -419,12 +420,32 @@ function HealthTab() {
     try {
       const ok = await requestHealthConnectPermissions();
       if (ok) await loadAll();
-      else Alert.alert('Permission needed', 'Open Health Connect and grant XP in Real Life permission to read sleep, heart rate and SpO₂.');
+      else Alert.alert(
+        'Permission needed',
+        'Open Health Connect → "App permissions" → "XP in Real Life" and grant access to Sleep, Steps, Heart rate and Oxygen saturation.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Health Connect', onPress: () => { openHealthConnectSettings().catch(() => {}); } },
+        ],
+      );
     } catch (e: any) {
-      Alert.alert('Connection failed', String(e?.message || e));
+      Alert.alert(
+        'Connection failed',
+        String(e?.message || e) + '\n\nIf this keeps happening, open Health Connect and grant permissions manually.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Health Connect', onPress: () => { openHealthConnectSettings().catch(() => {}); } },
+        ],
+      );
     } finally {
       setConnecting(false);
     }
+  };
+
+  const onOpenHCSettings = () => {
+    openHealthConnectSettings().catch(() => {
+      Alert.alert('Could not open Health Connect', 'Please open Health Connect manually from your phone settings.');
+    });
   };
 
   if (loading) {
@@ -441,6 +462,7 @@ function HealthTab() {
     availability={hcAvailability}
     connecting={connecting}
     onConnect={onConnect}
+    onOpenSettings={onOpenHCSettings}
   />;
 }
 
@@ -449,10 +471,12 @@ function SleepEmptyState({
   availability,
   connecting,
   onConnect,
+  onOpenSettings,
 }: {
   availability: HealthConnectAvailability;
   connecting: boolean;
   onConnect: () => void;
+  onOpenSettings: () => void;
 }) {
   // Pick title/message/cta per state
   let title = 'Connect Samsung Health';
@@ -525,9 +549,22 @@ function SleepEmptyState({
         <Text style={styles.connectDescBig}>{desc}</Text>
         {primary}
         {availability === 'available' ? (
-          <Text style={styles.connectFootnote}>
-            Read-only access. We never write data. You can revoke at any time from Health Connect settings.
-          </Text>
+          <>
+            <TouchableOpacity
+              testID="hc-open-settings-btn"
+              onPress={onOpenSettings}
+              style={styles.connectSecondaryBtn}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="settings-outline" size={16} color={colors.cyan} />
+              <Text style={styles.connectSecondaryBtnText}>
+                Open Health Connect settings
+              </Text>
+            </TouchableOpacity>
+            <Text style={styles.connectFootnote}>
+              Read-only access. We never write data. You can revoke at any time from Health Connect settings.
+            </Text>
+          </>
         ) : null}
       </View>
 
@@ -1147,6 +1184,25 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     fontSize: 14,
     letterSpacing: 0.3,
+  },
+  connectSecondaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    paddingHorizontal: spacing.md,
+    marginTop: 4,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.cyan + '55',
+    backgroundColor: colors.cyan + '12',
+  },
+  connectSecondaryBtnText: {
+    color: colors.cyan,
+    fontWeight: '800',
+    fontSize: 12,
+    letterSpacing: 0.2,
   },
   connectFootnote: {
     color: colors.textMuted,
