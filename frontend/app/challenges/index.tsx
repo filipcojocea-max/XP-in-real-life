@@ -213,44 +213,74 @@ export default function ChallengesScreen() {
         <View style={{ height: spacing.xl }} />
       </ScrollView>
 
-      {/* ── Challenge popup ─────────────────────────────────────── */}
-      <Modal visible={showChallengeModal} transparent animationType="fade" onRequestClose={() => setShowChallengeModal(false)}>
-        <View style={styles.backdrop}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowChallengeModal(false)} />
-          <View style={styles.popup} testID="challenge-popup">
-            <View style={styles.popupHandle} />
-            <View style={styles.popupIconRow}>
-              <View style={[styles.challengeIconBubble, { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
-                <Ionicons name={ch.icon as any} size={26} color={colors.cyan} />
+      {/* ── Challenge full-screen view ──────────────────────────── */}
+      <Modal visible={showChallengeModal} animationType="slide" onRequestClose={() => setShowChallengeModal(false)}>
+        <SafeAreaView style={styles.fullScreen} testID="challenge-popup">
+          {/* Top bar with close */}
+          <View style={styles.fsHeader}>
+            <TouchableOpacity onPress={() => setShowChallengeModal(false)} style={styles.fsCloseBtn} testID="challenge-popup-close">
+              <Ionicons name="close" size={26} color={colors.text} />
+            </TouchableOpacity>
+            <Text style={styles.fsHeaderTitle}>Today's Challenge</Text>
+            <View style={{ width: 40 }} />
+          </View>
+
+          <ScrollView contentContainerStyle={styles.fsScroll} showsVerticalScrollIndicator={false}>
+            {/* Big icon */}
+            <View style={styles.fsIconWrap}>
+              <View style={styles.fsIconGlow} />
+              <View style={styles.fsIconBubble}>
+                <Ionicons name={ch.icon as any} size={56} color={colors.cyan} />
               </View>
             </View>
-            <Text style={styles.popupTitle}>{ch.title}</Text>
-            {ch.tagline ? <Text style={styles.popupTagline}>{ch.tagline}</Text> : null}
-            <Text style={styles.popupDesc}>{ch.description}</Text>
 
+            {/* Tagline kicker */}
+            {ch.tagline ? (
+              <Text style={styles.fsKicker}>{ch.tagline.toUpperCase()}</Text>
+            ) : null}
+
+            {/* HUGE Title */}
+            <Text style={styles.fsTitle}>{ch.title}</Text>
+
+            {/* Big description */}
+            <View style={styles.fsDescCard}>
+              <Text style={styles.fsDesc}>{ch.description}</Text>
+            </View>
+
+            {/* XP hint */}
+            <View style={styles.fsXpHint}>
+              <Ionicons name="flash" size={16} color={colors.amber} />
+              <Text style={styles.fsXpHintText}>Earn up to 60 XP for completing this challenge</Text>
+            </View>
+          </ScrollView>
+
+          {/* Bottom action bar (sticky) */}
+          <View style={styles.fsActions}>
             <TouchableOpacity
               testID="challenge-accept-btn"
-              style={[styles.acceptBtn, acting && { opacity: 0.6 }]}
+              style={[styles.fsAcceptBtn, acting && { opacity: 0.6 }]}
               disabled={acting}
               onPress={onAccept}
+              activeOpacity={0.85}
             >
               {acting ? <ActivityIndicator color={colors.bg} /> : (
                 <>
-                  <Ionicons name="checkmark-circle" size={18} color={colors.bg} />
-                  <Text style={styles.acceptBtnText}>Challenge Accepted!</Text>
+                  <Ionicons name="checkmark-circle" size={22} color={colors.bg} />
+                  <Text style={styles.fsAcceptBtnText}>Challenge Accepted!</Text>
                 </>
               )}
             </TouchableOpacity>
             <TouchableOpacity
               testID="challenge-reject-btn"
-              style={styles.rejectBtn}
+              style={styles.fsRejectBtn}
               disabled={acting}
               onPress={onReject}
+              activeOpacity={0.7}
             >
-              <Text style={styles.rejectBtnText}>Challenge Rejected</Text>
+              <Text style={styles.fsRejectBtnText}>Challenge Rejected</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </SafeAreaView>
       </Modal>
 
       {/* ── Reflection / completion form ───────────────────────── */}
@@ -724,6 +754,150 @@ const styles = StyleSheet.create({
 
   // Modals
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' },
+
+  // ── Full-screen challenge view ──
+  fullScreen: { flex: 1, backgroundColor: colors.bg },
+  fsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  fsCloseBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceGlass,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  fsHeaderTitle: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+  },
+  fsScroll: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.xl,
+    alignItems: 'center',
+  },
+  fsIconWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.lg,
+    position: 'relative',
+  },
+  fsIconGlow: {
+    position: 'absolute',
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    backgroundColor: colors.cyan + '15',
+  },
+  fsIconBubble: {
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: colors.cyan + '22',
+    borderWidth: 2,
+    borderColor: colors.cyan + '99',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fsKicker: {
+    color: colors.cyan,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 2.5,
+    textAlign: 'center',
+    marginBottom: spacing.sm,
+  },
+  fsTitle: {
+    color: colors.text,
+    fontSize: 36,
+    fontWeight: '900',
+    textAlign: 'center',
+    letterSpacing: -1,
+    lineHeight: 42,
+    marginBottom: spacing.lg,
+    paddingHorizontal: spacing.sm,
+  },
+  fsDescCard: {
+    width: '100%',
+    backgroundColor: colors.surfaceGlass,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
+  },
+  fsDesc: {
+    color: colors.text,
+    fontSize: 18,
+    lineHeight: 28,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  fsXpHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    backgroundColor: colors.amber + '15',
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+  },
+  fsXpHintText: {
+    color: colors.amber,
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  fsActions: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.bg,
+  },
+  fsAcceptBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: colors.green,
+    paddingVertical: 18,
+    borderRadius: radii.pill,
+  },
+  fsAcceptBtnText: {
+    color: colors.bg,
+    fontWeight: '900',
+    fontSize: 17,
+    letterSpacing: 0.4,
+  },
+  fsRejectBtn: {
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: spacing.sm,
+  },
+  fsRejectBtnText: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: '800',
+    textDecorationLine: 'underline',
+  },
   popup: {
     backgroundColor: colors.surfaceGlass,
     borderTopLeftRadius: radii.xl,
