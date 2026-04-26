@@ -40,8 +40,20 @@ export default function SleepOnboarding() {
     if (!q) return false;
     if (q.type === 'text') return true; // optional
     if (q.type === 'multi') return Array.isArray(value) && value.length > 0;
+    if (q.type === 'multi_other') {
+      const arr = Array.isArray(value) ? value : [];
+      if (arr.length === 0) return false;
+      // If "Other" is selected, require the free-text input
+      const otherKey = (q as any).other_field || `${q.id}_other`;
+      const otherOpt = (q as any).other_option || 'Other';
+      if (arr.includes(otherOpt)) {
+        const txt = String(answers[otherKey] || '').trim();
+        return txt.length > 0;
+      }
+      return true;
+    }
     return value !== undefined && value !== '' && value !== null;
-  }, [q, value]);
+  }, [q, value, answers]);
 
   const setAnswer = (id: string, v: any) => {
     setAnswers((prev) => ({ ...prev, [id]: v }));
@@ -194,6 +206,52 @@ export default function SleepOnboarding() {
               })}
             </View>
           ) : null}
+
+          {/* Multi with optional "Other" free-text */}
+          {q.type === 'multi_other' ? (() => {
+            const otherOpt = (q as any).other_option || 'Other';
+            const otherKey = (q as any).other_field || `${q.id}_other`;
+            const arr: string[] = Array.isArray(value) ? value : [];
+            const otherSelected = arr.includes(otherOpt);
+            return (
+              <View style={styles.optionList}>
+                {q.options?.map((opt) => {
+                  const active = arr.includes(opt);
+                  return (
+                    <TouchableOpacity
+                      key={opt}
+                      testID={`sleep-multi-${q.id}-${slugify(opt)}`}
+                      onPress={() => {
+                        const next = active ? arr.filter((x) => x !== opt) : [...arr, opt];
+                        setAnswer(q.id, next);
+                        // Clear other text if user deselects "Other"
+                        if (opt === otherOpt && active) {
+                          setAnswers((p) => ({ ...p, [otherKey]: '' }));
+                        }
+                      }}
+                      style={[styles.option, active && styles.optionActive]}
+                    >
+                      <View style={[styles.optionCheckbox, active && { borderColor: colors.cyan, backgroundColor: colors.cyan }]}>
+                        {active ? <Ionicons name="checkmark" size={14} color={colors.bg} /> : null}
+                      </View>
+                      <Text style={[styles.optionText, active && styles.optionTextActive]}>{opt}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+                {otherSelected ? (
+                  <TextInput
+                    testID={`sleep-multi-other-input-${q.id}`}
+                    value={answers[otherKey] || ''}
+                    onChangeText={(t) => setAnswers((p) => ({ ...p, [otherKey]: t }))}
+                    placeholder="Type your answer..."
+                    placeholderTextColor={colors.textMuted}
+                    style={styles.textInput}
+                    autoFocus
+                  />
+                ) : null}
+              </View>
+            );
+          })() : null}
 
           {/* Free text */}
           {q.type === 'text' ? (

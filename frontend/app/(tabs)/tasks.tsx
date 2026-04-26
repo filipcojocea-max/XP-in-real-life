@@ -620,20 +620,18 @@ function TaskModal({
     try {
       const scheduled_time = reminderOn ? formatTime(scheduledDate) : null;
       if (isEdit && editingTask) {
-        // For default tasks: only send editable fields
+        // For default tasks: only send editable fields. XP, focus_area,
+        // time_slot and scheduled_time are all locked.
         const payload: any = {
           title: title.trim(),
           description: desc.trim(),
-          xp_value: parseInt(xp, 10) || 20,
           reminder_enabled: reminderOn,
         };
         if (!isDefault) {
+          payload.xp_value = parseInt(xp, 10) || 20;
           payload.focus_area = area;
           payload.time_slot = slot;
           payload.scheduled_time = scheduled_time;
-        } else {
-          // default: scheduled_time locked, but reminder on/off toggle is allowed
-          // Keep existing scheduled_time by not sending it
         }
         const updated = await api.updateTask(editingTask.id, payload);
         if (updated.reminder_enabled && updated.scheduled_time) {
@@ -691,8 +689,8 @@ function TaskModal({
 
             {isDefault ? (
               <Text style={styles.defaultNote}>
-                Focus area & time slot are locked for default quests. You can still change the title,
-                description, XP and reminder.
+                Focus area, time slot and XP are locked for default quests. You can still change the title,
+                description and reminder.
               </Text>
             ) : null}
 
@@ -837,26 +835,37 @@ function TaskModal({
               />
             ) : null}
 
-            <Text style={styles.inputLabel}>XP Reward {!isDefault ? '(max 20)' : ''}</Text>
-            <TextInput
-              testID="task-input-xp"
-              keyboardType="number-pad"
-              style={styles.input}
-              value={xp}
-              onChangeText={(t) => {
-                // Clamp custom-task XP at 20
-                const cleaned = t.replace(/[^0-9]/g, '');
-                if (!isDefault && cleaned !== '') {
-                  const n = parseInt(cleaned, 10);
-                  if (n > 20) {
-                    setXp('20');
-                    return;
+            <View style={styles.labelRow}>
+              <Text style={styles.inputLabel}>XP Reward {!isDefault ? '(max 20)' : ''}</Text>
+              {isDefault ? <Ionicons name="lock-closed" size={11} color={colors.textMuted} /> : null}
+            </View>
+            {isDefault ? (
+              <View style={styles.lockedXpRow} testID="task-xp-locked">
+                <Ionicons name="flash" size={16} color={colors.amber} />
+                <Text style={styles.lockedXpValue}>{xp} XP</Text>
+                <Text style={styles.lockedXpHint}>Default quest — XP is locked</Text>
+              </View>
+            ) : (
+              <TextInput
+                testID="task-input-xp"
+                keyboardType="number-pad"
+                style={styles.input}
+                value={xp}
+                onChangeText={(t) => {
+                  // Clamp custom-task XP at 20
+                  const cleaned = t.replace(/[^0-9]/g, '');
+                  if (cleaned !== '') {
+                    const n = parseInt(cleaned, 10);
+                    if (n > 20) {
+                      setXp('20');
+                      return;
+                    }
                   }
-                }
-                setXp(cleaned);
-              }}
-              placeholderTextColor={colors.textMuted}
-            />
+                  setXp(cleaned);
+                }}
+                placeholderTextColor={colors.textMuted}
+              />
+            )}
             {!isDefault ? (
               <Text style={styles.xpHint}>Custom quests are capped at 20 XP each.</Text>
             ) : null}
@@ -1210,6 +1219,31 @@ const styles = StyleSheet.create({
   saveBtn: { backgroundColor: colors.green },
   saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
   xpHint: { color: colors.textMuted, fontSize: 11, marginTop: 6, marginLeft: 4 },
+  lockedXpRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 14,
+    borderRadius: radii.md,
+    backgroundColor: colors.surfaceGlass,
+    borderWidth: 1,
+    borderColor: colors.amber + '44',
+    borderStyle: 'dashed',
+  },
+  lockedXpValue: {
+    color: colors.amber,
+    fontSize: 16,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  lockedXpHint: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontStyle: 'italic',
+    flex: 1,
+    textAlign: 'right',
+  },
   anonBanner: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
     padding: spacing.md, borderRadius: radii.md,

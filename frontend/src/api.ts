@@ -23,7 +23,27 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`API ${res.status}: ${text || path}`);
+    // Try to surface the FastAPI `detail` field as a human-readable message
+    // so users don't see raw JSON like `{"detail":"..."}` in the UI.
+    let pretty = text || path;
+    try {
+      const data = JSON.parse(text);
+      if (data?.detail) {
+        if (typeof data.detail === 'string') pretty = data.detail;
+        else if (Array.isArray(data.detail)) {
+          pretty = data.detail
+            .map((d: any) => d?.msg || JSON.stringify(d))
+            .join(', ');
+        } else {
+          pretty = JSON.stringify(data.detail);
+        }
+      } else if (data?.message) {
+        pretty = data.message;
+      }
+    } catch {
+      // not JSON — keep raw text
+    }
+    throw new Error(pretty);
   }
   return res.json() as Promise<T>;
 }
@@ -251,11 +271,13 @@ export const api = {
 
 export type SleepQuestion = {
   id: string;
-  type: 'scale' | 'time' | 'single' | 'multi' | 'text';
+  type: 'scale' | 'time' | 'single' | 'multi' | 'multi_other' | 'text';
   q: string;
   min?: number;
   max?: number;
   options?: string[];
+  other_option?: string;
+  other_field?: string;
 };
 export type SleepRoutineItem = {
   time: string;

@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView,
-  Platform, Alert, ActivityIndicator, ScrollView,
+  Platform, ActivityIndicator, ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import { api } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
+import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 
 export default function Verify() {
@@ -25,7 +26,7 @@ export default function Verify() {
 
   const submit = async () => {
     if (!code.trim() || code.trim().length !== 6) {
-      Alert.alert('Enter the 6-digit code');
+      showAlert('Enter the 6-digit code');
       return;
     }
     setLoading(true);
@@ -34,7 +35,7 @@ export default function Verify() {
       await signIn(r.token, r.user);
       router.replace('/');
     } catch (e: any) {
-      Alert.alert('Verification failed', String(e.message || e));
+      showAlert('Verification failed', String(e.message || e));
     } finally {
       setLoading(false);
     }
@@ -46,9 +47,9 @@ export default function Verify() {
       const r = await api.authResend(String(params.email));
       const dev = (r as any).dev_code;
       if (dev) setCode(dev);
-      Alert.alert('Code resent', `Check your email${dev ? `.\n\nDev code: ${dev}` : ''}`);
+      showAlert('Code resent', `Check your email${dev ? `.\n\nDev code: ${dev}` : ''}`);
     } catch (e: any) {
-      Alert.alert('Could not resend', String(e.message || e));
+      showAlert('Could not resend', String(e.message || e));
     } finally {
       setResending(false);
     }

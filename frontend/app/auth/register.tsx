@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView,
-  Platform, Alert, ActivityIndicator, ScrollView,
+  Platform, ActivityIndicator, ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
 import { api } from '../../src/api';
+import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 
 export default function Register() {
@@ -14,14 +15,16 @@ export default function Register() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
+    setError(null);
     if (!name.trim() || !email.trim() || !password) {
-      Alert.alert('Please fill in all fields');
+      setError('Please fill in all fields.');
       return;
     }
     if (password.length < 5) {
-      Alert.alert('Password must be at least 5 characters');
+      setError('Password must be at least 5 characters.');
       return;
     }
     setLoading(true);
@@ -32,7 +35,9 @@ export default function Register() {
         params: { email: email.trim().toLowerCase(), dev_code: (r as any).dev_code || '' },
       });
     } catch (e: any) {
-      Alert.alert('Registration failed', String(e.message || e));
+      const msg = String(e?.message || e || 'Could not create your account.');
+      setError(msg);
+      showAlert('Registration failed', msg);
     } finally {
       setLoading(false);
     }
@@ -85,6 +90,20 @@ export default function Register() {
             style={styles.input}
           />
 
+          {error ? (
+            <View style={styles.errorBox} testID="reg-error">
+              <Ionicons name="alert-circle" size={16} color={colors.red} />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
+          <View style={styles.securityNote} testID="reg-security-note">
+            <Ionicons name="shield-checkmark" size={14} color={colors.cyan} />
+            <Text style={styles.securityText}>
+              We verify every email is real. Disposable/temporary addresses are blocked.
+            </Text>
+          </View>
+
           <TouchableOpacity testID="reg-submit" disabled={loading} onPress={submit} style={[styles.btn, loading && { opacity: 0.6 }]}>
             {loading ? <ActivityIndicator color={colors.bg} /> : <>
               <Ionicons name="person-add" size={18} color={colors.bg} />
@@ -132,4 +151,36 @@ const styles = StyleSheet.create({
   linkRow: { flexDirection: 'row', justifyContent: 'center', marginTop: spacing.lg },
   linkLabel: { color: colors.textMuted },
   linkText: { color: colors.cyan, fontWeight: '800' },
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    backgroundColor: colors.red + '15',
+    borderColor: colors.red + '55',
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radii.md,
+    marginTop: spacing.md,
+  },
+  errorText: {
+    color: colors.red,
+    fontSize: 13,
+    fontWeight: '700',
+    flex: 1,
+    lineHeight: 18,
+  },
+  securityNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: spacing.md,
+    paddingHorizontal: 4,
+  },
+  securityText: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    flex: 1,
+    lineHeight: 15,
+  },
 });

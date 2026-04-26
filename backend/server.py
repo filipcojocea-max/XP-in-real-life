@@ -77,34 +77,108 @@ def _gen_code() -> str:
     return f"{random.randint(0, 999999):06d}"
 
 
-def _send_verification_email(email: str, code: str, full_name: str = "") -> None:
-    """Send the verification code. In dev mode (no SMTP), just log + the code is also
-    returned in the API response so testers can verify without a real inbox."""
-    smtp_host = os.environ.get("SMTP_HOST")
-    if not smtp_host:
-        logger = logging.getLogger("auth")
-        logger.warning("[DEV-EMAIL] To: %s  Code: %s  (set SMTP_HOST/USER/PASS to send real emails)", email, code)
-        return
+# ─────────────── Email security: validation + delivery ───────────────
+# Built-in blocklist of common disposable / temporary email domains so
+# users cannot register with throwaway inboxes like Mailinator.
+_DISPOSABLE_EMAIL_DOMAINS = {
+    "mailinator.com", "10minutemail.com", "10minutemail.net", "20minutemail.com",
+    "guerrillamail.com", "guerrillamail.net", "guerrillamail.org", "guerrillamail.biz",
+    "guerrillamail.info", "guerrillamailblock.com", "sharklasers.com", "grr.la",
+    "throwawaymail.com", "throwaway.email", "yopmail.com", "yopmail.fr", "yopmail.net",
+    "tempmail.com", "tempmail.net", "temp-mail.org", "temp-mail.io", "tmpmail.org",
+    "dispostable.com", "fakeinbox.com", "trashmail.com", "trashmail.net",
+    "maildrop.cc", "mintemail.com", "spam4.me", "tempinbox.com", "fakemail.net",
+    "getnada.com", "nada.email", "inboxbear.com", "burnermail.io", "emailondeck.com",
+    "tempmailaddress.com", "harakirimail.com", "mailcatch.com", "mohmal.com",
+    "moakt.com", "mvrht.com", "tempr.email", "mailnesia.com", "mailnull.com",
+    "spambox.us", "spambog.com", "spamgourmet.com", "spamdecoy.net",
+    "fake.com", "fake.fake", "test.test", "example.com", "example.org", "example.net",
+    "asdasd.com", "asdf.com", "qwerty.com", "1secmail.com", "1secmail.net",
+    "wegwerfemail.de", "byom.de", "discard.email", "mailtemp.info",
+}
+
+
+class EmailValidationError(Exception):
+    """Raised when the supplied email is invalid, fake, or disposable."""
+
+
+def _validate_real_email(email: str) -> str:
+    """Multi-layered email validation:
+       1. Strict syntax (RFC 5322)
+       2. DNS MX-record check (the domain actually accepts mail)
+       3. Disposable / throwaway domain blocklist
+
+       Returns the normalized email or raises EmailValidationError.
+    """
+    from email_validator import validate_email, EmailNotValidError
     try:
-        import smtplib
-        from email.message import EmailMessage
-        msg = EmailMessage()
-        msg["Subject"] = "Your XP in Real Life verification code"
-        msg["From"] = os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", "no-reply@example.com"))
-        msg["To"] = email
-        msg.set_content(
-            f"Hi {full_name or 'there'},\n\n"
-            f"Your verification code is: {code}\n\n"
-            "Enter this code in the app to finish creating your account.\n\n"
-            "— XP in Real Life"
+        # check_deliverability=True triggers DNS MX lookup
+        v = validate_email(email, check_deliverability=True)
+    except EmailNotValidError as e:
+        raise EmailValidationError(str(e))
+    norm = v.normalized.lower()
+    domain = norm.split("@", 1)[1]
+    if domain in _DISPOSABLE_EMAIL_DOMAINS:
+        raise EmailValidationError(
+            "Disposable / temporary email addresses are not allowed. "
+            "Please use a real, personal email."
         )
-        port = int(os.environ.get("SMTP_PORT", "587"))
-        with smtplib.SMTP(smtp_host, port, timeout=10) as srv:
-            srv.starttls()
-            srv.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
-            srv.send_message(msg)
-    except Exception:
-        logging.getLogger("auth").exception("smtp send failed; falling back to log")
+    # Reject obvious nonsense like x@x.x  (single-letter TLDs)
+    parts = domain.split(".")
+    if len(parts[-1]) < 2 or any(len(p) == 0 for p in parts):
+        raise EmailValidationError("That email domain looks invalid.")
+    return norm
+
+
+def _send_verification_email(email: str, code: str, full_name: str = "") -> bool:
+    """Send the 6-digit verification code via Resend. Returns True on success.
+
+    Falls back to logging the code to the server log only if RESEND_API_KEY is
+    NOT set (dev mode). In production with the key set, raises if Resend fails
+    so the caller can decline registration.
+    """
+    auth_log = logging.getLogger("auth")
+    api_key = os.environ.get("RESEND_API_KEY")
+    if not api_key:
+        auth_log.warning(
+            "[DEV-EMAIL] To: %s  Code: %s  (set RESEND_API_KEY to send real emails)",
+            email, code,
+        )
+        return False
+    try:
+        import resend  # type: ignore
+        resend.api_key = api_key
+        sender = os.environ.get("RESEND_FROM", "XP in Real Life <onboarding@resend.dev>")
+        html = (
+            f"<div style='font-family:-apple-system,Segoe UI,sans-serif;background:#0b0d12;"
+            f"color:#fff;padding:32px;border-radius:12px;max-width:480px;margin:auto'>"
+            f"<h2 style='color:#5cffb1;margin:0 0 8px'>Welcome, {full_name or 'hero'} 👋</h2>"
+            f"<p style='color:#aab1c2;margin:0 0 20px'>Use this 6-digit code to finish creating your XP in Real Life account.</p>"
+            f"<div style='font-size:36px;font-weight:900;letter-spacing:10px;color:#5fd2ff;"
+            f"background:#11151c;border:2px solid #1f2733;padding:18px;border-radius:8px;"
+            f"text-align:center;font-variant:tabular-nums'>{code}</div>"
+            f"<p style='color:#7a8294;font-size:12px;margin-top:20px'>"
+            f"This code expires in 30 minutes. If you didn't request this, ignore this email.</p>"
+            f"</div>"
+        )
+        resend.Emails.send({
+            "from": sender,
+            "to": [email],
+            "subject": f"Your XP in Real Life code: {code}",
+            "html": html,
+            "text": (
+                f"Hi {full_name or 'there'},\n\n"
+                f"Your XP in Real Life verification code is: {code}\n\n"
+                "It expires in 30 minutes.\n\n"
+                "If you didn't request this, please ignore this email."
+            ),
+        })
+        auth_log.info("Resend email sent to %s", email)
+        return True
+    except Exception as e:
+        auth_log.exception("Resend send failed for %s: %s", email, e)
+        # Re-raise so the caller (register) can return a useful error.
+        raise
 
 
 async def get_current_user(
@@ -489,7 +563,12 @@ def _serialize_user(u: dict) -> dict:
 
 @api_router.post("/auth/register")
 async def auth_register(body: RegisterPayload):
-    email_norm = body.email.lower().strip()
+    # 1. Strict email validation: format + DNS MX + disposable blocklist
+    try:
+        email_norm = _validate_real_email(body.email)
+    except EmailValidationError as e:
+        raise HTTPException(400, str(e))
+
     existing = await db.users.find_one({"email": email_norm})
     if existing and existing.get("verified"):
         raise HTTPException(400, "An account with this email already exists. Please log in.")
@@ -506,14 +585,30 @@ async def auth_register(body: RegisterPayload):
         "verification_expires": code_expires,
         "created_at": now_iso(),
     }
+    # 2. Try to actually deliver the verification email. If Resend is configured
+    #    and fails (e.g. invalid recipient), refuse to create the account so we
+    #    never accept a fake-but-MX-valid address.
+    sent_real = False
+    try:
+        sent_real = _send_verification_email(email_norm, code, body.full_name.strip())
+    except Exception as e:
+        raise HTTPException(
+            400,
+            f"We couldn't deliver a verification email to {email_norm}. "
+            f"Please double-check the address and try again. ({str(e)[:120]})",
+        )
     await db.users.replace_one({"_id": user_id}, doc, upsert=True)
-    _send_verification_email(email_norm, code, body.full_name.strip())
     response = {
-        "message": "Verification code sent. Check your inbox (or backend logs in dev mode).",
+        "message": (
+            "Verification code sent. Please check your inbox (and spam folder)."
+            if sent_real else
+            "Verification code sent. Check your inbox (or backend logs in dev mode)."
+        ),
         "email": email_norm,
+        "email_delivered": sent_real,
     }
-    # In dev mode (no SMTP configured), surface the code so testers can verify
-    if not os.environ.get("SMTP_HOST"):
+    # In dev mode (no RESEND_API_KEY configured), surface the code so testers can verify
+    if not os.environ.get("RESEND_API_KEY"):
         response["dev_code"] = code
     return response
 
@@ -563,9 +658,13 @@ async def auth_resend(body: ResendPayload):
         {"_id": user["_id"]},
         {"$set": {"verification_code": code, "verification_expires": expires}},
     )
-    _send_verification_email(email_norm, code, user.get("full_name", ""))
-    response = {"message": "Code resent."}
-    if not os.environ.get("SMTP_HOST"):
+    sent_real = False
+    try:
+        sent_real = _send_verification_email(email_norm, code, user.get("full_name", ""))
+    except Exception as e:
+        raise HTTPException(400, f"Could not deliver email: {str(e)[:120]}")
+    response = {"message": "Code resent.", "email_delivered": sent_real}
+    if not os.environ.get("RESEND_API_KEY"):
         response["dev_code"] = code
     return response
 
@@ -584,9 +683,12 @@ async def auth_login(body: LoginPayload):
             {"_id": user["_id"]},
             {"$set": {"verification_code": code, "verification_expires": expires}},
         )
-        _send_verification_email(email_norm, code, user.get("full_name", ""))
+        try:
+            _send_verification_email(email_norm, code, user.get("full_name", ""))
+        except Exception:
+            logging.getLogger("auth").exception("login: resend during login failed")
         resp = {"needs_verification": True, "email": email_norm}
-        if not os.environ.get("SMTP_HOST"):
+        if not os.environ.get("RESEND_API_KEY"):
             resp["dev_code"] = code
         return resp
     token = make_token(user["_id"], email_norm)
@@ -1122,12 +1224,12 @@ SLEEP_QUESTIONS = [
     {"id": "alcohol", "type": "single", "options": ["Never", "Occasionally", "A few nights/week", "Most nights"], "q": "How often do you drink alcohol in the evening?"},
     {"id": "exercise", "type": "single", "options": ["Daily", "A few times/week", "Rarely", "Never"], "q": "How often do you exercise?"},
     {"id": "exercise_time", "type": "single", "options": ["Morning", "Afternoon", "Evening", "Late night", "I don't exercise"], "q": "When do you usually exercise?"},
-    {"id": "room_temp", "type": "single", "options": ["Cool (60-67°F)", "Comfortable", "Warm", "Hot"], "q": "How warm is your bedroom at night?"},
+    {"id": "room_temp", "type": "single", "options": ["Cold", "Comfortable", "Warm", "Hot"], "q": "What temperature is your bed at night?"},
     {"id": "room_dark", "type": "single", "options": ["Pitch black", "Mostly dark", "Some light", "Lots of light"], "q": "How dark is your bedroom?"},
     {"id": "noise", "type": "single", "options": ["Silent", "White noise", "Some noise", "Very noisy"], "q": "How quiet is your sleep environment?"},
     {"id": "relaxing_activities", "type": "multi", "options": ["Reading", "Drawing", "Journaling", "Music", "Podcasts", "Meditation", "Stretching", "Bath/shower", "Tea", "Breathing exercises"], "q": "What activities do you find relaxing? (pick all that apply)"},
     {"id": "likes_milk", "type": "single", "options": ["Love it", "It's okay", "Don't really like it", "Lactose intolerant"], "q": "Do you like drinking milk?"},
-    {"id": "warm_drinks", "type": "multi", "options": ["Chamomile tea", "Warm milk", "Honey water", "Decaf coffee", "Herbal tea", "I don't drink warm drinks"], "q": "Which warm drinks would you enjoy before bed?"},
+    {"id": "warm_drinks", "type": "multi_other", "options": ["Tea", "Milk", "Decaf coffee", "Hot chocolate", "Water", "Other"], "other_option": "Other", "other_field": "warm_drinks_other", "q": "Which drinks would you enjoy before bed?"},
     {"id": "tried_before", "type": "text", "q": "Anything you've tried that helped (or didn't)? (optional)"},
     {"id": "main_goal", "type": "single", "options": ["Fall asleep faster", "Sleep through the night", "Wake up rested", "Sleep more hours", "All of the above"], "q": "Your main sleep goal?"},
 ]
@@ -1202,16 +1304,36 @@ def _fallback_plan(answers: dict) -> dict:
     likes_milk = answers.get("likes_milk") in ("Love it", "It's okay")
     relax = answers.get("relaxing_activities") or []
     warm_drinks = answers.get("warm_drinks") or []
+    warm_drinks_other = (answers.get("warm_drinks_other") or "").strip()
     routine = [
         {"time": "~3 hours before bed", "title": "Caffeine cutoff", "description": "No coffee, tea or energy drinks. Caffeine has a 5-6 hour half-life.", "icon": "flash-off"},
         {"time": "~1 hour before bed", "title": "Dim the lights", "description": "Lower lights & switch screens to night mode to cue melatonin release.", "icon": "moon"},
         {"time": "~45 min before bed", "title": "Light stretch", "description": "5-10 min of gentle stretches to release muscle tension.", "icon": "walk"},
         {"time": "~30 min before bed", "title": "Wind-down activity", "description": f"Try {(relax[0] if relax else 'reading')} — calming, no screens.", "icon": "book"},
     ]
-    if likes_milk or "Warm milk" in warm_drinks:
-        routine.append({"time": "~20 min before bed", "title": "Warm milk", "description": "Tryptophan + ritual = signal to your brain it's bedtime.", "icon": "cafe"})
-    elif warm_drinks and "I don't drink warm drinks" not in warm_drinks:
-        routine.append({"time": "~20 min before bed", "title": warm_drinks[0], "description": "A warm caffeine-free drink helps trigger sleepiness.", "icon": "cafe"})
+    # Prefer milk if user likes it, else honor their picks (excluding 'Other' placeholder)
+    drink_pick: Optional[str] = None
+    if likes_milk or "Milk" in warm_drinks:
+        drink_pick = "Warm milk"
+    else:
+        for d in warm_drinks:
+            if d and d != "Other":
+                drink_pick = d
+                break
+        if not drink_pick and warm_drinks_other:
+            drink_pick = warm_drinks_other
+    if drink_pick:
+        is_milk = drink_pick.lower().startswith("warm milk") or drink_pick.lower() == "milk"
+        routine.append({
+            "time": "~20 min before bed",
+            "title": drink_pick,
+            "description": (
+                "Tryptophan + ritual = signal to your brain it's bedtime."
+                if is_milk else
+                "A warm caffeine-free drink helps trigger sleepiness."
+            ),
+            "icon": "cafe",
+        })
     routine.append({"time": "In bed", "title": "4-7-8 Breathing", "description": "Inhale 4s, hold 7s, exhale 8s. Repeat 4 times. Activates parasympathetic.", "icon": "leaf"})
     plan = (
         "**Your personalized sleep plan**\n\n"

@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity, KeyboardAvoidingView,
-  Platform, Alert, ActivityIndicator, ScrollView,
+  Platform, ActivityIndicator, ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
 import { api } from '../../src/api';
 import { useAuth } from '../../src/AuthContext';
+import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 
 export default function Login() {
@@ -15,10 +16,12 @@ export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
+    setError(null);
     if (!email.trim() || !password) {
-      Alert.alert('Enter email and password');
+      setError('Enter email and password.');
       return;
     }
     setLoading(true);
@@ -26,14 +29,16 @@ export default function Login() {
       const r = await api.authLogin(email.trim().toLowerCase(), password);
       if ((r as any).needs_verification) {
         const code = (r as any).dev_code;
-        Alert.alert('Verify your email', `We sent a code to ${(r as any).email}.${code ? `\n\nDev code: ${code}` : ''}`);
+        showAlert('Verify your email', `We sent a code to ${(r as any).email}.${code ? `\n\nDev code: ${code}` : ''}`);
         router.push({ pathname: '/auth/verify', params: { email: email.trim().toLowerCase(), dev_code: code || '' } });
         return;
       }
       await signIn((r as any).token, (r as any).user);
       router.replace('/');
     } catch (e: any) {
-      Alert.alert('Login failed', String(e.message || e));
+      const msg = String(e?.message || e || 'Could not sign in.');
+      setError(msg);
+      showAlert('Login failed', msg);
     } finally {
       setLoading(false);
     }
@@ -75,6 +80,13 @@ export default function Login() {
             style={styles.input}
           />
 
+          {error ? (
+            <View style={styles.errorBox} testID="login-error">
+              <Ionicons name="alert-circle" size={16} color={colors.red} />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
           <TouchableOpacity testID="login-submit" disabled={loading} onPress={submit} style={[styles.btn, loading && { opacity: 0.6 }]}>
             {loading ? <ActivityIndicator color={colors.bg} /> : <>
               <Ionicons name="log-in" size={18} color={colors.bg} />
@@ -104,7 +116,7 @@ export default function Login() {
                 await continueAnonymously();
                 router.replace('/');
               } catch (e: any) {
-                Alert.alert('Could not continue', String(e.message || e));
+                showAlert('Could not continue', String(e.message || e));
               }
             }}
             style={styles.anonBtn}
@@ -157,4 +169,23 @@ const styles = StyleSheet.create({
   },
   anonText: { color: colors.textSecondary, fontSize: 14, fontWeight: '800' },
   anonHint: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: 8, lineHeight: 16 },
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    backgroundColor: colors.red + '15',
+    borderColor: colors.red + '55',
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radii.md,
+    marginTop: spacing.md,
+  },
+  errorText: {
+    color: colors.red,
+    fontSize: 13,
+    fontWeight: '700',
+    flex: 1,
+    lineHeight: 18,
+  },
 });

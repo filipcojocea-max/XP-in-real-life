@@ -19,9 +19,11 @@ import Ring from '../../src/components/Ring';
 import { api, Profile } from '../../src/api';
 import { colors, spacing, radii } from '../../src/theme';
 import { getMotivationSchedule } from '../../src/notifications';
+import { useAuth } from '../../src/AuthContext';
 
 export default function ProfileScreen() {
   const router = useRouter();
+  const { user, isAnonymous, signOut } = useAuth();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [name, setName] = useState('');
   const [editing, setEditing] = useState(false);
@@ -83,6 +85,36 @@ export default function ProfileScreen() {
         onPress: doReset,
       },
     ]);
+  };
+
+  const handleSignOut = () => {
+    const doSignOut = async () => {
+      try {
+        await signOut();
+      } finally {
+        // AuthGate will normally route to /auth/login when token is gone, but
+        // we replace explicitly to avoid any flicker through tabs.
+        router.replace('/auth/login');
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      // eslint-disable-next-line no-alert
+      const ok = window.confirm(
+        'Sign out?\n\nYou\'ll need to log back in to access your account on this device.'
+      );
+      if (ok) doSignOut();
+      return;
+    }
+
+    Alert.alert(
+      'Sign out?',
+      "You'll need to log back in to access your account on this device.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Sign Out', style: 'destructive', onPress: doSignOut },
+      ]
+    );
   };
 
   if (loading || !profile) {
@@ -246,6 +278,55 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
+        {/* Account section */}
+        <View style={styles.accountSection}>
+          <Text style={styles.accountSectionLabel}>Account</Text>
+          {!isAnonymous && user?.email ? (
+            <View style={styles.accountInfoRow} testID="profile-account-info">
+              <Ionicons name="mail" size={16} color={colors.textMuted} />
+              <Text style={styles.accountEmail} numberOfLines={1}>{user.email}</Text>
+              {user.verified ? (
+                <View style={styles.verifiedBadge}>
+                  <Ionicons name="checkmark-circle" size={11} color={colors.green} />
+                  <Text style={styles.verifiedText}>VERIFIED</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          {isAnonymous ? (
+            <TouchableOpacity
+              testID="profile-create-account-btn"
+              style={[styles.actionRow, { marginTop: 0 }]}
+              onPress={() => router.push('/auth/login' as any)}
+            >
+              <View style={[styles.actionIcon, { backgroundColor: colors.green + '22', borderColor: colors.green + '55' }]}>
+                <Ionicons name="cloud-upload" size={18} color={colors.green} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.actionTitle}>Create Account</Text>
+                <Text style={styles.actionDesc}>Save your progress to the cloud</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              testID="profile-signout-btn"
+              style={[styles.actionRow, { marginTop: 0 }]}
+              onPress={handleSignOut}
+            >
+              <View style={[styles.actionIcon, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '55' }]}>
+                <Ionicons name="log-out" size={18} color={colors.amber} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.actionTitle}>Sign Out</Text>
+                <Text style={styles.actionDesc}>Log out of your account</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+          )}
+        </View>
+
         <Text style={styles.footer}>LevelUp · v1.0</Text>
       </ScrollView>
     </SafeAreaView>
@@ -356,4 +437,52 @@ const styles = StyleSheet.create({
   motivTime: { color: colors.text, fontWeight: '900', fontSize: 14, letterSpacing: -0.5 },
   motivKey: { color: colors.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
   footer: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: spacing.xl },
+  accountSection: {
+    marginTop: spacing.xl,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    gap: spacing.sm,
+  },
+  accountSectionLabel: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 1.6,
+    marginBottom: 4,
+  },
+  accountInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    backgroundColor: colors.surfaceGlass,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  accountEmail: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '700',
+    flex: 1,
+  },
+  verifiedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+    backgroundColor: colors.green + '22',
+    borderWidth: 1,
+    borderColor: colors.green + '55',
+  },
+  verifiedText: {
+    color: colors.green,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
 });
