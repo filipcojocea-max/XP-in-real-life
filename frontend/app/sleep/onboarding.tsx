@@ -31,8 +31,24 @@ export default function SleepOnboarding() {
     })();
   }, []);
 
-  const q = questions[idx];
-  const total = questions.length;
+  // Helper: does the question's show_if condition match the current answers?
+  const matchesShowIf = (cond: SleepQuestion['show_if'], ans: Record<string, any>): boolean => {
+    if (!cond) return true;
+    return Object.entries(cond).every(([key, expected]) => {
+      const actual = ans[key];
+      if (Array.isArray(expected)) return expected.includes(actual);
+      return actual === expected;
+    });
+  };
+
+  // Filter questions based on show_if conditions evaluated against current answers
+  const visibleQuestions = useMemo(
+    () => questions.filter((qq) => matchesShowIf(qq.show_if, answers)),
+    [questions, answers]
+  );
+
+  const q = visibleQuestions[idx];
+  const total = visibleQuestions.length;
   const progress = total > 0 ? (idx + 1) / total : 0;
   const value = q ? answers[q.id] : undefined;
 

@@ -314,6 +314,10 @@ export type SleepQuestion = {
   options?: string[];
   other_option?: string;
   other_field?: string;
+  /** Conditional display: only show this question when the previous answers
+   *  match. Example: { "temp_right": "No" } only shows it if the user
+   *  answered "No" to temp_right. */
+  show_if?: Record<string, string | string[]>;
 };
 export type SleepRoutineItem = {
   time: string;

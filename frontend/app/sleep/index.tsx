@@ -15,6 +15,12 @@ import {
   SleepHealthMock,
   SleepRoutineItem,
 } from '../../src/api';
+import {
+  fetchSleepWeek,
+  requestPermissions as requestHealthConnectPermissions,
+  HealthConnectAvailability,
+  SleepWeekStats,
+} from '../../src/healthConnect';
 import { colors, spacing, radii } from '../../src/theme';
 
 type SubTab = 'plan' | 'coach' | 'health';
@@ -367,44 +373,255 @@ function CoachTab({ profile }: { profile: SleepProfile }) {
 
 // ───────────────────────── Health (Sleep Data) Tab ─────────────────────────
 function HealthTab() {
-  const [data, setData] = useState<SleepHealthMock | null>(null);
+  const [mockData, setMockData] = useState<SleepHealthMock | null>(null);
+  const [hcStats, setHcStats] = useState<SleepWeekStats | null>(null);
+  const [hcAvailability, setHcAvailability] = useState<HealthConnectAvailability>('unsupported_platform');
+  const [hcGranted, setHcGranted] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [connecting, setConnecting] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await api.sleepHealthMock();
-        setData(r);
-      } catch (e) {
-        console.log('health mock', e);
-      } finally {
-        setLoading(false);
-      }
-    })();
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      // 1. Always pull the mock so we can fall back instantly on web/iOS.
+      const mock = await api.sleepHealthMock();
+      setMockData(mock);
+      // 2. Try real Health Connect
+      const r = await fetchSleepWeek();
+      setHcAvailability(r.availability);
+      setHcGranted(r.granted);
+      setHcStats(r.stats);
+    } catch (e) {
+      console.log('health tab load', e);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  if (loading || !data) {
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
+
+  const onConnect = async () => {
+    setConnecting(true);
+    try {
+      const ok = await requestHealthConnectPermissions();
+      if (ok) {
+        await loadAll();
+      } else {
+        Alert.alert(
+          'Permission needed',
+          'Open Health Connect settings and grant XP in Real Life permission to read sleep data.'
+        );
+      }
+    } catch (e: any) {
+      Alert.alert('Connection failed', String(e?.message || e));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  if (loading) {
     return <View style={styles.center}><ActivityIndicator color={colors.cyan} /></View>;
   }
 
-  const maxHours = Math.max(...data.nights.map((n) => n.total_hours));
+  // ── REAL DATA from Health Connect ───────────────────────────────────
+  if (hcAvailability === 'available' && hcGranted && hcStats && hcStats.sessions.length > 0) {
+    return <HealthConnectDashboard stats={hcStats} onRefresh={loadAll} />;
+  }
 
+  // ── CONNECT BANNER (Android, package available, just needs permission)
+  if (hcAvailability === 'available' && !hcGranted) {
+    return (
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        <View style={styles.connectHero}>
+          <View style={[styles.connectIconWrap, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
+            <Ionicons name="pulse" size={28} color={colors.cyan} />
+          </View>
+          <Text style={styles.connectTitleBig}>Connect Samsung Health</Text>
+          <Text style={styles.connectDescBig}>
+            Read your real sleep records from Samsung Health (or any Health Connect provider)
+            for last 7 nights — start, end, total duration, and sleep stages.
+          </Text>
+          <TouchableOpacity
+            testID="hc-connect-btn"
+            disabled={connecting}
+            style={[styles.connectBtn, connecting && { opacity: 0.6 }]}
+            onPress={onConnect}
+          >
+            {connecting ? (
+              <ActivityIndicator color={colors.bg} />
+            ) : (
+              <>
+                <Ionicons name="link" size={18} color={colors.bg} />
+                <Text style={styles.connectBtnText}>Connect Health Connect</Text>
+              </>
+            )}
+          </TouchableOpacity>
+          <Text style={styles.connectFootnote}>
+            We never write data — read-only access. You can revoke at any time from Health Connect settings.
+          </Text>
+        </View>
+        {/* While the user hasn't connected yet we still show a faded preview using mock data */}
+        {mockData ? <MockDashboard data={mockData} faded /> : null}
+      </ScrollView>
+    );
+  }
+
+  // ── NEEDS UPDATE ────────────────────────────────────────────────────
+  if (hcAvailability === 'update_required' || hcAvailability === 'not_installed') {
+    return (
+      <ScrollView contentContainerStyle={styles.scroll}>
+        <View style={styles.connectHero}>
+          <View style={[styles.connectIconWrap, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '55' }]}>
+            <Ionicons name="cloud-download" size={28} color={colors.amber} />
+          </View>
+          <Text style={styles.connectTitleBig}>
+            {hcAvailability === 'update_required' ? 'Update Health Connect' : 'Install Health Connect'}
+          </Text>
+          <Text style={styles.connectDescBig}>
+            {hcAvailability === 'update_required'
+              ? "Your Health Connect app is out of date. Update it from the Play Store and come back."
+              : "To read sleep records from Samsung Health, install Google's free Health Connect app from the Play Store."}
+          </Text>
+          <TouchableOpacity
+            style={styles.connectBtn}
+            onPress={() => {
+              const url =
+                'https://play.google.com/store/apps/details?id=com.google.android.apps.healthdata';
+              try {
+                require('expo-linking').openURL(url);
+              } catch {
+                Alert.alert('Open Play Store', url);
+              }
+            }}
+          >
+            <Ionicons name="logo-google-playstore" size={18} color={colors.bg} />
+            <Text style={styles.connectBtnText}>Open Play Store</Text>
+          </TouchableOpacity>
+        </View>
+        {mockData ? <MockDashboard data={mockData} faded /> : null}
+      </ScrollView>
+    );
+  }
+
+  // ── UNSUPPORTED PLATFORM (iOS / web / Expo Go) ─────────────────────
   return (
     <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-      {/* Connect banner */}
       <View style={styles.connectBanner}>
         <View style={styles.connectIconWrap}>
           <Ionicons name="lock-closed" size={18} color={colors.amber} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.connectTitle}>Connect Apple Health / Google Fit</Text>
+          <Text style={styles.connectTitle}>
+            {Platform.OS === 'android'
+              ? 'Health Connect needs a custom dev build'
+              : Platform.OS === 'ios'
+                ? 'Apple HealthKit coming next'
+                : 'Phone-only feature'}
+          </Text>
           <Text style={styles.connectDesc}>
-            Activates on production native build. For now we're showing simulated data so you can preview the dashboard.
+            {Platform.OS === 'android'
+              ? "We're showing simulated data right now. Run `expo prebuild + expo run:android` on a device to read real Samsung Health data."
+              : Platform.OS === 'ios'
+                ? 'Real Apple HealthKit integration is on the roadmap. For now we show simulated data so you can preview the dashboard.'
+                : 'Sleep data reading runs on Android (Samsung Health) and iOS (Apple HealthKit) only. Showing simulated data.'}
           </Text>
         </View>
       </View>
+      {mockData ? <MockDashboard data={mockData} /> : null}
+    </ScrollView>
+  );
+}
 
-      {/* Headline stats */}
+// ── Real Health Connect dashboard ────────────────────────────────────────
+function HealthConnectDashboard({ stats, onRefresh }: { stats: SleepWeekStats; onRefresh: () => void }) {
+  const totalH = (stats.avg_total_minutes / 60).toFixed(1);
+  const score = Math.min(
+    100,
+    Math.round(
+      ((stats.avg_total_minutes / 60) / 8) * 60 +
+      ((stats.avg_stages.deep / Math.max(1, stats.avg_total_minutes)) * 100) * 0.4
+    )
+  );
+  const sourceName =
+    stats.sessions[0]?.source?.replace('com.samsung.android.app.', 'Samsung ') ||
+    'Health Connect';
+
+  // Build last-7-day chart
+  const days = stats.sessions.map((s) => {
+    const d = new Date(s.startTime);
+    return {
+      date: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      day: d.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 3),
+      total_hours: +(s.total_minutes / 60).toFixed(1),
+      score: Math.min(100, Math.round((s.total_minutes / 480) * 100)),
+    };
+  });
+  const maxHours = Math.max(...days.map((d) => d.total_hours), 1);
+
+  return (
+    <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <View style={[styles.connectBanner, { backgroundColor: colors.green + '15', borderColor: colors.green + '55' }]}>
+        <View style={[styles.connectIconWrap, { backgroundColor: colors.green + '22', borderColor: colors.green + '55' }]}>
+          <Ionicons name="checkmark-circle" size={18} color={colors.green} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.connectTitle, { color: colors.green }]}>Live data from {sourceName}</Text>
+          <Text style={styles.connectDesc}>{stats.sessions.length} sleep sessions in the last 7 days</Text>
+        </View>
+        <TouchableOpacity onPress={onRefresh} style={{ padding: 8 }} testID="hc-refresh">
+          <Ionicons name="refresh" size={18} color={colors.text} />
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.statRow}>
+        <View style={styles.statCard}>
+          <Text style={styles.statLabel}>AVG SLEEP</Text>
+          <Text style={styles.statValue}>{totalH}<Text style={styles.statUnit}>h</Text></Text>
+          <Text style={styles.statSub}>Last 7 nights</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statLabel}>SLEEP SCORE</Text>
+          <Text style={[styles.statValue, { color: score >= 80 ? colors.green : score >= 65 ? colors.amber : colors.danger }]}>{score}</Text>
+          <Text style={styles.statSub}>out of 100</Text>
+        </View>
+      </View>
+
+      <Text style={styles.sectionTitle}>Last {days.length} nights</Text>
+      <View style={styles.chartCard}>
+        <View style={styles.chartRow}>
+          {days.map((n) => {
+            const h = (n.total_hours / maxHours) * 130;
+            const color = n.score >= 80 ? colors.green : n.score >= 65 ? colors.amber : colors.danger;
+            return (
+              <View key={n.date} style={styles.chartCol}>
+                <Text style={styles.chartHours}>{n.total_hours}h</Text>
+                <View style={styles.chartBarTrack}>
+                  <View style={[styles.chartBar, { height: h, backgroundColor: color }]} />
+                </View>
+                <Text style={styles.chartDay}>{n.day}</Text>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+
+      <Text style={[styles.sectionTitle, { marginTop: spacing.lg }]}>Sleep stages (avg, per night)</Text>
+      <StageBar label="Deep" hours={stats.avg_stages.deep / 60} color={colors.cyan} totalAvg={stats.avg_total_minutes / 60} />
+      <StageBar label="REM" hours={stats.avg_stages.rem / 60} color={colors.amber} totalAvg={stats.avg_total_minutes / 60} />
+      <StageBar label="Light" hours={stats.avg_stages.light / 60} color={colors.textSecondary} totalAvg={stats.avg_total_minutes / 60} />
+
+      <Text style={styles.footnote}>Source: {sourceName} via Google Health Connect · Read-only access</Text>
+    </ScrollView>
+  );
+}
+
+// ── Mock dashboard (kept for fallback / preview) ─────────────────────────
+function MockDashboard({ data, faded = false }: { data: SleepHealthMock; faded?: boolean }) {
+  const maxHours = Math.max(...data.nights.map((n) => n.total_hours));
+  return (
+    <View style={faded ? { opacity: 0.55 } : undefined}>
       <View style={styles.statRow}>
         <View style={styles.statCard}>
           <Text style={styles.statLabel}>AVG SLEEP</Text>
@@ -418,7 +635,6 @@ function HealthTab() {
         </View>
       </View>
 
-      {/* Bar chart of last 7 nights */}
       <Text style={styles.sectionTitle}>Last 7 nights</Text>
       <View style={styles.chartCard}>
         <View style={styles.chartRow}>
@@ -438,7 +654,6 @@ function HealthTab() {
         </View>
       </View>
 
-      {/* Best/worst */}
       <View style={[styles.statRow, { marginTop: spacing.md }]}>
         <View style={[styles.statCard, { borderColor: colors.green + '66' }]}>
           <Text style={[styles.statLabel, { color: colors.green }]}>BEST NIGHT</Text>
@@ -452,14 +667,13 @@ function HealthTab() {
         </View>
       </View>
 
-      {/* Stage breakdown */}
       <Text style={[styles.sectionTitle, { marginTop: spacing.lg }]}>Sleep stages (avg)</Text>
       <StageBar label="Deep" hours={avg(data.nights.map((n) => n.deep_hours))} color={colors.cyan} totalAvg={data.avg_total_hours} />
       <StageBar label="REM" hours={avg(data.nights.map((n) => n.rem_hours))} color={colors.amber} totalAvg={data.avg_total_hours} />
       <StageBar label="Light" hours={avg(data.nights.map((n) => n.light_hours))} color={colors.textSecondary} totalAvg={data.avg_total_hours} />
 
-      <Text style={styles.footnote}>Source: {data.source} · Real Apple Health / Google Fit data activates after EAS native build.</Text>
-    </ScrollView>
+      <Text style={styles.footnote}>Source: {data.source} (simulated)</Text>
+    </View>
   );
 }
 
@@ -742,6 +956,57 @@ const styles = StyleSheet.create({
   },
   connectTitle: { color: colors.amber, fontSize: 13, fontWeight: '900' },
   connectDesc: { color: colors.textSecondary, fontSize: 11, marginTop: 2, lineHeight: 16 },
+  connectHero: {
+    alignItems: 'center',
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.surfaceGlass,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radii.lg,
+    marginBottom: spacing.lg,
+    gap: spacing.sm,
+  },
+  connectTitleBig: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '900',
+    letterSpacing: -0.4,
+    textAlign: 'center',
+  },
+  connectDescBig: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    paddingHorizontal: spacing.sm,
+  },
+  connectBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: colors.cyan,
+    borderRadius: radii.pill,
+    paddingVertical: 14,
+    paddingHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    minWidth: 220,
+  },
+  connectBtnText: {
+    color: colors.bg,
+    fontWeight: '900',
+    fontSize: 14,
+    letterSpacing: 0.3,
+  },
+  connectFootnote: {
+    color: colors.textMuted,
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 16,
+    paddingHorizontal: spacing.sm,
+  },
 
   statRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
   statCard: {
