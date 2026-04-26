@@ -101,11 +101,12 @@ export async function getAvailability(): Promise<HealthConnectAvailability> {
   }
 }
 
-/** Required permissions: read sleep records (and optionally steps & HR). */
+/** Required permissions: read sleep records, heart rate and SpO2. */
 const REQUIRED_PERMISSIONS = [
   { accessType: 'read', recordType: 'SleepSession' },
-  { accessType: 'read', recordType: 'Steps' },
   { accessType: 'read', recordType: 'HeartRate' },
+  { accessType: 'read', recordType: 'OxygenSaturation' },
+  { accessType: 'read', recordType: 'Steps' },
 ];
 
 /** Returns true if the app already has all required Health Connect permissions. */
@@ -261,4 +262,299 @@ export async function fetchSleepWeek(): Promise<{
   if (!granted) return { availability, granted: false, stats: null };
   const sessions = await readLastNDaysOfSleep(7);
   return { availability, granted: true, stats: aggregateWeekly(sessions) };
+}
+
+// ── Heart rate & SpO2 (during a specific sleep window) ───────────────────
+export type HRSample = { time: string; bpm: number };
+export type SpO2Sample = { time: string; pct: number };
+
+export async function readHeartRateBetween(start: string, end: string): Promise<HRSample[]> {
+  const hc = tryLoadHC();
+  if (!hc) return [];
+  try {
+    await hc.initialize();
+    const r = await hc.readRecords('HeartRate', {
+      timeRangeFilter: { operator: 'between', startTime: start, endTime: end },
+    });
+    const records: any[] = Array.isArray(r) ? r : r?.records || [];
+    const out: HRSample[] = [];
+    for (const rec of records) {
+      const samples = rec.samples || [];
+      for (const s of samples) out.push({ time: s.time, bpm: s.beatsPerMinute });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export async function readSpO2Between(start: string, end: string): Promise<SpO2Sample[]> {
+  const hc = tryLoadHC();
+  if (!hc) return [];
+  try {
+    await hc.initialize();
+    const r = await hc.readRecords('OxygenSaturation', {
+      timeRangeFilter: { operator: 'between', startTime: start, endTime: end },
+    });
+    const records: any[] = Array.isArray(r) ? r : r?.records || [];
+    return records.map((rec: any) => ({
+      time: rec.time || rec.startTime,
+      pct: rec.percentage?.value ?? rec.percentage ?? 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ── Sleep score, factors, and animal ─────────────────────────────────────
+export type ScoreFactors = {
+  total_score: number;          // 0-100
+  duration: number;             // 0-100
+  consistency: number;          // 0-100
+  awakenings: number;           // 0-100
+  physical_recovery: number;    // 0-100 (deep sleep weight)
+  mental_recovery: number;      // 0-100 (REM sleep weight)
+};
+
+export type SleepAnimal = {
+  key: 'lion' | 'penguin' | 'walrus' | 'sealion' | 'hedgehog' | 'crocodile' | 'shark';
+  name: string;
+  emoji: string;
+  description: string;
+  trait: string;
+};
+
+export type LastNightDetail = {
+  session: RawSleepSession;
+  hr: { avg: number; min: number; max: number; samples: HRSample[] };
+  spo2: { avg: number; min: number; samples: SpO2Sample[] };
+  factors: ScoreFactors;
+  awakenings: number;
+  efficiency: number; // % of time-in-bed actually asleep
+};
+
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/** Translate a raw session + its HR data into a Samsung-style 0-100 score
+ *  with sub-factor breakdown. */
+export function computeScoreFactors(
+  session: RawSleepSession,
+  weekSessions: RawSleepSession[]
+): ScoreFactors {
+  const totalH = session.total_minutes / 60;
+  // 1. Duration: ideal 7-9h
+  const duration = totalH >= 7 && totalH <= 9
+    ? 100
+    : totalH >= 6 && totalH <= 10
+      ? 80
+      : totalH >= 5 && totalH <= 11
+        ? 60
+        : 40;
+
+  // 2. Consistency: stdev of bedtimes vs midnight, lower is better
+  let consistency = 100;
+  if (weekSessions.length >= 3) {
+    const minutes = weekSessions.map((s) => {
+      const d = new Date(s.startTime);
+      return d.getHours() * 60 + d.getMinutes();
+    });
+    const mean = minutes.reduce((a, b) => a + b, 0) / minutes.length;
+    const sd = Math.sqrt(
+      minutes.reduce((a, b) => a + (b - mean) ** 2, 0) / minutes.length
+    );
+    consistency = clamp(100 - sd / 1.5, 30, 100);
+  }
+
+  // 3. Awakenings count (penalize > 2 awake stages in the night)
+  const awakeStages = session.stages.filter((s) => s.stage === 'awake').length;
+  const awakenings = clamp(100 - awakeStages * 10, 30, 100);
+
+  // 4. Physical recovery: deep sleep should be ~13-23% of total
+  const deepMin = session.stages.filter((s) => s.stage === 'deep').reduce((a, s) => a + s.duration_minutes, 0);
+  const deepPct = (deepMin / Math.max(1, session.total_minutes)) * 100;
+  const physical_recovery = clamp(100 - Math.abs(deepPct - 18) * 4, 20, 100);
+
+  // 5. Mental recovery: REM should be ~20-25% of total
+  const remMin = session.stages.filter((s) => s.stage === 'rem').reduce((a, s) => a + s.duration_minutes, 0);
+  const remPct = (remMin / Math.max(1, session.total_minutes)) * 100;
+  const mental_recovery = clamp(100 - Math.abs(remPct - 22) * 3, 20, 100);
+
+  const total_score = Math.round(
+    duration * 0.3 +
+    consistency * 0.15 +
+    awakenings * 0.15 +
+    physical_recovery * 0.2 +
+    mental_recovery * 0.2
+  );
+  return {
+    total_score,
+    duration: Math.round(duration),
+    consistency: Math.round(consistency),
+    awakenings: Math.round(awakenings),
+    physical_recovery: Math.round(physical_recovery),
+    mental_recovery: Math.round(mental_recovery),
+  };
+}
+
+/** Discover sleep animal — Samsung-style. Based on 7-day patterns.
+ *  Reference: Samsung Health groups users into ~7 animal archetypes. */
+export function classifySleepAnimal(weekSessions: RawSleepSession[]): SleepAnimal {
+  if (!weekSessions.length) {
+    return {
+      key: 'hedgehog',
+      name: 'Cautious Hedgehog',
+      emoji: '🦔',
+      description: 'Not enough data yet — keep tracking your sleep!',
+      trait: 'Curious',
+    };
+  }
+  const avgMin =
+    weekSessions.reduce((a, s) => a + s.total_minutes, 0) / weekSessions.length;
+  const avgH = avgMin / 60;
+  const bedtimes = weekSessions.map((s) => {
+    const d = new Date(s.startTime);
+    return d.getHours() * 60 + d.getMinutes();
+  });
+  const meanBed = bedtimes.reduce((a, b) => a + b, 0) / bedtimes.length;
+  const sdBed = Math.sqrt(
+    bedtimes.reduce((a, b) => a + (b - meanBed) ** 2, 0) / bedtimes.length
+  );
+  const totalAwake = weekSessions.reduce(
+    (a, s) => a + s.stages.filter((st) => st.stage === 'awake').length,
+    0
+  );
+  const isLateOwl = meanBed >= 60 && meanBed <= 6 * 60; // bed between midnight-6am
+  const isConsistent = sdBed < 60; // <1h stdev = consistent
+  // Decision tree
+  if (avgH >= 8 && isConsistent) {
+    return {
+      key: 'lion',
+      name: 'Confident Lion',
+      emoji: '🦁',
+      description: "You sleep long, deep and on a dependable schedule. Royal!",
+      trait: 'Strong & Stable',
+    };
+  }
+  if (avgH >= 7.5 && avgH < 9 && totalAwake / weekSessions.length < 1.5) {
+    return {
+      key: 'penguin',
+      name: 'Peaceful Penguin',
+      emoji: '🐧',
+      description: 'Smooth sleep with very few awakenings. You glide through the night.',
+      trait: 'Calm & Steady',
+    };
+  }
+  if (avgH >= 7 && isConsistent) {
+    return {
+      key: 'sealion',
+      name: 'Sociable Sea Lion',
+      emoji: '🦭',
+      description: 'You get solid 7-hour nights with a regular rhythm.',
+      trait: 'Rhythmic',
+    };
+  }
+  if (avgH >= 6 && !isConsistent) {
+    return {
+      key: 'walrus',
+      name: 'Lethargic Walrus',
+      emoji: '🦣',
+      description: 'You sleep enough but your bedtime drifts a lot. Try anchoring it.',
+      trait: 'Drifty',
+    };
+  }
+  if (isLateOwl) {
+    return {
+      key: 'crocodile',
+      name: 'Nervous Crocodile',
+      emoji: '🐊',
+      description: 'You sleep late and your wake-window is restless.',
+      trait: 'Nocturnal',
+    };
+  }
+  if (avgH < 6) {
+    return {
+      key: 'shark',
+      name: 'Sensitive Shark',
+      emoji: '🦈',
+      description: 'Light sleeper with too few hours. Recovery is at risk.',
+      trait: 'Light Sleeper',
+    };
+  }
+  return {
+    key: 'hedgehog',
+    name: 'Cautious Hedgehog',
+    emoji: '🦔',
+    description: 'Short, fragmented nights. Build a wind-down ritual.',
+    trait: 'Restless',
+  };
+}
+
+// ── Achievements badges (computed from week stats) ───────────────────────
+export type Achievement = {
+  key: string;
+  name: string;
+  description: string;
+  icon: string;       // Ionicon name
+  color: 'green' | 'cyan' | 'amber' | 'pink';
+  unlocked: boolean;
+};
+
+export function computeAchievements(weekSessions: RawSleepSession[]): Achievement[] {
+  const avgMin = weekSessions.length
+    ? weekSessions.reduce((a, s) => a + s.total_minutes, 0) / weekSessions.length
+    : 0;
+  const totalDeep = weekSessions.reduce(
+    (a, s) =>
+      a + s.stages.filter((st) => st.stage === 'deep').reduce((x, st) => x + st.duration_minutes, 0),
+    0
+  );
+  const totalRem = weekSessions.reduce(
+    (a, s) =>
+      a + s.stages.filter((st) => st.stage === 'rem').reduce((x, st) => x + st.duration_minutes, 0),
+    0
+  );
+  const has7Days = weekSessions.length >= 7;
+  const allOver7 = weekSessions.length >= 5 && weekSessions.every((s) => s.total_minutes >= 7 * 60);
+  return [
+    { key: 'streak7',  name: '7-Night Streak',     description: 'Tracked 7 nights in a row',  icon: 'flame',       color: 'amber', unlocked: has7Days },
+    { key: 'long_avg', name: 'Marathon Sleeper',  description: 'Avg 7+ hours this week',     icon: 'moon',        color: 'cyan',  unlocked: avgMin / 60 >= 7 },
+    { key: 'all7',     name: 'Iron Discipline',   description: '5+ nights of 7h or more',    icon: 'shield-checkmark', color: 'green', unlocked: allOver7 },
+    { key: 'deep_pro', name: 'Deep Diver',        description: '90+ min deep sleep / week', icon: 'water',       color: 'cyan',  unlocked: totalDeep >= 90 },
+    { key: 'rem_pro',  name: 'Dream Weaver',      description: '120+ min REM / week',       icon: 'sparkles',    color: 'pink',  unlocked: totalRem >= 120 },
+  ];
+}
+
+/** Build the rich detail payload for "last night". Combines session + HR + SpO2. */
+export async function buildLastNightDetail(
+  session: RawSleepSession,
+  weekSessions: RawSleepSession[]
+): Promise<LastNightDetail> {
+  const [hrSamples, spo2Samples] = await Promise.all([
+    readHeartRateBetween(session.startTime, session.endTime),
+    readSpO2Between(session.startTime, session.endTime),
+  ]);
+  const hrVals = hrSamples.map((s) => s.bpm).filter((n) => n > 0);
+  const spVals = spo2Samples.map((s) => s.pct).filter((n) => n > 0);
+  const hrAvg = hrVals.length ? Math.round(hrVals.reduce((a, b) => a + b, 0) / hrVals.length) : 0;
+  const spAvg = spVals.length ? Math.round(spVals.reduce((a, b) => a + b, 0) / spVals.length) : 0;
+  const factors = computeScoreFactors(session, weekSessions);
+  // Time in bed vs asleep: total_minutes is in-bed; subtract awake stage minutes
+  const awakeMin = session.stages
+    .filter((s) => s.stage === 'awake' || s.stage === 'out_of_bed')
+    .reduce((a, s) => a + s.duration_minutes, 0);
+  const efficiency = Math.max(
+    0,
+    Math.min(100, Math.round(((session.total_minutes - awakeMin) / Math.max(1, session.total_minutes)) * 100))
+  );
+  const awakenings = session.stages.filter((s) => s.stage === 'awake').length;
+  return {
+    session,
+    hr: { avg: hrAvg, min: Math.min(...hrVals, hrAvg || 0), max: Math.max(...hrVals, hrAvg || 0), samples: hrSamples },
+    spo2: { avg: spAvg, min: Math.min(...spVals, spAvg || 0), samples: spo2Samples },
+    factors,
+    awakenings,
+    efficiency,
+  };
 }

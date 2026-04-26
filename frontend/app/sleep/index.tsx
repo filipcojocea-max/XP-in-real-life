@@ -12,7 +12,6 @@ import {
   api,
   SleepProfile,
   SleepChatMsg,
-  SleepHealthMock,
   SleepRoutineItem,
 } from '../../src/api';
 import {
@@ -20,6 +19,13 @@ import {
   requestPermissions as requestHealthConnectPermissions,
   HealthConnectAvailability,
   SleepWeekStats,
+  RawSleepSession,
+  buildLastNightDetail,
+  LastNightDetail,
+  classifySleepAnimal,
+  SleepAnimal,
+  computeAchievements,
+  Achievement,
 } from '../../src/healthConnect';
 import { colors, spacing, radii } from '../../src/theme';
 
@@ -372,25 +378,33 @@ function CoachTab({ profile }: { profile: SleepProfile }) {
 }
 
 // ───────────────────────── Health (Sleep Data) Tab ─────────────────────────
+// REAL DATA ONLY. We never show fabricated/mock numbers. If Samsung Health
+// data isn't available we show a clear empty state explaining how to connect.
 function HealthTab() {
-  const [mockData, setMockData] = useState<SleepHealthMock | null>(null);
   const [hcStats, setHcStats] = useState<SleepWeekStats | null>(null);
   const [hcAvailability, setHcAvailability] = useState<HealthConnectAvailability>('unsupported_platform');
   const [hcGranted, setHcGranted] = useState(false);
+  const [lastNight, setLastNight] = useState<LastNightDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      // 1. Always pull the mock so we can fall back instantly on web/iOS.
-      const mock = await api.sleepHealthMock();
-      setMockData(mock);
-      // 2. Try real Health Connect
       const r = await fetchSleepWeek();
       setHcAvailability(r.availability);
       setHcGranted(r.granted);
       setHcStats(r.stats);
+      // For the hero "last night" detail, pick the most recent session
+      if (r.stats && r.stats.sessions.length > 0) {
+        const newest = r.stats.sessions
+          .slice()
+          .sort((a: RawSleepSession, b: RawSleepSession) => +new Date(b.startTime) - +new Date(a.startTime))[0];
+        const detail = await buildLastNightDetail(newest, r.stats.sessions);
+        setLastNight(detail);
+      } else {
+        setLastNight(null);
+      }
     } catch (e) {
       console.log('health tab load', e);
     } finally {
@@ -398,22 +412,14 @@ function HealthTab() {
     }
   }, []);
 
-  useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   const onConnect = async () => {
     setConnecting(true);
     try {
       const ok = await requestHealthConnectPermissions();
-      if (ok) {
-        await loadAll();
-      } else {
-        Alert.alert(
-          'Permission needed',
-          'Open Health Connect settings and grant XP in Real Life permission to read sleep data.'
-        );
-      }
+      if (ok) await loadAll();
+      else Alert.alert('Permission needed', 'Open Health Connect and grant XP in Real Life permission to read sleep, heart rate and SpO₂.');
     } catch (e: any) {
       Alert.alert('Connection failed', String(e?.message || e));
     } finally {
@@ -425,140 +431,155 @@ function HealthTab() {
     return <View style={styles.center}><ActivityIndicator color={colors.cyan} /></View>;
   }
 
-  // ── REAL DATA from Health Connect ───────────────────────────────────
-  if (hcAvailability === 'available' && hcGranted && hcStats && hcStats.sessions.length > 0) {
-    return <HealthConnectDashboard stats={hcStats} onRefresh={loadAll} />;
+  // ── REAL DATA — render the Samsung-style dashboard ───────────────────
+  if (hcAvailability === 'available' && hcGranted && hcStats && lastNight) {
+    return <SamsungSleepDashboard stats={hcStats} lastNight={lastNight} onRefresh={loadAll} />;
   }
 
-  // ── CONNECT BANNER (Android, package available, just needs permission)
-  if (hcAvailability === 'available' && !hcGranted) {
-    return (
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.connectHero}>
-          <View style={[styles.connectIconWrap, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
-            <Ionicons name="pulse" size={28} color={colors.cyan} />
-          </View>
-          <Text style={styles.connectTitleBig}>Connect Samsung Health</Text>
-          <Text style={styles.connectDescBig}>
-            Read your real sleep records from Samsung Health (or any Health Connect provider)
-            for last 7 nights — start, end, total duration, and sleep stages.
-          </Text>
-          <TouchableOpacity
-            testID="hc-connect-btn"
-            disabled={connecting}
-            style={[styles.connectBtn, connecting && { opacity: 0.6 }]}
-            onPress={onConnect}
-          >
-            {connecting ? (
-              <ActivityIndicator color={colors.bg} />
-            ) : (
-              <>
-                <Ionicons name="link" size={18} color={colors.bg} />
-                <Text style={styles.connectBtnText}>Connect Health Connect</Text>
-              </>
-            )}
-          </TouchableOpacity>
-          <Text style={styles.connectFootnote}>
-            We never write data — read-only access. You can revoke at any time from Health Connect settings.
-          </Text>
-        </View>
-        {/* While the user hasn't connected yet we still show a faded preview using mock data */}
-        {mockData ? <MockDashboard data={mockData} faded /> : null}
-      </ScrollView>
+  // ── EMPTY STATE: needs connection ────────────────────────────────────
+  return <SleepEmptyState
+    availability={hcAvailability}
+    connecting={connecting}
+    onConnect={onConnect}
+  />;
+}
+
+// ── Empty state component (no data available yet) ────────────────────────
+function SleepEmptyState({
+  availability,
+  connecting,
+  onConnect,
+}: {
+  availability: HealthConnectAvailability;
+  connecting: boolean;
+  onConnect: () => void;
+}) {
+  // Pick title/message/cta per state
+  let title = 'Connect Samsung Health';
+  let desc =
+    "Pull your real sleep records — sleep score, timeline, stages, heart rate, SpO₂, achievements and your sleep animal — directly from Samsung Health on this phone.";
+  let icon: any = 'pulse';
+  let iconColor = colors.cyan;
+  let primary = (
+    <TouchableOpacity
+      testID="hc-connect-btn"
+      disabled={connecting}
+      style={[styles.connectBtn, connecting && { opacity: 0.6 }]}
+      onPress={onConnect}
+    >
+      {connecting ? <ActivityIndicator color={colors.bg} /> : (
+        <>
+          <Ionicons name="link" size={18} color={colors.bg} />
+          <Text style={styles.connectBtnText}>Connect Samsung Health</Text>
+        </>
+      )}
+    </TouchableOpacity>
+  );
+
+  if (availability === 'not_installed' || availability === 'update_required') {
+    title = availability === 'update_required' ? 'Update Health Connect' : 'Install Health Connect';
+    desc = availability === 'update_required'
+      ? 'Your Health Connect app is out of date. Update it from the Play Store, then come back.'
+      : "Samsung Health on Android 14+ talks to apps through Google's free Health Connect. Install it to share your sleep data with this app.";
+    icon = 'cloud-download';
+    iconColor = colors.amber;
+    primary = (
+      <TouchableOpacity
+        style={styles.connectBtn}
+        onPress={() => {
+          const url = 'https://play.google.com/store/apps/details?id=com.google.android.apps.healthdata';
+          try { require('expo-linking').openURL(url); }
+          catch { Alert.alert('Open Play Store', url); }
+        }}
+      >
+        <Ionicons name="logo-google-playstore" size={18} color={colors.bg} />
+        <Text style={styles.connectBtnText}>Open Play Store</Text>
+      </TouchableOpacity>
     );
   }
 
-  // ── NEEDS UPDATE ────────────────────────────────────────────────────
-  if (hcAvailability === 'update_required' || hcAvailability === 'not_installed') {
-    return (
-      <ScrollView contentContainerStyle={styles.scroll}>
-        <View style={styles.connectHero}>
-          <View style={[styles.connectIconWrap, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '55' }]}>
-            <Ionicons name="cloud-download" size={28} color={colors.amber} />
-          </View>
-          <Text style={styles.connectTitleBig}>
-            {hcAvailability === 'update_required' ? 'Update Health Connect' : 'Install Health Connect'}
-          </Text>
-          <Text style={styles.connectDescBig}>
-            {hcAvailability === 'update_required'
-              ? "Your Health Connect app is out of date. Update it from the Play Store and come back."
-              : "To read sleep records from Samsung Health, install Google's free Health Connect app from the Play Store."}
-          </Text>
-          <TouchableOpacity
-            style={styles.connectBtn}
-            onPress={() => {
-              const url =
-                'https://play.google.com/store/apps/details?id=com.google.android.apps.healthdata';
-              try {
-                require('expo-linking').openURL(url);
-              } catch {
-                Alert.alert('Open Play Store', url);
-              }
-            }}
-          >
-            <Ionicons name="logo-google-playstore" size={18} color={colors.bg} />
-            <Text style={styles.connectBtnText}>Open Play Store</Text>
-          </TouchableOpacity>
-        </View>
-        {mockData ? <MockDashboard data={mockData} faded /> : null}
-      </ScrollView>
+  if (availability === 'unsupported_platform' || availability === 'expo_go_unsupported') {
+    title = Platform.OS === 'ios' ? 'Apple HealthKit coming next' : 'Open this on your Android phone';
+    desc = Platform.OS === 'ios'
+      ? "Reading sleep data on iPhone needs Apple HealthKit. We'll add it next."
+      : Platform.OS === 'android'
+        ? "Real Samsung Health data needs a custom Android dev build. Run `expo prebuild + expo run:android` on a phone with Samsung Health installed."
+        : "Sleep tracking needs a phone with Samsung Health (Android) or Apple HealthKit (iOS). The web preview can't read your real data.";
+    icon = 'phone-portrait';
+    iconColor = colors.amber;
+    primary = (
+      <View style={[styles.connectBtn, { backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border }]}>
+        <Ionicons name="lock-closed" size={16} color={colors.textMuted} />
+        <Text style={[styles.connectBtnText, { color: colors.textSecondary }]}>Phone-only feature</Text>
+      </View>
     );
   }
 
-  // ── UNSUPPORTED PLATFORM (iOS / web / Expo Go) ─────────────────────
   return (
     <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-      <View style={styles.connectBanner}>
-        <View style={styles.connectIconWrap}>
-          <Ionicons name="lock-closed" size={18} color={colors.amber} />
+      <View style={styles.connectHero}>
+        <View style={[styles.connectIconWrap, { backgroundColor: iconColor + '22', borderColor: iconColor + '55' }]}>
+          <Ionicons name={icon} size={28} color={iconColor} />
         </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.connectTitle}>
-            {Platform.OS === 'android'
-              ? 'Health Connect needs a custom dev build'
-              : Platform.OS === 'ios'
-                ? 'Apple HealthKit coming next'
-                : 'Phone-only feature'}
+        <Text style={styles.connectTitleBig}>{title}</Text>
+        <Text style={styles.connectDescBig}>{desc}</Text>
+        {primary}
+        {availability === 'available' ? (
+          <Text style={styles.connectFootnote}>
+            Read-only access. We never write data. You can revoke at any time from Health Connect settings.
           </Text>
-          <Text style={styles.connectDesc}>
-            {Platform.OS === 'android'
-              ? "We're showing simulated data right now. Run `expo prebuild + expo run:android` on a device to read real Samsung Health data."
-              : Platform.OS === 'ios'
-                ? 'Real Apple HealthKit integration is on the roadmap. For now we show simulated data so you can preview the dashboard.'
-                : 'Sleep data reading runs on Android (Samsung Health) and iOS (Apple HealthKit) only. Showing simulated data.'}
-          </Text>
-        </View>
+        ) : null}
       </View>
-      {mockData ? <MockDashboard data={mockData} /> : null}
+
+      {/* Preview of what they'll get when connected */}
+      <Text style={styles.previewLabel}>WHEN CONNECTED YOU'LL SEE</Text>
+      <View style={styles.previewGrid}>
+        {[
+          { i: 'speedometer', t: 'Sleep score',         d: '0–100, with 5 sub-factors' },
+          { i: 'analytics',   t: 'Sleep timeline',      d: 'Stages over the night' },
+          { i: 'layers',      t: 'Sleep stages',        d: 'Deep / REM / Light / Awake' },
+          { i: 'heart',       t: 'Heart rate & SpO₂',   d: 'Avg, min and max' },
+          { i: 'paw',         t: 'Sleep animal',        d: 'Discover your archetype' },
+          { i: 'trophy',      t: 'Achievement badges',  d: 'Unlock streaks & milestones' },
+        ].map((p) => (
+          <View key={p.t} style={styles.previewCard}>
+            <View style={[styles.previewIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
+              <Ionicons name={p.i as any} size={18} color={colors.cyan} />
+            </View>
+            <Text style={styles.previewTitle}>{p.t}</Text>
+            <Text style={styles.previewDesc}>{p.d}</Text>
+          </View>
+        ))}
+      </View>
     </ScrollView>
   );
 }
 
-// ── Real Health Connect dashboard ────────────────────────────────────────
-function HealthConnectDashboard({ stats, onRefresh }: { stats: SleepWeekStats; onRefresh: () => void }) {
-  const totalH = (stats.avg_total_minutes / 60).toFixed(1);
-  const score = Math.min(
-    100,
-    Math.round(
-      ((stats.avg_total_minutes / 60) / 8) * 60 +
-      ((stats.avg_stages.deep / Math.max(1, stats.avg_total_minutes)) * 100) * 0.4
-    )
-  );
-  const sourceName =
-    stats.sessions[0]?.source?.replace('com.samsung.android.app.', 'Samsung ') ||
-    'Health Connect';
+// ── Real Samsung-Health-style dashboard ──────────────────────────────────
+function SamsungSleepDashboard({
+  stats, lastNight, onRefresh,
+}: { stats: SleepWeekStats; lastNight: LastNightDetail; onRefresh: () => void }) {
+  const sourceLabel =
+    lastNight.session.source?.replace('com.samsung.android.app.', 'Samsung ') || 'Samsung Health';
+  const animal: SleepAnimal = useMemoSafe(() => classifySleepAnimal(stats.sessions), [stats.sessions]);
+  const achievements: Achievement[] = useMemoSafe(() => computeAchievements(stats.sessions), [stats.sessions]);
+  const factors = lastNight.factors;
+  const totalH = (lastNight.session.total_minutes / 60).toFixed(1);
+  const startStr = new Date(lastNight.session.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const endStr = new Date(lastNight.session.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const dateStr = new Date(lastNight.session.startTime).toLocaleDateString(undefined, {
+    weekday: 'short', month: 'short', day: 'numeric',
+  });
 
-  // Build last-7-day chart
+  // 7-day chart
   const days = stats.sessions.map((s) => {
     const d = new Date(s.startTime);
     return {
-      date: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
       day: d.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 3),
-      total_hours: +(s.total_minutes / 60).toFixed(1),
-      score: Math.min(100, Math.round((s.total_minutes / 480) * 100)),
+      hours: +(s.total_minutes / 60).toFixed(1),
     };
   });
-  const maxHours = Math.max(...days.map((d) => d.total_hours), 1);
+  const maxH = Math.max(...days.map((d) => d.hours), 1);
 
   return (
     <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -567,36 +588,132 @@ function HealthConnectDashboard({ stats, onRefresh }: { stats: SleepWeekStats; o
           <Ionicons name="checkmark-circle" size={18} color={colors.green} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={[styles.connectTitle, { color: colors.green }]}>Live data from {sourceName}</Text>
-          <Text style={styles.connectDesc}>{stats.sessions.length} sleep sessions in the last 7 days</Text>
+          <Text style={[styles.connectTitle, { color: colors.green }]}>Live from {sourceLabel}</Text>
+          <Text style={styles.connectDesc}>{stats.sessions.length} sessions · last 7 days</Text>
         </View>
         <TouchableOpacity onPress={onRefresh} style={{ padding: 8 }} testID="hc-refresh">
           <Ionicons name="refresh" size={18} color={colors.text} />
         </TouchableOpacity>
       </View>
 
-      <View style={styles.statRow}>
-        <View style={styles.statCard}>
-          <Text style={styles.statLabel}>AVG SLEEP</Text>
-          <Text style={styles.statValue}>{totalH}<Text style={styles.statUnit}>h</Text></Text>
-          <Text style={styles.statSub}>Last 7 nights</Text>
+      {/* HERO — last-night sleep score (Samsung-style) */}
+      <View style={styles.heroCard}>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
+          <Text style={styles.heroDate}>{dateStr}</Text>
+          <Text style={styles.heroTime}>· {startStr} → {endStr}</Text>
         </View>
-        <View style={styles.statCard}>
-          <Text style={styles.statLabel}>SLEEP SCORE</Text>
-          <Text style={[styles.statValue, { color: score >= 80 ? colors.green : score >= 65 ? colors.amber : colors.danger }]}>{score}</Text>
-          <Text style={styles.statSub}>out of 100</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 18, marginTop: 12 }}>
+          <ScoreCircle value={factors.total_score} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.heroTotalH}>{totalH}h</Text>
+            <Text style={styles.heroSub}>Time asleep</Text>
+            <View style={styles.heroChips}>
+              <Chip icon="bed" label={`${lastNight.efficiency}% efficient`} color={colors.cyan} />
+              <Chip icon="alert-circle" label={`${lastNight.awakenings} awakening${lastNight.awakenings === 1 ? '' : 's'}`} color={colors.amber} />
+            </View>
+          </View>
         </View>
       </View>
 
+      {/* SLEEP TIMELINE — visual stage strip */}
+      <Text style={styles.sectionTitle}>Sleep timeline</Text>
+      <View style={styles.timelineCard}>
+        <SleepTimeline session={lastNight.session} />
+        <View style={styles.timelineLabels}>
+          <Text style={styles.timelineTime}>{startStr}</Text>
+          <Text style={styles.timelineTime}>{endStr}</Text>
+        </View>
+        <View style={styles.legendRow}>
+          <LegendDot color={colors.danger}        label="Awake" />
+          <LegendDot color={colors.textSecondary} label="Light" />
+          <LegendDot color={colors.cyan}          label="Deep" />
+          <LegendDot color={colors.amber}         label="REM" />
+        </View>
+      </View>
+
+      {/* SLEEP STAGES DETAIL */}
+      <Text style={styles.sectionTitle}>Sleep stages</Text>
+      <View style={styles.stagesCard}>
+        <StageRow label="Deep"  color={colors.cyan}          mins={minutesIn(lastNight.session, 'deep')}  total={lastNight.session.total_minutes} />
+        <StageRow label="REM"   color={colors.amber}         mins={minutesIn(lastNight.session, 'rem')}   total={lastNight.session.total_minutes} />
+        <StageRow label="Light" color={colors.textSecondary} mins={minutesIn(lastNight.session, 'light') + minutesIn(lastNight.session, 'sleeping')} total={lastNight.session.total_minutes} />
+        <StageRow label="Awake" color={colors.danger}        mins={minutesIn(lastNight.session, 'awake')} total={lastNight.session.total_minutes} />
+      </View>
+
+      {/* SLEEP SCORE FACTORS */}
+      <Text style={styles.sectionTitle}>Sleep score factors</Text>
+      <View style={styles.factorsCard}>
+        <FactorBar label="Total time"        value={factors.duration} />
+        <FactorBar label="Sleep cycle"       value={factors.consistency} />
+        <FactorBar label="Awakenings"        value={factors.awakenings} />
+        <FactorBar label="Physical recovery" value={factors.physical_recovery} />
+        <FactorBar label="Mental recovery"   value={factors.mental_recovery} />
+      </View>
+
+      {/* HEART & BLOOD OXYGEN */}
+      <Text style={styles.sectionTitle}>Heart & blood oxygen</Text>
+      <View style={styles.statRow}>
+        <View style={[styles.statCard, { borderColor: colors.danger + '55' }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Ionicons name="heart" size={14} color={colors.danger} />
+            <Text style={[styles.statLabel, { color: colors.danger }]}>HEART RATE</Text>
+          </View>
+          <Text style={styles.statValue}>{lastNight.hr.avg || '—'}<Text style={styles.statUnit}>{lastNight.hr.avg ? ' bpm' : ''}</Text></Text>
+          <Text style={styles.statSub}>{lastNight.hr.avg ? `min ${lastNight.hr.min} · max ${lastNight.hr.max}` : 'No data this night'}</Text>
+        </View>
+        <View style={[styles.statCard, { borderColor: colors.cyan + '55' }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Ionicons name="water" size={14} color={colors.cyan} />
+            <Text style={[styles.statLabel, { color: colors.cyan }]}>BLOOD O₂ (SpO₂)</Text>
+          </View>
+          <Text style={styles.statValue}>{lastNight.spo2.avg || '—'}<Text style={styles.statUnit}>{lastNight.spo2.avg ? '%' : ''}</Text></Text>
+          <Text style={styles.statSub}>{lastNight.spo2.avg ? `min ${lastNight.spo2.min}%` : 'No data this night'}</Text>
+        </View>
+      </View>
+
+      {/* SLEEP ANIMAL */}
+      <Text style={styles.sectionTitle}>Discover your sleep animal</Text>
+      <View style={styles.animalCard}>
+        <Text style={styles.animalEmoji}>{animal.emoji}</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.animalName}>{animal.name}</Text>
+          <Text style={styles.animalTrait}>{animal.trait}</Text>
+          <Text style={styles.animalDesc}>{animal.description}</Text>
+        </View>
+      </View>
+
+      {/* ACHIEVEMENTS */}
+      <Text style={styles.sectionTitle}>Achievements</Text>
+      <View style={styles.badgesRow}>
+        {achievements.map((a) => {
+          const c = a.color === 'green' ? colors.green : a.color === 'cyan' ? colors.cyan : a.color === 'amber' ? colors.amber : '#ff7eb6';
+          return (
+            <View key={a.key} style={[styles.badge, !a.unlocked && { opacity: 0.45 }]}>
+              <View style={[styles.badgeIcon, { backgroundColor: c + '22', borderColor: c + '66' }]}>
+                <Ionicons name={a.icon as any} size={20} color={c} />
+                {!a.unlocked ? (
+                  <View style={styles.lockOverlay}>
+                    <Ionicons name="lock-closed" size={11} color={colors.textMuted} />
+                  </View>
+                ) : null}
+              </View>
+              <Text style={styles.badgeName}>{a.name}</Text>
+              <Text style={styles.badgeDesc}>{a.description}</Text>
+            </View>
+          );
+        })}
+      </View>
+
+      {/* 7-day weekly chart */}
       <Text style={styles.sectionTitle}>Last {days.length} nights</Text>
       <View style={styles.chartCard}>
         <View style={styles.chartRow}>
-          {days.map((n) => {
-            const h = (n.total_hours / maxHours) * 130;
-            const color = n.score >= 80 ? colors.green : n.score >= 65 ? colors.amber : colors.danger;
+          {days.map((n, i) => {
+            const h = (n.hours / maxH) * 130;
+            const color = n.hours >= 7 ? colors.green : n.hours >= 6 ? colors.amber : colors.danger;
             return (
-              <View key={n.date} style={styles.chartCol}>
-                <Text style={styles.chartHours}>{n.total_hours}h</Text>
+              <View key={i} style={styles.chartCol}>
+                <Text style={styles.chartHours}>{n.hours}h</Text>
                 <View style={styles.chartBarTrack}>
                   <View style={[styles.chartBar, { height: h, backgroundColor: color }]} />
                 </View>
@@ -607,74 +724,106 @@ function HealthConnectDashboard({ stats, onRefresh }: { stats: SleepWeekStats; o
         </View>
       </View>
 
-      <Text style={[styles.sectionTitle, { marginTop: spacing.lg }]}>Sleep stages (avg, per night)</Text>
-      <StageBar label="Deep" hours={stats.avg_stages.deep / 60} color={colors.cyan} totalAvg={stats.avg_total_minutes / 60} />
-      <StageBar label="REM" hours={stats.avg_stages.rem / 60} color={colors.amber} totalAvg={stats.avg_total_minutes / 60} />
-      <StageBar label="Light" hours={stats.avg_stages.light / 60} color={colors.textSecondary} totalAvg={stats.avg_total_minutes / 60} />
-
-      <Text style={styles.footnote}>Source: {sourceName} via Google Health Connect · Read-only access</Text>
+      <Text style={styles.footnote}>Source: {sourceLabel} via Health Connect · Read-only</Text>
     </ScrollView>
   );
 }
 
-// ── Mock dashboard (kept for fallback / preview) ─────────────────────────
-function MockDashboard({ data, faded = false }: { data: SleepHealthMock; faded?: boolean }) {
-  const maxHours = Math.max(...data.nights.map((n) => n.total_hours));
+// ── Small UI primitives ────────────────────────────────────────────────
+function ScoreCircle({ value }: { value: number }) {
+  const color = value >= 80 ? colors.green : value >= 65 ? colors.amber : colors.danger;
+  const label = value >= 80 ? 'Good' : value >= 65 ? 'Fair' : 'Poor';
   return (
-    <View style={faded ? { opacity: 0.55 } : undefined}>
-      <View style={styles.statRow}>
-        <View style={styles.statCard}>
-          <Text style={styles.statLabel}>AVG SLEEP</Text>
-          <Text style={styles.statValue}>{data.avg_total_hours}<Text style={styles.statUnit}>h</Text></Text>
-          <Text style={styles.statSub}>Last 7 nights</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Text style={styles.statLabel}>SLEEP SCORE</Text>
-          <Text style={[styles.statValue, { color: data.avg_score >= 80 ? colors.green : data.avg_score >= 65 ? colors.amber : colors.danger }]}>{data.avg_score}</Text>
-          <Text style={styles.statSub}>out of 100</Text>
-        </View>
-      </View>
-
-      <Text style={styles.sectionTitle}>Last 7 nights</Text>
-      <View style={styles.chartCard}>
-        <View style={styles.chartRow}>
-          {data.nights.map((n) => {
-            const h = (n.total_hours / maxHours) * 130;
-            const color = n.score >= 80 ? colors.green : n.score >= 65 ? colors.amber : colors.danger;
-            return (
-              <View key={n.date} style={styles.chartCol}>
-                <Text style={styles.chartHours}>{n.total_hours}h</Text>
-                <View style={styles.chartBarTrack}>
-                  <View style={[styles.chartBar, { height: h, backgroundColor: color }]} />
-                </View>
-                <Text style={styles.chartDay}>{n.day}</Text>
-              </View>
-            );
-          })}
-        </View>
-      </View>
-
-      <View style={[styles.statRow, { marginTop: spacing.md }]}>
-        <View style={[styles.statCard, { borderColor: colors.green + '66' }]}>
-          <Text style={[styles.statLabel, { color: colors.green }]}>BEST NIGHT</Text>
-          <Text style={styles.statValue}>{data.best_night.score}</Text>
-          <Text style={styles.statSub}>{new Date(data.best_night.date).toLocaleDateString(undefined, { weekday: 'long' })} · {data.best_night.total_hours}h</Text>
-        </View>
-        <View style={[styles.statCard, { borderColor: colors.danger + '66' }]}>
-          <Text style={[styles.statLabel, { color: colors.danger }]}>TOUGHEST</Text>
-          <Text style={styles.statValue}>{data.worst_night.score}</Text>
-          <Text style={styles.statSub}>{new Date(data.worst_night.date).toLocaleDateString(undefined, { weekday: 'long' })} · {data.worst_night.total_hours}h</Text>
-        </View>
-      </View>
-
-      <Text style={[styles.sectionTitle, { marginTop: spacing.lg }]}>Sleep stages (avg)</Text>
-      <StageBar label="Deep" hours={avg(data.nights.map((n) => n.deep_hours))} color={colors.cyan} totalAvg={data.avg_total_hours} />
-      <StageBar label="REM" hours={avg(data.nights.map((n) => n.rem_hours))} color={colors.amber} totalAvg={data.avg_total_hours} />
-      <StageBar label="Light" hours={avg(data.nights.map((n) => n.light_hours))} color={colors.textSecondary} totalAvg={data.avg_total_hours} />
-
-      <Text style={styles.footnote}>Source: {data.source} (simulated)</Text>
+    <View style={[styles.scoreCircle, { borderColor: color }]}>
+      <Text style={[styles.scoreValue, { color }]}>{value}</Text>
+      <Text style={[styles.scoreLabel, { color }]}>{label}</Text>
     </View>
   );
+}
+
+function Chip({ icon, label, color }: { icon: any; label: string; color: string }) {
+  return (
+    <View style={[styles.chipPill, { borderColor: color + '55', backgroundColor: color + '15' }]}>
+      <Ionicons name={icon} size={11} color={color} />
+      <Text style={[styles.chipPillText, { color }]}>{label}</Text>
+    </View>
+  );
+}
+
+function SleepTimeline({ session }: { session: RawSleepSession }) {
+  const total = Math.max(1, session.total_minutes);
+  return (
+    <View style={styles.timelineTrack}>
+      {session.stages.map((st, idx) => {
+        const w = (st.duration_minutes / total) * 100;
+        const color =
+          st.stage === 'awake' ? colors.danger :
+          st.stage === 'deep' ? colors.cyan :
+          st.stage === 'rem' ? colors.amber :
+          colors.textSecondary;
+        const top =
+          st.stage === 'awake' ? 0 :
+          st.stage === 'rem'   ? 6 :
+          st.stage === 'light' || st.stage === 'sleeping' ? 18 :
+          st.stage === 'deep'  ? 30 : 18;
+        return (
+          <View key={idx} style={{ width: `${w}%`, height: '100%', justifyContent: 'flex-start' }}>
+            <View style={{ position: 'absolute', top, left: 0, right: 0, height: 14, backgroundColor: color, borderRadius: 3 }} />
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
+      <Text style={styles.legendText}>{label}</Text>
+    </View>
+  );
+}
+
+function StageRow({ label, color, mins, total }: { label: string; color: string; mins: number; total: number }) {
+  const pct = total > 0 ? Math.round((mins / total) * 100) : 0;
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return (
+    <View style={styles.stageRow}>
+      <View style={[styles.stageDot, { backgroundColor: color }]} />
+      <Text style={styles.stageLabel}>{label}</Text>
+      <View style={styles.stageBarTrack}>
+        <View style={[styles.stageBarFill, { width: `${pct}%`, backgroundColor: color }]} />
+      </View>
+      <Text style={styles.stageMin}>{h}h {m}m</Text>
+      <Text style={styles.stagePct}>{pct}%</Text>
+    </View>
+  );
+}
+
+function FactorBar({ label, value }: { label: string; value: number }) {
+  const c = value >= 80 ? colors.green : value >= 65 ? colors.amber : colors.danger;
+  return (
+    <View style={styles.factorRow}>
+      <Text style={styles.factorLabel}>{label}</Text>
+      <View style={styles.factorBarTrack}>
+        <View style={[styles.factorBarFill, { width: `${value}%`, backgroundColor: c }]} />
+      </View>
+      <Text style={[styles.factorValue, { color: c }]}>{value}</Text>
+    </View>
+  );
+}
+
+function minutesIn(session: RawSleepSession, stage: string): number {
+  return session.stages.filter((s) => s.stage === stage).reduce((a, s) => a + s.duration_minutes, 0);
+}
+
+// Helpful safe useMemo wrapper since we don't want to introduce noise on
+// a top-level import refactor — call the function inline if React 18+ memo is
+// not friendly for some reason.
+function useMemoSafe<T>(fn: () => T, deps: any[]): T {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return React.useMemo(fn, deps);
 }
 
 function StageBar({ label, hours, color, totalAvg }: { label: string; hours: number; color: string; totalAvg: number }) {
@@ -1007,6 +1156,142 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     paddingHorizontal: spacing.sm,
   },
+  // ── Samsung-style dashboard ──────────────────────────────────────────
+  heroCard: {
+    backgroundColor: colors.surfaceGlass,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radii.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  heroDate: { color: colors.text, fontSize: 14, fontWeight: '900', letterSpacing: -0.3 },
+  heroTime: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
+  heroTotalH: { color: colors.text, fontSize: 32, fontWeight: '900', letterSpacing: -1 },
+  heroSub: { color: colors.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  heroChips: { flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' },
+  scoreCircle: {
+    width: 110, height: 110, borderRadius: 55, borderWidth: 6,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.bg,
+  },
+  scoreValue: { fontSize: 36, fontWeight: '900', letterSpacing: -1 },
+  scoreLabel: { fontSize: 10, fontWeight: '900', letterSpacing: 2, marginTop: -2 },
+  chipPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    borderRadius: radii.pill, borderWidth: 1,
+    paddingHorizontal: 8, paddingVertical: 3,
+  },
+  chipPillText: { fontSize: 11, fontWeight: '800' },
+
+  timelineCard: {
+    backgroundColor: colors.surfaceGlass,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radii.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  timelineTrack: {
+    height: 56,
+    backgroundColor: colors.bg,
+    borderRadius: 6,
+    flexDirection: 'row',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  timelineLabels: {
+    flexDirection: 'row', justifyContent: 'space-between', marginTop: 6,
+  },
+  timelineTime: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
+  legendRow: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 14,
+    marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  legendText: { color: colors.textSecondary, fontSize: 11, fontWeight: '700' },
+
+  stagesCard: {
+    backgroundColor: colors.surfaceGlass,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radii.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    gap: 12,
+  },
+  stageRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  stageDot: { width: 10, height: 10, borderRadius: 5 },
+  stageLabel: { color: colors.text, fontSize: 13, fontWeight: '800', width: 56 },
+  stageBarTrack: { flex: 1, height: 8, borderRadius: 4, backgroundColor: colors.border, overflow: 'hidden' },
+  stageBarFill: { height: '100%', borderRadius: 4 },
+  stageMin: { color: colors.text, fontSize: 12, fontWeight: '800', width: 56, textAlign: 'right' },
+  stagePct: { color: colors.textMuted, fontSize: 11, fontWeight: '800', width: 36, textAlign: 'right' },
+
+  factorsCard: {
+    backgroundColor: colors.surfaceGlass,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radii.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    gap: 10,
+  },
+  factorRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  factorLabel: { color: colors.text, fontSize: 12, fontWeight: '800', width: 130 },
+  factorBarTrack: { flex: 1, height: 6, borderRadius: 3, backgroundColor: colors.border, overflow: 'hidden' },
+  factorBarFill: { height: '100%', borderRadius: 3 },
+  factorValue: { fontSize: 12, fontWeight: '900', width: 28, textAlign: 'right' },
+
+  animalCard: {
+    backgroundColor: colors.surfaceGlass,
+    borderColor: colors.cyan + '55',
+    borderWidth: 1,
+    borderRadius: radii.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  animalEmoji: { fontSize: 56 },
+  animalName: { color: colors.cyan, fontSize: 16, fontWeight: '900', letterSpacing: -0.3 },
+  animalTrait: { color: colors.amber, fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
+  animalDesc: { color: colors.textSecondary, fontSize: 12, marginTop: 6, lineHeight: 17 },
+
+  badgesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.md },
+  badge: { width: '31%', alignItems: 'center', paddingVertical: 8 },
+  badgeIcon: {
+    width: 50, height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, marginBottom: 6, position: 'relative',
+  },
+  lockOverlay: {
+    position: 'absolute', right: -2, bottom: -2,
+    backgroundColor: colors.bg, borderRadius: 8, padding: 2,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  badgeName: { color: colors.text, fontSize: 11, fontWeight: '800', textAlign: 'center' },
+  badgeDesc: { color: colors.textMuted, fontSize: 9, fontWeight: '700', textAlign: 'center', marginTop: 2 },
+
+  previewLabel: {
+    color: colors.textMuted, fontSize: 10, fontWeight: '900',
+    letterSpacing: 1.6, textAlign: 'center', marginTop: spacing.lg, marginBottom: spacing.sm,
+  },
+  previewGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  previewCard: {
+    width: '47%',
+    backgroundColor: colors.surfaceGlass,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: spacing.sm,
+  },
+  previewIcon: {
+    width: 32, height: 32, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, marginBottom: 6,
+  },
+  previewTitle: { color: colors.text, fontSize: 12, fontWeight: '800' },
+  previewDesc: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
 
   statRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
   statCard: {
