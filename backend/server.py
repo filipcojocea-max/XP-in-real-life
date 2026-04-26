@@ -132,22 +132,25 @@ async def get_current_user(
 
 async def get_user_or_legacy(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    x_anonymous_id: Optional[str] = Header(None, alias="X-Anonymous-Id"),
 ) -> str:
-    """Same as get_current_user, but falls back to 'main' for unauthenticated
-    requests (backward-compat for any pre-auth client)."""
-    if not creds or not creds.credentials:
-        return "main"
-    try:
-        payload = decode_token(creds.credentials)
-        user_id = payload.get("sub")
-        if not user_id:
-            return "main"
-        user = await db.users.find_one({"_id": user_id}, {"password_hash": 0})
-        if not user or not user.get("verified"):
-            return "main"
-        return user_id
-    except Exception:
-        return "main"
+    """Return user_id from JWT, or X-Anonymous-Id (anonymous mode), or 'main' fallback.
+    Anonymous IDs are prefixed with 'anon-' so they can't collide with real user UUIDs."""
+    if creds and creds.credentials:
+        try:
+            payload = decode_token(creds.credentials)
+            user_id = payload.get("sub")
+            if user_id:
+                user = await db.users.find_one({"_id": user_id}, {"password_hash": 0})
+                if user and user.get("verified"):
+                    return user_id
+        except Exception:
+            pass
+    if x_anonymous_id and len(x_anonymous_id) >= 8 and len(x_anonymous_id) <= 64:
+        # Sanitize: only [a-zA-Z0-9-]
+        clean = "".join(c for c in x_anonymous_id if c.isalnum() or c == "-")[:64]
+        return f"anon-{clean}"
+    return "main"
 
 
 # ------------------------------------------------------------------
@@ -157,9 +160,32 @@ FOCUS_AREAS = ("social", "fitness", "appearance", "mindset")
 TIME_SLOTS = ("morning", "afternoon", "evening")
 
 # Cumulative XP required to reach each level (index = level)
-# Level 1 = 0 XP, Level 10 = 13000 XP
-LEVEL_THRESHOLDS = [0, 100, 250, 500, 900, 1500, 2500, 4000, 6000, 9000, 13000]
-MAX_LEVEL = 10
+# 200-level exponential progression curve.
+# Formula:  cum_xp(L) = round(LEVEL_COEFF * L ** LEVEL_EXP)
+# Tuned so that:
+#   • Level 1   → 50 XP (low double-digit start)
+#   • Level 10  → ~3,677 XP cumulative
+#   • Level 50  → ~75,000 XP cumulative (matches user spec)
+#   • Level 110 → per-level cost ≈ 5,500 XP (avg per-level only hit late)
+#   • Level 200 → ~1,000,000 XP cumulative (matches user spec)
+LEVEL_COEFF = 49.6
+LEVEL_EXP = 1.87
+MAX_LEVEL = 200
+TOTAL_XP_CAP = 1_000_000
+
+
+def _cum_xp_for_level(L: int) -> int:
+    """Cumulative XP required to *reach* level L.  level 1 = 0 XP needed (you start there)."""
+    if L <= 1:
+        return 0
+    if L > MAX_LEVEL:
+        return TOTAL_XP_CAP
+    return round(LEVEL_COEFF * (L ** LEVEL_EXP))
+
+
+# Pre-computed thresholds for fast lookup; index = level (1-based), value = cumulative XP at start of that level.
+LEVEL_THRESHOLDS = [0] + [_cum_xp_for_level(L) for L in range(2, MAX_LEVEL + 2)]
+LEVEL_THRESHOLDS[-1] = TOTAL_XP_CAP  # cap final threshold
 
 ACHIEVEMENT_DEFS = [
     {"id": "first_task", "title": "First Step", "description": "Complete your first task", "icon": "footsteps", "type": "tasks_completed", "threshold": 1},
@@ -169,9 +195,11 @@ ACHIEVEMENT_DEFS = [
     {"id": "streak_3", "title": "On Fire", "description": "3-day streak", "icon": "flame", "type": "streak", "threshold": 3},
     {"id": "streak_7", "title": "Week Warrior", "description": "7-day streak", "icon": "calendar", "type": "streak", "threshold": 7},
     {"id": "streak_30", "title": "Unstoppable", "description": "30-day streak", "icon": "rocket", "type": "streak", "threshold": 30},
-    {"id": "level_3", "title": "Rising Star", "description": "Reach Level 3", "icon": "star", "type": "level", "threshold": 3},
-    {"id": "level_5", "title": "Half Hero", "description": "Reach Level 5", "icon": "ribbon", "type": "level", "threshold": 5},
-    {"id": "level_10", "title": "Legend", "description": "Reach Level 10", "icon": "diamond", "type": "level", "threshold": 10},
+    {"id": "level_5", "title": "Rising Star", "description": "Reach Level 5", "icon": "star", "type": "level", "threshold": 5},
+    {"id": "level_25", "title": "Quarter Way", "description": "Reach Level 25", "icon": "ribbon", "type": "level", "threshold": 25},
+    {"id": "level_50", "title": "Hero", "description": "Reach Level 50", "icon": "diamond", "type": "level", "threshold": 50},
+    {"id": "level_100", "title": "Champion", "description": "Reach Level 100", "icon": "trophy", "type": "level", "threshold": 100},
+    {"id": "level_200", "title": "Apex Legend", "description": "Reach max Level 200", "icon": "shield-checkmark", "type": "level", "threshold": 200},
     {"id": "first_goal", "title": "Goal Setter", "description": "Create your first goal", "icon": "flag", "type": "goals_created", "threshold": 1},
     {"id": "goal_done", "title": "Achiever", "description": "Complete a goal", "icon": "checkmark-done", "type": "goals_completed", "threshold": 1},
 ]
@@ -189,17 +217,23 @@ def now_iso() -> str:
 
 
 def level_from_xp(xp: int) -> int:
-    lvl = 1
-    for i, t in enumerate(LEVEL_THRESHOLDS):
-        if xp >= t:
-            lvl = min(i + 1, MAX_LEVEL)
-    return lvl
+    if xp <= 0:
+        return 1
+    if xp >= TOTAL_XP_CAP:
+        return MAX_LEVEL
+    # Binary search the thresholds (1-indexed: thresholds[L] = cum needed to be at level L+1)
+    lo, hi = 1, MAX_LEVEL
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if xp >= LEVEL_THRESHOLDS[mid - 1]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def xp_progress(xp: int):
     lvl = level_from_xp(xp)
-    current_threshold = LEVEL_THRESHOLDS[lvl - 1]
-    next_threshold = LEVEL_THRESHOLDS[lvl] if lvl < MAX_LEVEL else LEVEL_THRESHOLDS[MAX_LEVEL - 1]
     if lvl >= MAX_LEVEL:
         return {
             "level": MAX_LEVEL,
@@ -209,6 +243,8 @@ def xp_progress(xp: int):
             "progress": 1.0,
             "is_max": True,
         }
+    current_threshold = LEVEL_THRESHOLDS[lvl - 1]
+    next_threshold = LEVEL_THRESHOLDS[lvl]
     xp_in_level = xp - current_threshold
     xp_to_next = next_threshold - current_threshold
     return {
@@ -219,6 +255,17 @@ def xp_progress(xp: int):
         "progress": xp_in_level / xp_to_next if xp_to_next else 0,
         "is_max": False,
     }
+
+
+@api_router.get("/levels")
+async def get_levels():
+    """Return the full level table (cumulative XP per level + delta to reach it)."""
+    rows = []
+    for L in range(1, MAX_LEVEL + 1):
+        cum = LEVEL_THRESHOLDS[L - 1]
+        prev = LEVEL_THRESHOLDS[L - 2] if L > 1 else 0
+        rows.append({"level": L, "cum_xp": cum, "delta_to_reach": cum - prev})
+    return {"max_level": MAX_LEVEL, "total_xp_cap": TOTAL_XP_CAP, "formula": "cum_xp(L) = round(49.6 * L^1.87)", "levels": rows}
 
 
 async def get_or_create_profile_for(user_id: str, full_name: str = "Hero") -> dict:
@@ -756,7 +803,9 @@ async def create_task(body: TaskCreate, user_id: str = Depends(get_user_or_legac
         "description": body.description or "",
         "focus_area": body.focus_area,
         "time_slot": body.time_slot,
-        "xp_value": max(5, min(200, body.xp_value)),
+        # Custom (user-created) tasks are capped at 20 XP. Default seeded tasks
+        # bypass this and can be 5-200 (set in seed_default_tasks_for_user).
+        "xp_value": max(5, min(20, body.xp_value)),
         "recurring": body.recurring,
         "scheduled_time": body.scheduled_time,
         "reminder_enabled": body.reminder_enabled,
@@ -783,6 +832,9 @@ async def update_task(task_id: str, body: TaskUpdate, user_id: str = Depends(get
                 400,
                 f"Cannot change {', '.join(blocked)} on a default quest — only title, description, XP and reminder are editable.",
             )
+    # Custom (non-default) tasks: cap XP at 20.  Default tasks are unrestricted.
+    if "xp_value" in update and not existing.get("is_default"):
+        update["xp_value"] = max(5, min(20, int(update["xp_value"])))
     await db.tasks.update_one({"id": task_id, "user_id": user_id}, {"$set": update})
     task = await db.tasks.find_one({"id": task_id, "user_id": user_id}, {"_id": 0})
     return task
@@ -849,11 +901,27 @@ async def complete_task(task_id: str, body: CompleteTaskBody, user_id: str = Dep
 
 
 @api_router.post("/tasks/{task_id}/uncomplete")
-async def uncomplete_task(task_id: str, body: CompleteTaskBody):
-    raise HTTPException(
-        400,
-        "Quests can only be completed once per day. They'll auto-reset 2 hours before your wake-up time.",
+async def uncomplete_task(task_id: str, body: CompleteTaskBody, user_id: str = Depends(get_user_or_legacy)):
+    target_date = body.date or today_str()
+    log = await db.task_logs.find_one({"task_id": task_id, "user_id": user_id, "date": target_date})
+    if not log:
+        return {"already_uncompleted": True}
+    await db.task_logs.delete_one({"task_id": task_id, "user_id": user_id, "date": target_date})
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$inc": {"total_xp": -log["xp_awarded"], "tasks_completed": -1}},
     )
+    # Clamp negative values
+    prof = await db.profile.find_one({"_id": user_id})
+    fixes = {}
+    if prof.get("total_xp", 0) < 0:
+        fixes["total_xp"] = 0
+    if prof.get("tasks_completed", 0) < 0:
+        fixes["tasks_completed"] = 0
+    if fixes:
+        await db.profile.update_one({"_id": user_id}, {"$set": fixes})
+    prof = await db.profile.find_one({"_id": user_id})
+    return {"profile": serialize_profile(prof), "xp_removed": log["xp_awarded"]}
 
 
 # --------- Goals ---------

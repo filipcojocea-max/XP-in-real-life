@@ -1,5 +1,5 @@
 import type { FocusArea, TimeSlot } from './theme';
-import { getAuthToken, fireUnauthorized } from './AuthContext';
+import { getAuthToken, getAnonymousId, fireUnauthorized } from './AuthContext';
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -9,10 +9,14 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
     ...((opts.headers as Record<string, string>) || {}),
   };
   const token = getAuthToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  } else {
+    const anon = getAnonymousId();
+    if (anon) headers['X-Anonymous-Id'] = anon;
+  }
   const res = await fetch(`${BASE}/api${path}`, { ...opts, headers });
   if (res.status === 401) {
-    // Token expired/invalid → drop session
     fireUnauthorized();
     const text = await res.text().catch(() => '');
     throw new Error(`Session expired — please sign in again. ${text}`);
@@ -192,7 +196,7 @@ export const api = {
       newly_unlocked_achievements: string[];
     }>(`/tasks/${id}/complete`, { method: 'POST', body: JSON.stringify({ date }) }),
   uncompleteTask: (id: string, date?: string) =>
-    req<{ profile: Profile }>(`/tasks/${id}/uncomplete`, { method: 'POST', body: JSON.stringify({ date }) }),
+    req<{ profile: Profile; xp_removed?: number }>(`/tasks/${id}/uncomplete`, { method: 'POST', body: JSON.stringify({ date }) }),
 
   listGoals: () => req<{ goals: Goal[] }>('/goals'),
   createGoal: (body: { title: string; description?: string; focus_area: FocusArea; target_value: number; unit?: string }) =>

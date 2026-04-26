@@ -6,19 +6,20 @@ import { colors } from '../src/theme';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { loading, token } = useAuth();
+  const { loading, token, anonymousId } = useAuth();
   const router = useRouter();
   const segments = useSegments();
+  const hasAccess = !!token || !!anonymousId;
 
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === 'auth';
-    if (!token && !inAuthGroup) {
+    if (!hasAccess && !inAuthGroup) {
       router.replace('/auth/login');
-    } else if (token && inAuthGroup) {
+    } else if (hasAccess && inAuthGroup) {
       router.replace('/');
     }
-  }, [loading, token, segments, router]);
+  }, [loading, hasAccess, segments, router]);
 
   if (loading) {
     return (

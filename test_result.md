@@ -102,9 +102,57 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "Test the new auth + per-user data isolation system on http://localhost:8001/api. Email/password auth with JWT (TTL=365d), email verification (6-digit code, dev_code returned in dev mode), per-user data scoping via Depends(get_user_or_legacy), 11 custom-task limit per user, once-per-day uncomplete blocked, default-task delete blocked, wake_time setter, custom-date tasks listing, sleep-coach per-user isolation."
+user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "200-level XP system (/api/levels) + level field in profile reflects XP curve"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "PASS — GET /api/levels returns max_level=200, total_xp_cap=1000000, formula='cum_xp(L) = round(49.6 * L^1.87)', and a 200-entry list with {level, cum_xp, delta_to_reach}. L1 cum=0, L50 cum=74569 (within 73000-76000 spec band), L200 cum=996340 (within 990000-1000000 band). Profile.level computed via level_from_xp() returns 1 for a fresh user, increments via task completes. Note: spec line 'with 1000 XP level should be 5 (since L5 cum_xp=1006)' is internally inconsistent — 1000 < 1006, so the correct level is 4, which is exactly what the backend returns. The formula and table are correct; the spec sentence has a typo. No action needed on backend."
+
+  - task: "Un-tick / uncomplete refunds XP (POST /api/tasks/{id}/uncomplete)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "PASS — Registered new user, completed default 'Morning reflection' task → +15 XP awarded. POST /tasks/{id}/uncomplete with body {date:'2026-04-26'} returned 200 with {profile, xp_removed:15}. GET /profile shows total_xp rolled back to 0. GET /tasks shows the task as completed=false again. Once-per-day block is intentionally NOT enforced any more (matches review request: un-tick restored)."
+
+  - task: "Custom task XP cap = 20 (POST/PUT) — defaults unrestricted"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "PASS — POST /api/tasks with xp_value=150 → response xp_value=20 (capped). xp_value=10 → 10 (unchanged). xp_value=20 → 20. PUT custom task with xp_value=999 → 20 (capped). PUT default task ('Morning reflection (5 min)') with xp_value=80 → 80 (NOT capped — defaults bypass the cap as required). Fresh user's seeded defaults remain at original 10-40 XP values [15, 40, 10, 30, 15, 20, 10, 20], including 'Workout session' at 40 XP. Both POST (line 808 max(5, min(20, body.xp_value))) and PUT (line 836 'if not existing.get(is_default)') correctly differentiate custom vs default."
+
+  - task: "Anonymous mode via X-Anonymous-Id header (data isolation per device)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "PASS — GET /api/profile without any header returns 200 with the legacy 'main' account. GET /profile with X-Anonymous-Id: device-aaa-<uuid> returns a separate isolated profile (user_id internally 'anon-device-aaa-...'), GET /profile with a different X-Anonymous-Id returns yet another distinct profile. After creating a custom task and completing it on anon A, anon A's total_xp=20 while anon B's total_xp=0 — confirming data isolation. Header value 'ab' (length 2 < 8 minimum) correctly falls back to 'main'. Authenticated request with both Bearer token AND X-Anonymous-Id correctly ignores the header and uses the JWT user_id (returned name matched the registered user, not anon). get_user_or_legacy() in server.py L133-153 implements the priority correctly: JWT > X-Anonymous-Id (if 8-64 chars) > 'main'."
+
   - task: "Auth + per-user data isolation (register/verify/login/me/resend, JWT, scoped tasks/profile/sleep, 11-task limit, uncomplete blocked, default-delete blocked, wake_time, custom-date tasks)"
     implemented: true
     working: false
@@ -149,12 +197,17 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Auth + per-user data isolation (register/verify/login/me/resend, JWT, scoped tasks/profile/sleep, 11-task limit, uncomplete blocked, default-delete blocked, wake_time, custom-date tasks)"
+    - "200-level XP system (/api/levels) + level field in profile reflects XP curve"
+    - "Un-tick / uncomplete refunds XP (POST /api/tasks/{id}/uncomplete)"
+    - "Custom task XP cap = 20 (POST/PUT) — defaults unrestricted"
+    - "Anonymous mode via X-Anonymous-Id header (data isolation per device)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+    - agent: "testing"
+      message: "Tested all 4 newly-added/modified backend features against https://xp-confidence.preview.emergentagent.com/api via /app/backend_test.py. 37/38 assertions PASS, 0 critical fails. (1) 200-level XP system: /api/levels returns the full table with max_level=200, total_xp_cap=1000000, formula 'cum_xp(L) = round(49.6 * L^1.87)', L1=0, L50=74569 (in 73000-76000 band), L200=996340 (in 990000-1000000 band). (2) Un-tick: complete + uncomplete round-trip works perfectly — 15 XP awarded then refunded, profile rolls back, task shows completed=false. xp_removed field returned. (3) Custom XP cap=20: POST 150→20, 10→10, 20→20; PUT custom 999→20; PUT default 80→80 (unrestricted); fresh user defaults intact at [15,40,10,30,15,20,10,20]. (4) Anonymous mode: no-header→main, two distinct X-Anonymous-Id values give isolated profiles (anon A xp=20 after task complete, anon B xp=0), too-short ID falls back to main, JWT request ignores the header. The single 'failure' in the test output ('1000 XP -> level 5 per /levels table :: level for 1000 XP = 4') is a SPEC TYPO, not a backend bug — the spec said 'with 1000 XP, level should be 5 (since L5 cum_xp=1006)' but mathematically 1000 < 1006 means level 4, which is what the backend correctly returns. Backend logic is correct. No fixes needed."
     - agent: "testing"
       message: "Ran full backend test suite for the updated Tasks API (/app/backend_test.py). All 12 assertions pass against the public ingress URL. Note: the pre-existing Mongo `tasks` collection had items seeded before the `is_default` migration, so the test resets & re-seeds to obtain properly tagged defaults. If the main agent wants default tasks to persist for end users without requiring a reset, consider a one-time migration that marks existing seeded titles as is_default=true, or change POST /api/seed to upsert the flag on legacy docs. Functionality itself (LOCKED_DEFAULT_FIELDS + delete protection + custom-task full edit/move/delete) is correct."
     - agent: "testing"

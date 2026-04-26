@@ -21,6 +21,8 @@ import { useFocusEffect } from 'expo-router';
 import Card from '../../src/components/Card';
 import { api, Task, userDate } from '../../src/api';
 import { colors, focusMeta, slotMeta, spacing, radii, FocusArea, TimeSlot } from '../../src/theme';
+import { useAuth } from '../../src/AuthContext';
+import { router } from 'expo-router';
 import {
   ensureNotificationPermission,
   scheduleTaskNotification,
@@ -54,6 +56,7 @@ export default function Tasks() {
   const [wakeTime, setWakeTime] = useState<string>('07:00');
   const [customCount, setCustomCount] = useState<number>(0);
   const floatAnim = useMemo(() => new Animated.Value(0), []);
+  const { isAnonymous } = useAuth();
 
   const load = useCallback(async () => {
     try {
@@ -95,33 +98,33 @@ export default function Tasks() {
   };
 
   const toggle = async (task: Task) => {
-    // Once-per-day rule: completed tasks cannot be un-ticked. They auto-reset.
-    if (task.completed) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
-      Alert.alert(
-        'Already done today',
-        `Quests can only be completed once per day. They'll reset automatically 2 hours before your wake-up time (${wakeTime}).`,
-      );
-      return;
-    }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    const wasCompleted = task.completed;
     setTasks((prev) =>
-      prev.map((t) => (t.id === task.id ? { ...t, completed: true } : t))
+      prev.map((t) => (t.id === task.id ? { ...t, completed: !wasCompleted } : t))
     );
     try {
       const today = userDate(wakeTime);
-      const res = await api.completeTask(task.id, today);
-      showXp(res.xp_awarded);
-      if (res.leveled_up) {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-        Alert.alert('LEVEL UP!', `You reached Level ${res.new_level}. Keep climbing.`);
-      } else if (res.newly_unlocked_achievements.length > 0) {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      if (wasCompleted) {
+        // Un-tick: remove XP
+        const res = await api.uncompleteTask(task.id, today);
+        if (res?.xp_removed) showXp(-res.xp_removed);
+      } else {
+        // Tick: award XP
+        const res = await api.completeTask(task.id, today);
+        showXp(res.xp_awarded);
+        if (res.leveled_up) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+          Alert.alert('LEVEL UP!', `You reached Level ${res.new_level}. Keep climbing.`);
+        } else if (res.newly_unlocked_achievements.length > 0) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        }
       }
     } catch (e) {
       console.log('toggle err', e);
+      // Roll back optimistic change on failure
       setTasks((prev) =>
-        prev.map((t) => (t.id === task.id ? { ...t, completed: false } : t))
+        prev.map((t) => (t.id === task.id ? { ...t, completed: wasCompleted } : t))
       );
     }
   };
@@ -238,6 +241,22 @@ export default function Tasks() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        {isAnonymous ? (
+          <TouchableOpacity
+            testID="anon-signin-banner"
+            onPress={() => router.push('/auth/register' as any)}
+            style={styles.anonBanner}
+          >
+            <Ionicons name="cloud-offline" size={18} color={colors.amber} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.anonBannerTitle}>Sign in to save your progress</Text>
+              <Text style={styles.anonBannerDesc}>
+                Your XP lives only on this device. If you uninstall the app, it's gone.
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.amber} />
+          </TouchableOpacity>
+        ) : null}
         {orderSource ? (
           <View testID="adaptive-order-hint" style={styles.orderHint}>
             <Ionicons name="reorder-four" size={14} color={colors.cyan} />
@@ -818,15 +837,29 @@ function TaskModal({
               />
             ) : null}
 
-            <Text style={styles.inputLabel}>XP Reward</Text>
+            <Text style={styles.inputLabel}>XP Reward {!isDefault ? '(max 20)' : ''}</Text>
             <TextInput
               testID="task-input-xp"
               keyboardType="number-pad"
               style={styles.input}
               value={xp}
-              onChangeText={setXp}
+              onChangeText={(t) => {
+                // Clamp custom-task XP at 20
+                const cleaned = t.replace(/[^0-9]/g, '');
+                if (!isDefault && cleaned !== '') {
+                  const n = parseInt(cleaned, 10);
+                  if (n > 20) {
+                    setXp('20');
+                    return;
+                  }
+                }
+                setXp(cleaned);
+              }}
               placeholderTextColor={colors.textMuted}
             />
+            {!isDefault ? (
+              <Text style={styles.xpHint}>Custom quests are capped at 20 XP each.</Text>
+            ) : null}
 
             <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
               <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={onClose}>
@@ -1176,4 +1209,13 @@ const styles = StyleSheet.create({
   cancelText: { color: colors.textSecondary, fontWeight: '700' },
   saveBtn: { backgroundColor: colors.green },
   saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
+  xpHint: { color: colors.textMuted, fontSize: 11, marginTop: 6, marginLeft: 4 },
+  anonBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    padding: spacing.md, borderRadius: radii.md,
+    backgroundColor: colors.amber + '14', borderWidth: 1, borderColor: colors.amber + '55',
+    marginBottom: spacing.md,
+  },
+  anonBannerTitle: { color: colors.amber, fontSize: 13, fontWeight: '900' },
+  anonBannerDesc: { color: colors.textSecondary, fontSize: 11, marginTop: 2, lineHeight: 16 },
 });

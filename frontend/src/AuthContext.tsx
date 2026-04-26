@@ -5,6 +5,7 @@ import { Platform } from 'react-native';
 
 const TOKEN_KEY = 'xp_token';
 const USER_KEY = 'xp_user';
+const ANON_KEY = 'xp_anon_id';
 
 // SecureStore is only on iOS/Android — fall back to AsyncStorage on web/dev
 const storage = {
@@ -45,22 +46,32 @@ type AuthState = {
   loading: boolean;
   token: string | null;
   user: AuthUser | null;
+  anonymousId: string | null;
+  isAnonymous: boolean;
   signIn: (token: string, user: AuthUser) => Promise<void>;
   signOut: () => Promise<void>;
+  continueAnonymously: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState>({
   loading: true,
   token: null,
   user: null,
+  anonymousId: null,
+  isAnonymous: false,
   signIn: async () => {},
   signOut: async () => {},
+  continueAnonymously: async () => {},
 });
 
-// Module-level cache so api.ts can read the token synchronously
+// Module-level cache so api.ts can read the token / anon-id synchronously
 let currentToken: string | null = null;
+let currentAnonId: string | null = null;
 export function getAuthToken(): string | null {
   return currentToken;
+}
+export function getAnonymousId(): string | null {
+  return currentAnonId;
 }
 let onUnauthorizedCb: () => void = () => {};
 export function setOnUnauthorized(fn: () => void) {
@@ -70,19 +81,35 @@ export function fireUnauthorized() {
   onUnauthorizedCb();
 }
 
+function _genAnonId(): string {
+  // 16 hex chars, sufficient uniqueness for per-device anon tracking
+  let out = '';
+  const chars = 'abcdef0123456789';
+  for (let i = 0; i < 16; i++) out += chars[Math.floor(Math.random() * 16)];
+  return out;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [anonymousId, setAnonymousId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [t, u] = await Promise.all([storage.get(TOKEN_KEY), storage.get(USER_KEY)]);
+        const [t, u, a] = await Promise.all([
+          storage.get(TOKEN_KEY),
+          storage.get(USER_KEY),
+          storage.get(ANON_KEY),
+        ]);
         if (t && u) {
           currentToken = t;
           setToken(t);
           setUser(JSON.parse(u));
+        } else if (a) {
+          currentAnonId = a;
+          setAnonymousId(a);
         }
       } catch (e) {
         console.log('auth restore', e);
@@ -94,10 +121,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = useCallback(async (newToken: string, newUser: AuthUser) => {
     currentToken = newToken;
+    currentAnonId = null;
     await storage.set(TOKEN_KEY, newToken);
     await storage.set(USER_KEY, JSON.stringify(newUser));
+    await storage.del(ANON_KEY);
     setToken(newToken);
     setUser(newUser);
+    setAnonymousId(null);
   }, []);
 
   const signOut = useCallback(async () => {
@@ -106,6 +136,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await storage.del(USER_KEY);
     setToken(null);
     setUser(null);
+  }, []);
+
+  const continueAnonymously = useCallback(async () => {
+    let id = await storage.get(ANON_KEY);
+    if (!id) {
+      id = _genAnonId();
+      await storage.set(ANON_KEY, id);
+    }
+    currentAnonId = id;
+    setAnonymousId(id);
   }, []);
 
   // Allow api.ts to trigger sign-out on 401
@@ -119,8 +159,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const isAnonymous = !token && !!anonymousId;
+
   return (
-    <AuthContext.Provider value={{ loading, token, user, signIn, signOut }}>
+    <AuthContext.Provider value={{ loading, token, user, anonymousId, isAnonymous, signIn, signOut, continueAnonymously }}>
       {children}
     </AuthContext.Provider>
   );

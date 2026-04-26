@@ -11,7 +11,7 @@ import { useAuth } from '../../src/AuthContext';
 import { colors, spacing, radii } from '../../src/theme';
 
 export default function Login() {
-  const { signIn } = useAuth();
+  const { signIn, continueAnonymously } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -90,6 +90,39 @@ export default function Login() {
               </TouchableOpacity>
             </Link>
           </View>
+
+          <View style={styles.dividerRow}>
+            <View style={styles.divider} />
+            <Text style={styles.dividerText}>OR</Text>
+            <View style={styles.divider} />
+          </View>
+
+          <TouchableOpacity
+            testID="login-anon"
+            onPress={async () => {
+              Alert.alert(
+                'Continue without an account?',
+                "You can use everything in the app, but your XP and progress will only live on this device. If you uninstall or switch devices, it'll be gone.\n\nCreate an account anytime from Profile to save your progress for good.",
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Continue',
+                    onPress: async () => {
+                      await continueAnonymously();
+                      router.replace('/');
+                    },
+                  },
+                ],
+              );
+            }}
+            style={styles.anonBtn}
+          >
+            <Ionicons name="person-outline" size={16} color={colors.textSecondary} />
+            <Text style={styles.anonText}>Continue without signing in</Text>
+          </TouchableOpacity>
+          <Text style={styles.anonHint}>
+            Progress is saved on this device only. Sign up later to back it up.
+          </Text>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -122,4 +155,14 @@ const styles = StyleSheet.create({
   linkRow: { flexDirection: 'row', justifyContent: 'center', marginTop: spacing.lg },
   linkLabel: { color: colors.textMuted },
   linkText: { color: colors.cyan, fontWeight: '800' },
+  dividerRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.lg, marginBottom: spacing.md },
+  divider: { flex: 1, height: 1, backgroundColor: colors.border },
+  dividerText: { color: colors.textMuted, fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
+  anonBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 14, borderRadius: radii.pill,
+    backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border,
+  },
+  anonText: { color: colors.textSecondary, fontSize: 14, fontWeight: '800' },
+  anonHint: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: 8, lineHeight: 16 },
 });
