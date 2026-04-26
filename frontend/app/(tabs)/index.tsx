@@ -26,12 +26,16 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [motivation, setMotivation] = useState<string>(() => pickMotivation());
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts?: { allowRedirect?: boolean }) => {
+    const allowRedirect = opts?.allowRedirect ?? false;
     try {
       const [p, d] = await Promise.all([api.getProfile(), api.statsDaily()]);
       setProfile(p);
       setDaily(d);
-      if (!p.onboarding_complete) {
+      // Only redirect to onboarding when this load happens because the Home
+      // screen is actually focused. Otherwise, navigating to a sibling tab
+      // (e.g. /auth/login from the anon banner) would be hijacked here.
+      if (allowRedirect && !p.onboarding_complete) {
         router.replace('/onboarding');
         return;
       }
@@ -48,14 +52,17 @@ export default function Home() {
     }
   }, [router]);
 
+  // Run once on mount: schedule notifications + warm-up load (no redirect)
   useEffect(() => {
     load();
     scheduleMotivationalNotifications().catch(() => {});
-  }, [load]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
+  // Only redirect to onboarding when Home actually has focus
   useFocusEffect(
     useCallback(() => {
-      load();
+      load({ allowRedirect: true });
     }, [load])
   );
 

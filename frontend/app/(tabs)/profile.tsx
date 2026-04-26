@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   Image,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -47,16 +48,39 @@ export default function ProfileScreen() {
   };
 
   const reset = () => {
+    const doReset = async () => {
+      try {
+        await api.resetProfile();
+        await api.seed();
+        await load();
+      } catch (e: any) {
+        console.log('reset error', e);
+        if (Platform.OS === 'web') {
+          // eslint-disable-next-line no-alert
+          window.alert('Could not reset progress. Please try again.');
+        } else {
+          Alert.alert('Could not reset', String(e?.message || e));
+        }
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      // React Native Web's Alert.alert doesn't render confirm buttons,
+      // so the destructive callback never fires. Use the browser confirm.
+      // eslint-disable-next-line no-alert
+      const ok = window.confirm(
+        'Reset progress?\n\nThis permanently deletes your XP, tasks, goals, and streak.'
+      );
+      if (ok) doReset();
+      return;
+    }
+
     Alert.alert('Reset progress?', 'This permanently deletes your XP, tasks, goals, and streak.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Reset',
         style: 'destructive',
-        onPress: async () => {
-          await api.resetProfile();
-          await api.seed();
-          load();
-        },
+        onPress: doReset,
       },
     ]);
   };
