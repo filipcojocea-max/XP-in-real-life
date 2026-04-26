@@ -119,9 +119,11 @@ export type Goal = {
   target_value: number;
   current_value: number;
   unit: string;
+  xp_reward?: number;
   completed: boolean;
   created_at: string;
   completed_at: string | null;
+  awarded_xp?: number;
 };
 
 export type Achievement = {
@@ -219,8 +221,16 @@ export const api = {
     req<{ profile: Profile; xp_removed?: number }>(`/tasks/${id}/uncomplete`, { method: 'POST', body: JSON.stringify({ date }) }),
 
   listGoals: () => req<{ goals: Goal[] }>('/goals'),
-  createGoal: (body: { title: string; description?: string; focus_area: FocusArea; target_value: number; unit?: string }) =>
-    req<Goal>('/goals', { method: 'POST', body: JSON.stringify(body) }),
+  goalsXpCaps: () =>
+    req<{ caps: Record<string, number>; default_xp: number }>('/goals/xp-caps'),
+  createGoal: (body: {
+    title: string;
+    description?: string;
+    focus_area: FocusArea;
+    target_value: number;
+    unit?: string;
+    xp_reward?: number;
+  }) => req<Goal>('/goals', { method: 'POST', body: JSON.stringify(body) }),
   updateGoalProgress: (id: string, current_value: number) =>
     req<Goal>(`/goals/${id}/progress`, { method: 'POST', body: JSON.stringify({ current_value }) }),
   deleteGoal: (id: string) =>

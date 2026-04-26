@@ -505,7 +505,8 @@ class GoalCreate(BaseModel):
     description: Optional[str] = ""
     focus_area: Literal["social", "fitness", "appearance", "mindset"]
     target_value: int = 100
-    unit: Optional[str] = "%"
+    unit: Optional[str] = "days"
+    xp_reward: Optional[int] = None  # capped on backend by unit; defaults sensibly
 
 
 class GoalUpdate(BaseModel):
@@ -517,6 +518,27 @@ class GoalUpdate(BaseModel):
 
 class GoalProgress(BaseModel):
     current_value: int
+
+
+# ─────────────── Goal XP cap by duration unit ───────────────
+# Long-term goals award XP on completion. The XP value is capped based on
+# how long the user is committing to (longer = bigger reward, up to a max).
+GOAL_XP_CAPS: dict = {
+    "days": 30,
+    "weeks": 225,
+    "months": 900,
+}
+GOAL_XP_DEFAULT = 100  # fallback for legacy goals without xp_reward
+
+
+def _clamp_goal_xp(unit: Optional[str], xp: Optional[int]) -> int:
+    """Clamp the user-requested XP reward to the cap for the chosen unit.
+       If no unit cap exists (legacy free-text units like 'km'), use 100 as a hard cap."""
+    cap = GOAL_XP_CAPS.get((unit or "").lower(), GOAL_XP_DEFAULT)
+    if xp is None or xp < 1:
+        # Sensible default: half of the cap, rounded to nearest 5
+        return max(5, (cap // 2 // 5) * 5)
+    return max(1, min(int(xp), cap))
 
 
 class ProfileUpdate(BaseModel):
@@ -1041,6 +1063,8 @@ async def list_goals(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.post("/goals")
 async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legacy)):
+    unit_norm = (body.unit or "days").lower()
+    xp_reward = _clamp_goal_xp(unit_norm, body.xp_reward)
     goal = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
@@ -1049,7 +1073,8 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
         "focus_area": body.focus_area,
         "target_value": body.target_value,
         "current_value": 0,
-        "unit": body.unit or "%",
+        "unit": unit_norm,
+        "xp_reward": xp_reward,
         "completed": False,
         "created_at": now_iso(),
         "completed_at": None,
@@ -1082,14 +1107,28 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     current = max(0, min(body.current_value, goal["target_value"]))
     completed = current >= goal["target_value"]
     update = {"current_value": current, "completed": completed}
+    awarded_xp = 0
     if completed and not goal.get("completed"):
         update["completed_at"] = now_iso()
-        await db.profile.update_one({"_id": user_id}, {"$inc": {"goals_completed": 1, "total_xp": 100}})
+        # Award the goal's stored xp_reward (legacy goals without it default to 100)
+        awarded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
+        await db.profile.update_one(
+            {"_id": user_id},
+            {"$inc": {"goals_completed": 1, "total_xp": awarded_xp}},
+        )
         prof = await db.profile.find_one({"_id": user_id})
         await check_and_unlock_achievements(prof)
     await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    if awarded_xp:
+        goal["awarded_xp"] = awarded_xp
     return goal
+
+
+@api_router.get("/goals/xp-caps")
+async def goals_xp_caps():
+    """Public: max XP a goal can award based on its duration unit."""
+    return {"caps": GOAL_XP_CAPS, "default_xp": GOAL_XP_DEFAULT}
 
 
 @api_router.delete("/goals/{goal_id}")

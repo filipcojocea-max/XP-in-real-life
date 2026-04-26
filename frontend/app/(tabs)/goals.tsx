@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -19,8 +19,23 @@ import { useFocusEffect } from 'expo-router';
 import Card from '../../src/components/Card';
 import { api, Goal } from '../../src/api';
 import { colors, focusMeta, spacing, radii, FocusArea } from '../../src/theme';
+import { showAlert, showConfirm } from '../../src/uiAlert';
 
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
+
+// XP cap by duration unit. Long-term goals = bigger reward, capped per tier.
+type DurationUnit = 'days' | 'weeks' | 'months';
+const DURATION_UNITS: DurationUnit[] = ['days', 'weeks', 'months'];
+const XP_CAPS: Record<DurationUnit, number> = {
+  days: 30,
+  weeks: 225,
+  months: 900,
+};
+const UNIT_META: Record<DurationUnit, { label: string; icon: string }> = {
+  days: { label: 'Days', icon: 'sunny' },
+  weeks: { label: 'Weeks', icon: 'calendar' },
+  months: { label: 'Months', icon: 'calendar-outline' },
+};
 
 export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
@@ -53,25 +68,22 @@ export default function Goals() {
       const res = await api.updateGoalProgress(g.id, g.current_value + delta);
       setGoals((prev) => prev.map((x) => (x.id === g.id ? res : x)));
       if (res.completed && !g.completed) {
-        Alert.alert('Goal complete!', `+100 XP for finishing "${res.title}"`);
+        const xp = res.awarded_xp ?? res.xp_reward ?? 100;
+        showAlert('Goal complete! 🎉', `+${xp} XP for finishing "${res.title}"`);
       }
     } catch (e) {
       console.log(e);
     }
   };
 
-  const remove = (g: Goal) => {
-    Alert.alert('Delete Goal?', `Remove "${g.title}"?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          await api.deleteGoal(g.id);
-          load();
-        },
-      },
-    ]);
+  const remove = async (g: Goal) => {
+    const ok = await showConfirm('Delete Goal?', `Remove "${g.title}"?`, {
+      confirmText: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
+    await api.deleteGoal(g.id);
+    load();
   };
 
   if (loading) {
@@ -107,7 +119,7 @@ export default function Goals() {
             <Ionicons name="flag" size={40} color={colors.textMuted} />
             <Text style={styles.emptyTitle}>No goals yet</Text>
             <Text style={styles.emptyDesc}>
-              Set long-term quests to track your journey. Earn +100 XP on completion.
+              Set long-term quests over days, weeks or months. Earn up to 900 XP on completion.
             </Text>
           </Card>
         ) : (
@@ -133,6 +145,11 @@ export default function Goals() {
                     {g.completed ? (
                       <View style={styles.doneBadge}>
                         <Ionicons name="checkmark" size={14} color={colors.bg} />
+                      </View>
+                    ) : g.xp_reward ? (
+                      <View style={styles.xpBadge}>
+                        <Ionicons name="flash" size={11} color={colors.amber} />
+                        <Text style={styles.xpBadgeText}>+{g.xp_reward}</Text>
                       </View>
                     ) : null}
                   </View>
@@ -198,8 +215,16 @@ function AddGoalModal({
   const [desc, setDesc] = useState('');
   const [area, setArea] = useState<FocusArea>('fitness');
   const [target, setTarget] = useState('30');
-  const [unit, setUnit] = useState('days');
+  const [unit, setUnit] = useState<DurationUnit>('days');
+  const [xp, setXp] = useState<string>('15');
   const [saving, setSaving] = useState(false);
+
+  // Sensible default XP per unit (half of cap, rounded to a nice round number)
+  const defaultXpFor = useCallback((u: DurationUnit): number => {
+    if (u === 'days') return 15;
+    if (u === 'weeks') return 100;
+    return 450; // months
+  }, []);
 
   useEffect(() => {
     if (visible) {
@@ -208,26 +233,60 @@ function AddGoalModal({
       setArea('fitness');
       setTarget('30');
       setUnit('days');
+      setXp(String(defaultXpFor('days')));
     }
-  }, [visible]);
+  }, [visible, defaultXpFor]);
+
+  const cap = XP_CAPS[unit];
+  const xpNum = parseInt(xp, 10);
+  const xpInvalid = !isNaN(xpNum) && (xpNum < 1 || xpNum > cap);
+
+  // When user changes the unit, clamp the existing XP to the new cap
+  const onChangeUnit = (u: DurationUnit) => {
+    setUnit(u);
+    const current = parseInt(xp, 10);
+    if (isNaN(current)) {
+      setXp(String(defaultXpFor(u)));
+      return;
+    }
+    if (current > XP_CAPS[u]) setXp(String(XP_CAPS[u]));
+  };
+
+  const onChangeXp = (t: string) => {
+    const cleaned = t.replace(/[^0-9]/g, '');
+    if (cleaned === '') {
+      setXp('');
+      return;
+    }
+    const n = parseInt(cleaned, 10);
+    // Auto-clamp at the cap so the user can't even type higher
+    if (n > cap) {
+      setXp(String(cap));
+      return;
+    }
+    setXp(cleaned);
+  };
 
   const save = async () => {
     if (!title.trim()) {
-      Alert.alert('Enter a goal title');
+      showAlert('Enter a goal title');
       return;
     }
+    const targetN = parseInt(target, 10) || 30;
+    const xpRequested = Math.max(1, Math.min(cap, parseInt(xp, 10) || defaultXpFor(unit)));
     setSaving(true);
     try {
       await api.createGoal({
         title: title.trim(),
         description: desc.trim(),
         focus_area: area,
-        target_value: parseInt(target, 10) || 30,
-        unit: unit.trim() || 'days',
+        target_value: targetN,
+        unit,
+        xp_reward: xpRequested,
       });
       onAdded();
     } catch (e: any) {
-      Alert.alert('Failed', String(e.message || e));
+      showAlert('Failed', String(e.message || e));
     } finally {
       setSaving(false);
     }
@@ -237,7 +296,13 @@ function AddGoalModal({
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.backdrop}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={styles.sheet} testID="add-goal-modal">
+        <ScrollView
+          style={{ maxHeight: '92%' }}
+          contentContainerStyle={styles.sheet}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          testID="add-goal-modal"
+        >
           <View style={styles.handle} />
           <Text style={styles.sheetTitle}>New Goal</Text>
 
@@ -247,7 +312,7 @@ function AddGoalModal({
             style={styles.input}
             value={title}
             onChangeText={setTitle}
-            placeholder="e.g. Run 100 km this month"
+            placeholder="e.g. Read every day"
             placeholderTextColor={colors.textMuted}
           />
 
@@ -286,6 +351,31 @@ function AddGoalModal({
             })}
           </View>
 
+          <Text style={styles.inputLabel}>Duration</Text>
+          <View style={styles.chipRow}>
+            {DURATION_UNITS.map((u) => {
+              const m = UNIT_META[u];
+              const active = unit === u;
+              return (
+                <TouchableOpacity
+                  key={u}
+                  testID={`goal-unit-${u}`}
+                  onPress={() => onChangeUnit(u)}
+                  style={[
+                    styles.chip,
+                    {
+                      borderColor: colors.cyan + (active ? '' : '55'),
+                      backgroundColor: active ? colors.cyan : 'transparent',
+                    },
+                  ]}
+                >
+                  <Ionicons name={m.icon as any} size={14} color={active ? colors.bg : colors.cyan} />
+                  <Text style={[styles.chipText, { color: active ? colors.bg : colors.cyan }]}>{m.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Text style={styles.inputLabel}>Target</Text>
@@ -294,24 +384,43 @@ function AddGoalModal({
                 keyboardType="number-pad"
                 style={styles.input}
                 value={target}
-                onChangeText={setTarget}
+                onChangeText={(t) => setTarget(t.replace(/[^0-9]/g, ''))}
                 placeholderTextColor={colors.textMuted}
               />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.inputLabel}>Unit</Text>
-              <TextInput
-                testID="goal-input-unit"
-                style={styles.input}
-                value={unit}
-                onChangeText={setUnit}
-                placeholder="days / reps / km"
-                placeholderTextColor={colors.textMuted}
-              />
+              <View style={[styles.input, styles.unitDisplay]}>
+                <Text style={styles.unitDisplayText}>{UNIT_META[unit].label.toLowerCase()}</Text>
+              </View>
             </View>
           </View>
 
-          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
+          <View style={styles.xpHeaderRow}>
+            <Text style={[styles.inputLabel, { marginTop: 0 }]}>XP Reward</Text>
+            <Text style={styles.xpCapPill} testID="goal-xp-cap">
+              <Ionicons name="flash" size={11} color={colors.amber} />
+              {`  max ${cap} XP for ${unit}`}
+            </Text>
+          </View>
+          <TextInput
+            testID="goal-input-xp"
+            keyboardType="number-pad"
+            style={[styles.input, xpInvalid && { borderColor: colors.red }]}
+            value={xp}
+            onChangeText={onChangeXp}
+            placeholder={String(defaultXpFor(unit))}
+            placeholderTextColor={colors.textMuted}
+          />
+          <Text style={styles.xpHint} testID="goal-xp-hint">
+            {unit === 'days'
+              ? 'Daily goals can award up to 30 XP.'
+              : unit === 'weeks'
+                ? 'Weekly goals can award up to 225 XP.'
+                : 'Monthly goals can award up to 900 XP.'}
+          </Text>
+
+          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg }}>
             <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={onClose}>
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
@@ -319,7 +428,7 @@ function AddGoalModal({
               {saving ? <ActivityIndicator color={colors.bg} /> : <Text style={styles.saveText}>Create Goal</Text>}
             </TouchableOpacity>
           </View>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -436,4 +545,57 @@ const styles = StyleSheet.create({
   cancelText: { color: colors.textSecondary, fontWeight: '700' },
   saveBtn: { backgroundColor: colors.green },
   saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
+
+  xpBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radii.pill,
+    backgroundColor: colors.amber + '22',
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+  },
+  xpBadgeText: { color: colors.amber, fontSize: 11, fontWeight: '900', letterSpacing: 0.4 },
+
+  xpHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    marginTop: spacing.md,
+    marginBottom: 6,
+  },
+  xpCapPill: {
+    color: colors.amber,
+    fontSize: 11,
+    fontWeight: '800',
+    backgroundColor: colors.amber + '15',
+    borderColor: colors.amber + '44',
+    borderWidth: 1,
+    borderRadius: radii.pill,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    overflow: 'hidden',
+  },
+  xpHint: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 6,
+    marginLeft: 4,
+  },
+  unitDisplay: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceGlass,
+    borderStyle: 'dashed',
+    borderColor: colors.cyan + '55',
+  },
+  unitDisplayText: {
+    color: colors.cyan,
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    textTransform: 'capitalize',
+  },
 });
