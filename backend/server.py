@@ -1855,6 +1855,180 @@ async def sleep_health_mock(user_id: str = Depends(get_user_or_legacy)):
 # ------------------------------------------------------------------
 # App setup
 # ------------------------------------------------------------------
+
+
+# ═════════════════════ Challenge Tasks Mini-App ═════════════════════
+from challenges_data import (
+    get_today_quote,
+    get_today_challenge,
+    find_challenge,
+    CHALLENGES as _ALL_CHALLENGES,
+)
+
+
+def _greeting_for_now() -> str:
+    """Local-server greeting based on hour of day. Falls through to Evening."""
+    h = datetime.now().hour
+    if 5 <= h < 12:
+        return "Good morning"
+    if 12 <= h < 17:
+        return "Good afternoon"
+    if 17 <= h < 22:
+        return "Good evening"
+    return "Good night"
+
+
+def _today_iso() -> str:
+    return datetime.now().date().isoformat()
+
+
+class ChallengeRejectPayload(BaseModel):
+    challenge_id: Optional[str] = None  # for safety; ignored when stale
+
+
+class ChallengeCompletePayload(BaseModel):
+    completed: bool = True
+    how_text: Optional[str] = ""
+    difficulty: str = "easy"           # "easy" | "difficult"
+    experience_text: Optional[str] = ""
+    rating: int = 5                    # 1..5
+
+
+@api_router.get("/challenge/today")
+async def challenge_today(user_id: str = Depends(get_user_or_legacy)):
+    """Returns today's quote, challenge, current state and the greeting."""
+    today = _today_iso()
+    today_d = datetime.now().date()
+    quote = get_today_quote(user_id, today_d)
+    ch = get_today_challenge(user_id, today_d)
+    # Look up the user's state for today (accept/reject/complete)
+    state_doc = await db.challenge_state.find_one(
+        {"user_id": user_id, "date": today}
+    )
+    status = (state_doc or {}).get("status", "ready")
+    return {
+        "date": today,
+        "greeting": _greeting_for_now(),
+        "quote": quote,
+        "challenge": ch,
+        "status": status,        # ready | accepted | rejected | completed
+        "completed_id": (state_doc or {}).get("completed_doc_id"),
+    }
+
+
+@api_router.post("/challenge/accept")
+async def challenge_accept(user_id: str = Depends(get_user_or_legacy)):
+    today = _today_iso()
+    ch = get_today_challenge(user_id, datetime.now().date())
+    await db.challenge_state.update_one(
+        {"user_id": user_id, "date": today},
+        {"$set": {
+            "user_id": user_id,
+            "date": today,
+            "challenge_id": ch["id"],
+            "status": "accepted",
+            "accepted_at": now_iso(),
+        }},
+        upsert=True,
+    )
+    return {"status": "accepted", "challenge": ch}
+
+
+@api_router.post("/challenge/reject")
+async def challenge_reject(user_id: str = Depends(get_user_or_legacy)):
+    today = _today_iso()
+    ch = get_today_challenge(user_id, datetime.now().date())
+    await db.challenge_state.update_one(
+        {"user_id": user_id, "date": today},
+        {"$set": {
+            "user_id": user_id,
+            "date": today,
+            "challenge_id": ch["id"],
+            "status": "rejected",
+            "rejected_at": now_iso(),
+        }},
+        upsert=True,
+    )
+    return {"status": "rejected"}
+
+
+@api_router.post("/challenge/complete")
+async def challenge_complete(
+    body: ChallengeCompletePayload,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    today = _today_iso()
+    ch = get_today_challenge(user_id, datetime.now().date())
+    # Difficulty-based XP: easy=30, difficult=60. Don't award if !completed.
+    awarded_xp = 0
+    if body.completed:
+        awarded_xp = 60 if (body.difficulty or "").lower() == "difficult" else 30
+    rating = max(1, min(5, int(body.rating or 5)))
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "date": today,
+        "challenge_id": ch["id"],
+        "challenge_title": ch["title"],
+        "challenge_tagline": ch.get("tagline", ""),
+        "challenge_description": ch["description"],
+        "challenge_icon": ch.get("icon", "flash"),
+        "completed": bool(body.completed),
+        "how_text": (body.how_text or "").strip(),
+        "difficulty": (body.difficulty or "easy").lower(),
+        "experience_text": (body.experience_text or "").strip(),
+        "rating": rating,
+        "xp_awarded": awarded_xp,
+        "completed_at": now_iso(),
+    }
+    await db.challenge_completions.insert_one(doc)
+    if awarded_xp:
+        await db.profile.update_one(
+            {"_id": user_id}, {"$inc": {"total_xp": awarded_xp}}
+        )
+    await db.challenge_state.update_one(
+        {"user_id": user_id, "date": today},
+        {"$set": {
+            "user_id": user_id,
+            "date": today,
+            "challenge_id": ch["id"],
+            "status": "completed",
+            "completed_doc_id": doc["id"],
+            "completed_at": doc["completed_at"],
+        }},
+        upsert=True,
+    )
+    doc.pop("_id", None)
+    return {"awarded_xp": awarded_xp, "completion": doc}
+
+
+@api_router.get("/challenge/past")
+async def challenge_past(user_id: str = Depends(get_user_or_legacy)):
+    cur = (
+        db.challenge_completions.find({"user_id": user_id})
+        .sort("completed_at", -1)
+        .limit(200)
+    )
+    out: list = []
+    async for d in cur:
+        d.pop("_id", None)
+        out.append(d)
+    return {"completions": out, "count": len(out)}
+
+
+@api_router.delete("/challenge/past/{completion_id}")
+async def challenge_past_delete(
+    completion_id: str, user_id: str = Depends(get_user_or_legacy)
+):
+    res = await db.challenge_completions.delete_one(
+        {"id": completion_id, "user_id": user_id}
+    )
+    return {"deleted": res.deleted_count}
+
+
+# ------------------------------------------------------------------
+# Final app wiring (must be AFTER all api_router routes are declared)
+# ------------------------------------------------------------------
 app.include_router(api_router)
 
 app.add_middleware(

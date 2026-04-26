@@ -211,6 +211,29 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ token, new_password }),
     }),
+
+  // ── Challenge Tasks mini-app ────────────────────────────────────
+  challengeToday: () =>
+    req<ChallengeTodayResp>('/challenge/today'),
+  challengeAccept: () =>
+    req<{ status: string; challenge: ChallengeContent }>('/challenge/accept', { method: 'POST' }),
+  challengeReject: () =>
+    req<{ status: string }>('/challenge/reject', { method: 'POST' }),
+  challengeComplete: (body: {
+    completed: boolean;
+    how_text?: string;
+    difficulty: 'easy' | 'difficult';
+    experience_text?: string;
+    rating: number;
+  }) =>
+    req<{ awarded_xp: number; completion: ChallengeCompletion }>('/challenge/complete', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  challengePast: () =>
+    req<{ completions: ChallengeCompletion[]; count: number }>('/challenge/past'),
+  challengePastDelete: (id: string) =>
+    req<{ deleted: number }>(`/challenge/past/${id}`, { method: 'DELETE' }),
   authMe: () => req<{ id: string; full_name: string; email: string; verified: boolean }>('/auth/me'),
   getProfile: () => req<Profile>('/profile'),
   updateProfile: (name: string) =>
@@ -365,4 +388,40 @@ export type SleepHealthMock = {
   avg_score: number;
   best_night: SleepHealthNight;
   worst_night: SleepHealthNight;
+};
+
+// ── Challenge Tasks mini-app types ────────────────────────────────
+export type ChallengeContent = {
+  id: string;
+  title: string;
+  tagline: string;
+  description: string;
+  icon: string;
+  tags: string[];
+};
+export type ChallengeQuote = { text: string; author: string };
+export type ChallengeStatus = 'ready' | 'accepted' | 'rejected' | 'completed';
+export type ChallengeTodayResp = {
+  date: string;
+  greeting: string;
+  quote: ChallengeQuote;
+  challenge: ChallengeContent;
+  status: ChallengeStatus;
+  completed_id?: string;
+};
+export type ChallengeCompletion = {
+  id: string;
+  date: string;
+  challenge_id: string;
+  challenge_title: string;
+  challenge_tagline: string;
+  challenge_description: string;
+  challenge_icon: string;
+  completed: boolean;
+  how_text: string;
+  difficulty: 'easy' | 'difficult';
+  experience_text: string;
+  rating: number;
+  xp_awarded: number;
+  completed_at: string;
 };
