@@ -76,6 +76,25 @@ export type Profile = {
   avatar_base64: string | null;
   wake_time?: string;
   morning_setup_done?: boolean;
+  boosts_unlocked?: boolean;
+  active_boost?: {
+    type: string;
+    multiplier: number;
+    activated_at: string;
+    expires_at: string;
+  } | null;
+  boost_inventory?: BoostInventoryItem[];
+  tz_offset_minutes?: number;
+};
+
+export type BoostInventoryItem = {
+  id: string;
+  type: string;
+  multiplier: number;
+  duration_days: number;
+  label: string;
+  source: 'shop' | 'leaderboard_winner' | string;
+  acquired_at: string;
 };
 
 /**
@@ -278,6 +297,47 @@ export const api = {
       '/friends/requests'
     ),
   listFriends: () => req<{ friends: Player[] }>('/friends/list'),
+
+  // ─── Points+ XP Boosts ───────────────────────────────────────────────
+  unlockBoosts: (code: string) =>
+    req<{ boosts_unlocked: boolean; profile: Profile }>('/boosts/unlock', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+  activateBoost: (args: { type?: 'triple_day' | 'double_week' | 'double_month' | 'double_day'; inventory_id?: string }) =>
+    req<{ active_boost: any; profile: Profile }>('/boosts/activate', {
+      method: 'POST',
+      body: JSON.stringify(args),
+    }),
+  claimBoost: (type: 'triple_day' | 'double_week' | 'double_month') =>
+    req<{ claimed: BoostInventoryItem; profile: Profile }>('/boosts/claim', {
+      method: 'POST',
+      body: JSON.stringify({ type }),
+    }),
+  boostsStatus: () =>
+    req<{ boosts_unlocked: boolean; active_boost: any; boost_inventory: BoostInventoryItem[] }>('/boosts/status'),
+
+  // ─── Friends Leaderboard ─────────────────────────────────────────────
+  friendsLeaderboard: (tzOffsetMinutes: number) =>
+    req<LeaderboardResponse>(`/friends/leaderboard?tz=${encodeURIComponent(String(tzOffsetMinutes))}`),
+  leaderboardProfile: (userId: string, tzOffsetMinutes: number) =>
+    req<LeaderboardPlayerProfile>(
+      `/leaderboard/profile/${userId}?tz=${encodeURIComponent(String(tzOffsetMinutes))}`
+    ),
+  reportPlayer: (reportedUserId: string, reason: string) =>
+    req<{ report: any }>('/leaderboard/report', {
+      method: 'POST',
+      body: JSON.stringify({ reported_user_id: reportedUserId, reason }),
+    }),
+  supportReport: (reportId: string) =>
+    req<{ supporters_count: number }>(`/leaderboard/report/${reportId}/support`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  unsupportReport: (reportId: string) =>
+    req<{ supporters_count: number }>(`/leaderboard/report/${reportId}/support`, {
+      method: 'DELETE',
+    }),
   authMe: () => req<{ id: string; full_name: string; email: string; verified: boolean }>('/auth/me'),
   getProfile: () => req<Profile>('/profile'),
   updateProfile: (name: string) =>
@@ -502,5 +562,57 @@ export type FriendRequestEntry = {
   request_id: string;
   created_at: string;
   player: Player;
+};
+
+// ───────────────────────── Leaderboard ─────────────────────────
+export type LeaderboardRow = {
+  user_id: string;
+  name: string;
+  avatar_base64: string | null;
+  level: number;
+  total_xp: number;
+  weekly_xp: number;
+  is_self: boolean;
+  tz_offset_minutes: number;
+  is_week_closed: boolean;
+  medals_count: number;
+  medals_revoked: number;
+};
+
+export type LeaderboardReport = {
+  id: string;
+  reporter_id: string;
+  reporter_name: string;
+  reported_user_id: string;
+  reported_name: string;
+  reason: string;
+  created_at: string;
+  week_key: string;
+  supporters_count: number;
+  viewer_supported: boolean;
+  viewer_is_reporter: boolean;
+};
+
+export type LeaderboardResponse = {
+  week_key: string;
+  viewer_is_sunday: boolean;
+  winner_declared: boolean;
+  winner: (LeaderboardRow & { medal_revoked?: boolean }) | null;
+  rows: LeaderboardRow[];
+  reports: LeaderboardReport[];
+};
+
+export type LeaderboardMedal = {
+  week_key: string;
+  awarded_at: string;
+  revoked: boolean;
+  revoked_reason?: string | null;
+  xp: number;
+};
+
+export type LeaderboardPlayerProfile = Player & {
+  weekly_xp: number;
+  medals: LeaderboardMedal[];
+  is_flagged_cheater: boolean;
 };
 

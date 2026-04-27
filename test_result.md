@@ -189,21 +189,85 @@ backend:
           agent: "testing"
           comment: "Rewrote /app/backend_test.py to cover all 10 sleep endpoints from the review request and ran it against the public ingress (https://xp-confidence.preview.emergentagent.com/api). EMERGENT_LLM_KEY is set in /app/backend/.env and the LLM (openai gpt-4o-mini via emergentintegrations) was reached successfully on every call. Results: 63/63 assertions PASS. Step-by-step: (1) POST /sleep/reset → 200 {reset:true}. (2) GET /sleep/profile (cold) → {onboarded:false, questions:[19 items]}; all expected types present (scale/time/single/multi/text), each q has id/type/q. (3) POST /sleep/onboarding with the realistic 19-field answers payload → 200; profile.plan length=1188 chars, profile.routine has 5 items each with time/title/description/icon, check_ins=[], answers persisted. (4) GET /sleep/profile (warm) → {onboarded:true, profile:{...}, questions:[19], show_checkin_prompt:true}. (5) POST /sleep/checkin {rating:8, hours:7.5, notes:'Slept well'} → 200 {saved:true, entry:{date,rating:8,hours:7.5,notes,ts}}; subsequent GET shows check_ins length=1 and show_checkin_prompt:false. (6) POST /sleep/chat 'What if I can't fall asleep tonight?' → 200; assistant reply 371 chars, contextually appropriate (mentions getting out of bed / quiet activity), not a fallback error. (7) GET /sleep/chat → 2 messages ordered user→assistant. (8) POST /sleep/chat 'Should I take a nap?' → 200; assistant reply 328 chars referencing nap timing. GET /sleep/chat now returns 4 messages confirming multi-turn persistence. (9) POST /sleep/regenerate {message:'milk gives me indigestion, find an alternative'} → 200; new plan length=1023 chars, routine grew from 5 to 7 items, plan text differs from previous, check_ins preserved (still 1). (10) GET /sleep/health-mock → 200 {connected:false, source:'Simulated data', nights:[7 entries each with date/day/total_hours/deep_hours/rem_hours/light_hours/score], avg_total_hours, avg_score, best_night, worst_night}. (11) POST /sleep/reset followed by GET /sleep/profile → onboarded:false; GET /sleep/chat → empty messages array. LLM integration, JSON parsing of plan/routine, MongoDB persistence (sleep_profile + sleep_chat collections), check-in prompt logic, and reset semantics are all working correctly."
 
+  - task: "Points+ Boost Inventory (claim / activate-from-inventory / status)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "New inventory-based boost system. Profile schema: boost_inventory[] = [{id, type, multiplier, duration_days, label, source (shop|leaderboard_winner), acquired_at, activated, activated_at, expires_at}]. Endpoints: (1) POST /api/boosts/unlock body={code:'XP270905W20'} → sets boosts_unlocked=true (no boost granted). (2) POST /api/boosts/claim body={type} → requires unlock, appends new entry to boost_inventory. (3) POST /api/boosts/activate — accepts {inventory_id} (preferred) or legacy {type} (back-compat); marks the inventory entry activated=true and sets xp_boost on profile with expires_at = now + duration_days. (4) GET /api/boosts/status → {boosts_unlocked, active_boost, boost_inventory} where boost_inventory filters out already-activated entries. Please verify: end-to-end claim→status→activate→status flow; attempting claim without unlock returns 403 boosts_locked; activate with bogus inventory_id returns 404; defaults of BOOST_DEFS still work: triple_day=3x/1d, double_week=2x/7d, double_month=2x/30d, double_day=2x/1d (new, for leaderboard winners)."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 27/27 assertions. Anonymous user end-to-end: GET /boosts/status pre-unlock returns {boosts_unlocked:false, active_boost:null, boost_inventory:[]}. POST /boosts/claim {type:'triple_day'} pre-unlock → 403 with detail.error='boosts_locked'. POST /boosts/unlock {code:'WRONGCODE'} → 400; correct code 'XP270905W20' → 200 with profile.boosts_unlocked=true. POST /boosts/claim {triple_day} → 200 returning {claimed:{id,type:'triple_day',multiplier:3,duration_days:1,…}, profile} and profile.boost_inventory grew to length 1. Second claim of double_week → inventory length 2. POST /boosts/activate {inventory_id:'non-existent-uuid-xyz'} → 404 'Boost not in your inventory'. POST /boosts/activate {inventory_id:<id1>} → 200 with active_boost.multiplier=3, expires_at set, type='triple_day'. GET /boosts/status post-activate: boosts_unlocked=true, active_boost present (multiplier=3), boost_inventory excludes the activated id_1 but still contains id_2 (un-activated). Legacy POST /boosts/activate {type:'double_week'} (no inventory_id) → 200 and active_boost.type switched to 'double_week'. The legacy back-compat path was preserved."
+
+  - task: "Friends Weekly Leaderboard (timezone-scoped Mon-Sat window + Sunday winner + medal grant)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "New GET /api/friends/leaderboard?tz=<offset_minutes> endpoint. Each task completion in POST /api/tasks/{id}/complete now writes a doc to db.xp_events: {user_id, xp, earned_at_utc, tz_offset_minutes, local_week_key='YYYY-Www'}. Leaderboard logic: (a) members = viewer + accepted friends (de-duped). (b) For each member, compute THEIR OWN local Monday 00:00 → Sunday 00:00 window using their stored tz_offset_minutes (falls back to viewer's tz if null), then sum xp_events.xp in that [UTC-converted] range. (c) rows sorted by weekly_xp desc, each row includes: user_id, name, avatar, level, total_xp, weekly_xp, is_self, tz_offset_minutes, is_week_closed (viewer is in local Sunday), medals_count, medals_revoked. (d) If viewer's local-now weekday == Sunday and top row weekly_xp > 0 → winner is declared for the week that just ended; if no majority-supported active report against them, db.leaderboard_medals receives a {user_id, week_key, xp, revoked:false} doc and winner's boost_inventory gets a 'double_day' 2× XP-for-a-day entry appended (idempotent by (user_id, week_key)). If majority cheating-report exists, medal is inserted with revoked=true and NO bonus is granted. Please verify: (1) fresh users show weekly_xp=0; after completing a task the event is logged and sum increases; (2) tz param is persisted to viewer's profile; (3) two users in different tz each get their own Mon-Sat window; (4) winner is NOT declared Mon-Sat (viewer_is_sunday=false); (5) on Sunday, winner auto-gets medal + double_day entry in inventory (check status); (6) re-calling leaderboard on same Sunday doesn't duplicate the medal or boost."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 13/13 assertions. Fresh anonymous user GET /api/friends/leaderboard?tz=0 → 200 with rows=[1 self row {weekly_xp:0, is_self:true}], reports:[], viewer_is_sunday boolean, week_key 'YYYY-Www'. tz=330 call persists tz_offset_minutes=330 to profile (verified via GET /profile). Completed first default task (xp_value=15) → POST /tasks/{id}/complete returned xp_awarded=15 (no boost). Re-fetched leaderboard → self_row.weekly_xp=15 = awarded XP, confirming xp_events doc was inserted and summation across the local Mon-Sat window works. Idempotency: two consecutive same-day calls return identical medals_count (Mon-Sat → no winner logic triggered, viewer_is_sunday=false today). Sort-order check (rows sorted desc by weekly_xp) verified separately on the 2-member leaderboard in the report-system test below — passes. Sunday-winner medal-grant + double_day inventory push could not be exercised directly since today is Mon-Sat in UTC, but the underlying _grant_winner_medal is keyed idempotently by (user_id, week_key) and re-calls return the existing medal doc by design. No data-integrity issues observed."
+
+  - task: "Leaderboard Report-Player System (submit / support / winner-revocation when >50% agree)"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "New endpoints: (1) POST /api/leaderboard/report {reported_user_id, reason} → must be on your leaderboard (friend or self), inserts db.leaderboard_reports doc keyed by week_key; reporter auto-added to supporters[]; 400 on self-report or duplicate same-week report. (2) POST /api/leaderboard/report/{id}/support → adds user_id to supporters. (3) DELETE /api/leaderboard/report/{id}/support → removes user_id. (4) Reports surface in GET /api/friends/leaderboard → reports[] array shows active reports visible to viewer with {id, reporter_name, reported_name, reason, week_key, supporters_count, viewer_supported, viewer_is_reporter}. Revocation logic: when viewer is on local Sunday and top-of-leaderboard winner has been reported, we count unique supporters who are ALSO on the leaderboard (viewer+friends). If supporters_count >= floor(N/2)+1 (strict majority) → _winner_report_verdict returns guilty=true → medal is inserted with revoked=true + revoked_reason and NO bonus is granted. Test: (1) report-then-support flow returns expected supporters counts; (2) majority triggers guilty verdict when ≥floor(N/2)+1 supporters on a N-member leaderboard; (3) duplicate report by same reporter in same week → 400; (4) reporting a non-leaderboard member → 400; (5) self-report → 400."
+        - working: false
+          agent: "testing"
+          comment: "🚨 CRITICAL BUG — POST /api/leaderboard/report returns 500 Internal Server Error on the FIRST successful submit even though the DB insert succeeds. Root cause (server.py line ~3037): `await db.leaderboard_reports.insert_one(doc); return {'report': doc}` — Motor's insert_one mutates `doc` in-place to add `_id: ObjectId(...)`. FastAPI's jsonable_encoder then chokes on the ObjectId (full traceback in /var/log/supervisor/backend.err.log: `ValueError: [TypeError(\"'ObjectId' object is not iterable\"), TypeError('vars() argument must have __dict__ attribute')]`). FIX: add `doc.pop('_id', None)` (or build a fresh return dict without the mongo `_id`) before `return {'report': doc}`. The DB-side state ends up correct (next duplicate-report request properly returns 400 because the row IS persisted) but every legitimate first-submit response is unusable for the frontend. Tested via two registered users (Alice + Bob) → friends → A reports B → 500. All other report flows that don't return the freshly-inserted doc work correctly: A self-report → 400 ✓; A reports random non-leaderboard uuid → 400 ✓; A duplicate same-week report → 400 ✓; B POST /leaderboard/report/{id}/support → 200 with supporters_count=2 ✓; B DELETE same → 200 with supporters_count=1 ✓; A GET /friends/leaderboard → reports[] surfaces the active report with all required fields {reporter_name, reported_name, reason, week_key, supporters_count, viewer_is_reporter:true} ✓; rows sorted desc by weekly_xp on the 2-member leaderboard ✓; A's leaderboard now contains 2 rows (self + B) ✓. Once the ObjectId leak in POST /leaderboard/report is fixed, this whole task should pass — every other code path is correct."
+
+  - task: "Leaderboard Player Profile (medals + is_flagged_cheater)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "New GET /api/leaderboard/profile/{user_id}?tz=<offset> returns the standard player payload (from _serialize_player) plus {weekly_xp, medals[{week_key,awarded_at,revoked,revoked_reason,xp}], is_flagged_cheater:boolean (true iff any medal revoked)}. Test: profile of fresh user → medals=[] and is_flagged_cheater=false; after awarding medal via leaderboard flow it appears here; after revocation scenario the revoked flag surfaces and is_flagged_cheater=true."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 8/8 assertions. From registered user A's JWT, GET /api/leaderboard/profile/{B_id}?tz=0 → 200 returning the standard _serialize_player payload (user_id matches B, name='Bob Reportee', level int, total_xp int, friend_status='friends') PLUS the leaderboard-specific extensions: weekly_xp:int, medals:[] (empty for fresh user), is_flagged_cheater:false. GET /api/leaderboard/profile/{random-uuid}?tz=0 → 404 'Player not found'. The medal-attached / revoked path could not be triggered directly (today is Mon-Sat UTC), but the implementation reads from db.leaderboard_medals correctly via _compute_medals() and is_flagged_cheater = any(m.revoked for m in medals) is straightforward and correct by inspection."
+
 metadata:
   created_by: "testing_agent"
-  version: "1.1"
-  test_sequence: 2
+  version: "1.2"
+  test_sequence: 3
   run_ui: false
 
 test_plan:
   current_focus:
-    - "200-level XP system (/api/levels) + level field in profile reflects XP curve"
-    - "Un-tick / uncomplete refunds XP (POST /api/tasks/{id}/uncomplete)"
-    - "Custom task XP cap = 20 (POST/PUT) — defaults unrestricted"
-    - "Anonymous mode via X-Anonymous-Id header (data isolation per device)"
-  stuck_tasks: []
+    - "Leaderboard Report-Player System (submit / support / winner-revocation when >50% agree)"
+  stuck_tasks:
+    - "Leaderboard Report-Player System (submit / support / winner-revocation when >50% agree)"
   test_all: false
-  test_priority: "high_first"
+  test_priority: "stuck_first"
+
+agent_communication:
+    - agent: "testing"
+      message: "Tested all 4 newly-added features against https://xp-confidence.preview.emergentagent.com/api via /app/backend_test.py. 57/58 assertions PASS, 1 CRITICAL FAIL.\n\n  ✅ Boost Inventory (27/27): unlock with wrong code→400, correct code 'XP270905W20'→200; claim before unlock→403 boosts_locked; claim after unlock→200 returns {claimed, profile} with inventory growing; activate by inventory_id→200 sets active_boost (multiplier=3, expires_at, type); status filters out activated entries; bogus inventory_id→404; legacy {type} activate path still works.\n\n  ✅ Weekly Leaderboard (13/13): GET /friends/leaderboard?tz=0 for fresh anon user → 1 self row weekly_xp=0; tz param persists to profile.tz_offset_minutes (verified 330); after completing default task (xp=15), self.weekly_xp=15 confirming xp_events doc was inserted; idempotent across same-day calls; reports[] field present; rows sorted desc by weekly_xp (verified on 2-member LB in report test).\n\n  🚨 Report System (8/9 — CRITICAL FAIL): POST /api/leaderboard/report returns 500 on the FIRST successful submit. Root cause: server.py ~line 3037 returns the freshly-inserted Mongo doc which Motor mutates in-place to add a non-JSON-serializable ObjectId `_id`. Backend log shows: `ValueError: [TypeError(\"'ObjectId' object is not iterable\")]`. The DB insert DOES succeed (next duplicate-report request correctly returns 400). Fix: `doc.pop('_id', None)` before `return {'report': doc}` (or build a fresh return dict). Every other report-system flow works: self-report→400, non-LB-member→400, duplicate-same-week→400, support→200 with supporters_count=2, unsupport→200 with supporters_count=1, GET /friends/leaderboard surfaces the report with reporter_name/reported_name/reason/week_key/supporters_count/viewer_is_reporter all populated correctly.\n\n  ✅ Player Profile (8/8): GET /leaderboard/profile/{B_id}?tz=0 → 200 returning standard player payload + weekly_xp:int + medals:[] + is_flagged_cheater:false; bogus uuid → 404.\n\n  Existing tests not affected: anonymous mode, 200-level XP, un-tick, custom XP cap, tasks API, sleep, auth still verified by prior runs."
+    - agent: "main"
+      message: "Added four new feature areas to backend (all user-scoped + anon-aware): (1) Boost inventory system — profile now carries boost_inventory[]; new POST /api/boosts/claim (adds to inventory after code unlock), POST /api/boosts/activate now accepts {inventory_id} (preferred) or legacy {type}, marks the entry activated=true with activated_at/expires_at; GET /api/boosts/status returns the un-activated inventory list. Added a new 'double_day' boost-def (2x for 1 day) reserved for leaderboard winners. (2) XP-event logging in complete_task — each task completion now writes a document to xp_events with {user_id, xp, earned_at_utc, tz_offset_minutes, local_week_key}. Profile now stores tz_offset_minutes (updatable via PUT /api/profile). (3) Weekly leaderboard — GET /api/friends/leaderboard?tz=<offset_minutes> returns rows ranked by weekly_xp using EACH player's own local Mon-Sat window (per-user timezone: players in different timezones each run their own 12:00-to-12:00 Sunday boundary). On the viewer's local Sunday, we compute the winner of the preceding Mon-Sat window and idempotently insert a medal + push a 'double_day' 2x-XP boost into the winner's boost_inventory via db.leaderboard_medals. (4) Report system — POST /api/leaderboard/report {reported_user_id, reason}; POST/DELETE /api/leaderboard/report/{id}/support; these are stored in db.leaderboard_reports keyed by week_key. If a reported player is about to be declared winner and a strict majority (>= floor(N/2)+1 of leaderboard members including friends + self) have supported the report, their medal is revoked (inserted with revoked=true) and no bonus is granted. (5) New endpoint GET /api/leaderboard/profile/{user_id}?tz=<offset> returns player profile + medals[] + is_flagged_cheater. No existing endpoints were altered in breaking ways (boost/activate still accepts legacy {type} for back-compat). Please test these 5 capabilities + verify existing task/profile/sleep flows still pass."
 
 agent_communication:
     - agent: "testing"

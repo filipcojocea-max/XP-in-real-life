@@ -408,8 +408,76 @@ def serialize_profile(prof: dict) -> dict:
         "avatar_base64": prof.get("avatar_base64"),
         "wake_time": prof.get("wake_time", "07:00"),
         "morning_setup_done": prof.get("morning_setup_done", False),
+        # XP Boost state (Points+ feature)
+        "boosts_unlocked": prof.get("boosts_unlocked", False),
+        "active_boost": _serialize_active_boost(prof),
+        "boost_inventory": _serialize_boost_inventory(prof),
+        "tz_offset_minutes": int(prof.get("tz_offset_minutes", 0) or 0),
         "created_at": prof.get("created_at"),
     }
+
+
+# ──── XP Boosts (Points+) ─────────────────────────────────────────────
+BOOST_UNLOCK_CODE = "XP270905W20"
+
+BOOST_DEFS = {
+    "triple_day":   {"multiplier": 3, "duration_days": 1,  "label": "Triple points today"},
+    "double_week":  {"multiplier": 2, "duration_days": 7,  "label": "Double points for 7 days"},
+    "double_month": {"multiplier": 2, "duration_days": 30, "label": "Double points for 1 month"},
+}
+
+
+def _serialize_active_boost(prof: dict) -> Optional[dict]:
+    """Return the active boost if still within its window, else None."""
+    boost = prof.get("xp_boost") or {}
+    exp = boost.get("expires_at")
+    if not exp:
+        return None
+    try:
+        exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= exp_dt:
+            return None
+    except Exception:
+        return None
+    return {
+        "type": boost.get("type"),
+        "multiplier": int(boost.get("multiplier", 1)),
+        "activated_at": boost.get("activated_at"),
+        "expires_at": exp,
+    }
+
+
+async def _current_xp_multiplier(user_id: str) -> int:
+    """Fetch the multiplier currently applicable to this user (1, 2, or 3)."""
+    prof = await db.profile.find_one({"_id": user_id})
+    if not prof:
+        return 1
+    active = _serialize_active_boost(prof)
+    return int(active["multiplier"]) if active else 1
+
+
+def _serialize_boost_inventory(prof: dict) -> list:
+    """Return the user's inventory of owned (un-activated) boosts.
+    Each entry: {id, type, multiplier, duration_days, label, source, acquired_at}.
+    Filters out already-activated entries."""
+    inv = prof.get("boost_inventory") or []
+    out = []
+    for it in inv:
+        if it.get("activated"):
+            continue
+        cfg = BOOST_DEFS.get(it.get("type")) or {}
+        out.append({
+            "id": it.get("id"),
+            "type": it.get("type"),
+            "multiplier": int(it.get("multiplier") or cfg.get("multiplier", 1)),
+            "duration_days": int(it.get("duration_days") or cfg.get("duration_days", 1)),
+            "label": it.get("label") or cfg.get("label", ""),
+            "source": it.get("source") or "shop",     # shop | leaderboard_winner
+            "acquired_at": it.get("acquired_at"),
+        })
+    return out
 
 
 async def check_and_unlock_achievements(prof: dict) -> List[str]:
@@ -555,6 +623,7 @@ class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     wake_time: Optional[str] = None  # "HH:MM" 24h — used to compute daily reset boundary (wake - 2h)
     morning_setup_done: Optional[bool] = None  # set true after the very-first "morning time" question
+    tz_offset_minutes: Optional[int] = None  # user's local UTC offset (e.g. -420 for PST); for weekly leaderboard
 
 
 class CompleteTaskBody(BaseModel):
@@ -1249,13 +1318,18 @@ async def complete_task(task_id: str, body: CompleteTaskBody, user_id: str = Dep
     existing = await db.task_logs.find_one({"task_id": task_id, "user_id": user_id, "date": target_date})
     if existing:
         return {"already_completed": True, "task": task}
+    # XP Boost multiplier (Points+ feature). When the user has an active
+    # boost, the XP awarded for each quest is scaled (2x or 3x) accordingly.
+    multiplier = await _current_xp_multiplier(user_id)
+    awarded = int(task["xp_value"]) * multiplier
     log = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
         "task_id": task_id,
         "date": target_date,
         "focus_area": task["focus_area"],
-        "xp_awarded": task["xp_value"],
+        "xp_awarded": awarded,
+        "xp_multiplier": multiplier,
         "completed_at": now_iso(),
     }
     await db.task_logs.insert_one(log)
@@ -1266,8 +1340,14 @@ async def complete_task(task_id: str, body: CompleteTaskBody, user_id: str = Dep
 
     await db.profile.update_one(
         {"_id": user_id},
-        {"$inc": {"total_xp": task["xp_value"], "tasks_completed": 1}},
+        {"$inc": {"total_xp": awarded, "tasks_completed": 1}},
     )
+    # Weekly leaderboard: log XP event with user's local tz (for Mon-Sat window).
+    try:
+        tz_off = int((await db.profile.find_one({"_id": user_id}, {"tz_offset_minutes": 1}) or {}).get("tz_offset_minutes", 0) or 0)
+        await _log_xp_event(user_id, awarded, tz_off)
+    except Exception as _e:
+        pass
     prof = await db.profile.find_one({"_id": user_id})
     prof = await update_streak(prof)
     new_level = level_from_xp(prof.get("total_xp", 0))
@@ -1275,7 +1355,8 @@ async def complete_task(task_id: str, body: CompleteTaskBody, user_id: str = Dep
     prof = await db.profile.find_one({"_id": user_id})
     return {
         "task": task,
-        "xp_awarded": task["xp_value"],
+        "xp_awarded": awarded,
+        "xp_multiplier": multiplier,
         "leveled_up": new_level > prev_level,
         "new_level": new_level,
         "profile": serialize_profile(prof),
@@ -2462,6 +2543,529 @@ async def list_friends(user_id: str = Depends(get_user_or_legacy)):
             continue
         out.append(_serialize_player(prof, "friends"))
     return {"friends": out}
+
+
+# ═════════════════════ Points+ (XP Boost endpoints) ═════════════════════
+class BoostUnlockPayload(BaseModel):
+    code: str
+
+
+class BoostActivatePayload(BaseModel):
+    type: Optional[str] = None           # legacy: triple_day | double_week | double_month
+    inventory_id: Optional[str] = None   # new: activate a specific inventory entry
+
+
+class BoostClaimPayload(BaseModel):
+    type: str                            # triple_day | double_week | double_month
+
+
+def _make_inventory_entry(boost_type: str, source: str = "shop") -> dict:
+    cfg = BOOST_DEFS.get(boost_type) or {}
+    return {
+        "id": str(uuid.uuid4()),
+        "type": boost_type,
+        "multiplier": int(cfg.get("multiplier", 1)),
+        "duration_days": int(cfg.get("duration_days", 1)),
+        "label": cfg.get("label", ""),
+        "source": source,                 # shop | leaderboard_winner
+        "acquired_at": now_iso(),
+        "activated": False,
+    }
+
+
+@api_router.post("/boosts/unlock")
+async def boosts_unlock(body: BoostUnlockPayload, user_id: str = Depends(get_user_or_legacy)):
+    code = (body.code or "").strip().upper()
+    if code != BOOST_UNLOCK_CODE.upper():
+        raise HTTPException(400, "Invalid code")
+    await get_or_create_profile_for(user_id)
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$set": {"boosts_unlocked": True, "boosts_unlocked_at": now_iso()}},
+    )
+    prof = await db.profile.find_one({"_id": user_id})
+    return {"boosts_unlocked": True, "profile": serialize_profile(prof)}
+
+
+@api_router.post("/boosts/claim")
+async def boosts_claim(body: BoostClaimPayload, user_id: str = Depends(get_user_or_legacy)):
+    """Bonus Top Up — adds a boost to the user's inventory (not activated)."""
+    prof = await db.profile.find_one({"_id": user_id})
+    if not prof:
+        raise HTTPException(404, "Profile not found")
+    if not prof.get("boosts_unlocked"):
+        raise HTTPException(403, detail={
+            "error": "boosts_locked",
+            "message": "Enter the unlock code first to access XP boosts.",
+        })
+    if body.type not in BOOST_DEFS:
+        raise HTTPException(400, "Unknown boost type")
+    entry = _make_inventory_entry(body.type, source="shop")
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$push": {"boost_inventory": entry}},
+    )
+    prof = await db.profile.find_one({"_id": user_id})
+    return {"claimed": entry, "profile": serialize_profile(prof)}
+
+
+@api_router.post("/boosts/activate")
+async def boosts_activate(body: BoostActivatePayload, user_id: str = Depends(get_user_or_legacy)):
+    prof = await db.profile.find_one({"_id": user_id})
+    if not prof:
+        raise HTTPException(404, "Profile not found")
+    if not prof.get("boosts_unlocked"):
+        raise HTTPException(403, detail={
+            "error": "boosts_locked",
+            "message": "Enter the unlock code first to access XP boosts.",
+        })
+
+    # New path: activate by inventory_id
+    inv: list = prof.get("boost_inventory") or []
+    entry = None
+    if body.inventory_id:
+        for it in inv:
+            if it.get("id") == body.inventory_id and not it.get("activated"):
+                entry = it
+                break
+        if not entry:
+            raise HTTPException(404, "Boost not in your inventory")
+        boost_type = entry["type"]
+    elif body.type:
+        # Legacy path: activate by type (auto-creates a consumable if unlocked)
+        if body.type not in BOOST_DEFS:
+            raise HTTPException(400, "Unknown boost type")
+        boost_type = body.type
+    else:
+        raise HTTPException(400, "inventory_id or type required")
+
+    cfg = BOOST_DEFS.get(boost_type)
+    expires = datetime.now(timezone.utc) + timedelta(days=cfg["duration_days"])
+    boost_doc = {
+        "type": boost_type,
+        "multiplier": cfg["multiplier"],
+        "activated_at": now_iso(),
+        "expires_at": expires.isoformat(),
+    }
+    # If we consumed an inventory entry, mark it activated (keeps history)
+    if entry:
+        await db.profile.update_one(
+            {"_id": user_id, "boost_inventory.id": entry["id"]},
+            {"$set": {
+                "xp_boost": boost_doc,
+                "boost_inventory.$.activated": True,
+                "boost_inventory.$.activated_at": now_iso(),
+                "boost_inventory.$.expires_at": expires.isoformat(),
+            }},
+        )
+    else:
+        await db.profile.update_one(
+            {"_id": user_id},
+            {"$set": {"xp_boost": boost_doc}},
+        )
+    prof = await db.profile.find_one({"_id": user_id})
+    return {"active_boost": _serialize_active_boost(prof), "profile": serialize_profile(prof)}
+
+
+@api_router.get("/boosts/status")
+async def boosts_status(user_id: str = Depends(get_user_or_legacy)):
+    prof = await db.profile.find_one({"_id": user_id}) or {}
+    return {
+        "boosts_unlocked": bool(prof.get("boosts_unlocked")),
+        "active_boost": _serialize_active_boost(prof),
+        "boost_inventory": _serialize_boost_inventory(prof),
+    }
+
+
+# ═════════════════════ Friends Leaderboard (weekly XP) ═════════════════════
+# Weekly window = Mon 00:00 → Sat 23:59:59 in each player's LOCAL time.
+# Sunday is rest/winner day — week is closed, winner gets a 2x-day boost
+# auto-dropped into their Available Bonuses.
+# ──────────────────────────────────────────────────────────────────────
+
+def _local_now(tz_offset_minutes: int) -> datetime:
+    """Return the user's local-now as a naive datetime."""
+    return datetime.now(timezone.utc) + timedelta(minutes=int(tz_offset_minutes or 0))
+
+
+def _local_week_bounds(tz_offset_minutes: int, anchor: Optional[datetime] = None):
+    """Return (local_monday_00_utc, local_sunday_00_utc, local_week_key)
+    for the week CONTAINING the anchor instant (default: now).
+    Monday 00:00 local → converted to UTC. Sunday 00:00 local → converted to UTC.
+    local_week_key = 'YYYY-Www' using ISO week of local Monday."""
+    off = int(tz_offset_minutes or 0)
+    if anchor is None:
+        anchor = datetime.now(timezone.utc)
+    local = anchor + timedelta(minutes=off)
+    # Monday of local week (Python: Monday=0)
+    local_monday = (local - timedelta(days=local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    local_sunday = local_monday + timedelta(days=6)  # Sunday same week
+    # Convert local → UTC by subtracting the tz offset
+    utc_monday = local_monday - timedelta(minutes=off)
+    utc_sunday = local_sunday - timedelta(minutes=off)
+    iso_year, iso_week, _ = local_monday.isocalendar()
+    return utc_monday.replace(tzinfo=timezone.utc), utc_sunday.replace(tzinfo=timezone.utc), f"{iso_year}-W{iso_week:02d}"
+
+
+def _is_local_sunday(tz_offset_minutes: int) -> bool:
+    """True if user is currently in their local Sunday."""
+    local = _local_now(tz_offset_minutes)
+    return local.weekday() == 6  # Monday=0 … Sunday=6
+
+
+async def _log_xp_event(user_id: str, xp: int, tz_offset: int):
+    """Append an XP-earn event to xp_events collection (for leaderboard)."""
+    if xp <= 0:
+        return
+    monday_utc, _, week_key = _local_week_bounds(tz_offset)
+    await db.xp_events.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "xp": int(xp),
+        "earned_at": now_iso(),
+        "earned_at_utc": datetime.now(timezone.utc),
+        "tz_offset_minutes": int(tz_offset or 0),
+        "local_week_key": week_key,
+    })
+
+
+async def _sum_week_xp(user_id: str, tz_offset: int, anchor: Optional[datetime] = None) -> int:
+    """Sum xp earned in the week CONTAINING the anchor, relative to this user's local timezone."""
+    monday_utc, sunday_utc, _ = _local_week_bounds(tz_offset, anchor)
+    cursor = db.xp_events.find({
+        "user_id": user_id,
+        "earned_at_utc": {"$gte": monday_utc, "$lt": sunday_utc},
+    })
+    total = 0
+    async for ev in cursor:
+        total += int(ev.get("xp", 0) or 0)
+    return total
+
+
+async def _friend_ids(user_id: str) -> list:
+    """Return list of user_ids who are friends (accepted) with user_id."""
+    out = []
+    async for r in db.friend_requests.find({
+        "status": "accepted",
+        "$or": [{"from_user_id": user_id}, {"to_user_id": user_id}],
+    }):
+        other = r["to_user_id"] if r["from_user_id"] == user_id else r["from_user_id"]
+        out.append(other)
+    return out
+
+
+async def _get_profile_tz(uid: str) -> int:
+    prof = await db.profile.find_one({"_id": uid}, {"tz_offset_minutes": 1})
+    return int((prof or {}).get("tz_offset_minutes", 0) or 0)
+
+
+async def _compute_medals(user_id: str) -> list:
+    """Return all medals awarded to this user (gold for wins, broken for revoked)."""
+    out = []
+    async for m in db.leaderboard_medals.find({"user_id": user_id}).sort("week_key", -1):
+        out.append({
+            "week_key": m.get("week_key"),
+            "awarded_at": m.get("awarded_at"),
+            "revoked": bool(m.get("revoked")),
+            "revoked_reason": m.get("revoked_reason"),
+            "xp": int(m.get("xp", 0)),
+        })
+    return out
+
+
+async def _grant_winner_medal(winner_id: str, week_key: str, xp_total: int):
+    """Idempotently award a gold medal + 2x-day boost to the winner's inventory."""
+    existing = await db.leaderboard_medals.find_one({
+        "user_id": winner_id,
+        "week_key": week_key,
+    })
+    if existing:
+        return existing
+    medal = {
+        "id": str(uuid.uuid4()),
+        "user_id": winner_id,
+        "week_key": week_key,
+        "awarded_at": now_iso(),
+        "xp": int(xp_total),
+        "revoked": False,
+    }
+    await db.leaderboard_medals.insert_one(medal)
+    # Auto-grant the 2x-day boost to Available Bonuses
+    entry = _make_inventory_entry("triple_day", source="leaderboard_winner")
+    # Use "double_day" concept — but since BOOST_DEFS only has triple_day/double_week/double_month,
+    # use a special 2x-for-a-day entry: override multiplier & duration.
+    entry.update({
+        "type": "double_day",
+        "multiplier": 2,
+        "duration_days": 1,
+        "label": "2× XP for a day (Leaderboard Winner)",
+    })
+    await db.profile.update_one(
+        {"_id": winner_id},
+        {"$push": {"boost_inventory": entry}, "$set": {"boosts_unlocked": True}},
+    )
+    return medal
+
+
+# Extend BOOST_DEFS at runtime to support the winner's reward type on activate
+BOOST_DEFS["double_day"] = {"multiplier": 2, "duration_days": 1, "label": "2× points for a day"}
+
+
+@api_router.get("/friends/leaderboard")
+async def friends_leaderboard(
+    tz: int = 0,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Weekly (Mon-Sat local) XP leaderboard among friends + self.
+    `tz` = viewer's local UTC offset in minutes (e.g. -420 for PST, +330 for IST).
+
+    On the viewer's local Sunday, we compute the winner of the WEEK THAT JUST
+    ENDED and lazily grant them a gold medal + 2x-day boost (idempotent)."""
+
+    # Persist viewer's tz so background tasks can use it later
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$set": {"tz_offset_minutes": int(tz or 0)}},
+    )
+
+    member_ids = [user_id] + await _friend_ids(user_id)
+    # De-dupe
+    member_ids = list(dict.fromkeys(member_ids))
+
+    viewer_is_sunday = _is_local_sunday(tz)
+    # For "which week to show":
+    #  - Mon-Sat local → show THIS week's progress (still in play)
+    #  - Sun local     → show LAST week's final totals (it's rest/winner day)
+    anchor = datetime.now(timezone.utc)
+    if viewer_is_sunday:
+        anchor = anchor - timedelta(days=1)   # shift into Saturday → same ISO week
+    _, _, display_week_key = _local_week_bounds(tz, anchor)
+
+    rows = []
+    for uid in member_ids:
+        prof = await db.profile.find_one({"_id": uid})
+        if not prof:
+            continue
+        # Use each player's OWN tz so their Mon-Sat window is relative to them
+        their_tz = int(prof.get("tz_offset_minutes", tz) or tz)
+        weekly_xp = await _sum_week_xp(uid, their_tz, anchor)
+        medals = await _compute_medals(uid)
+        rows.append({
+            "user_id": uid,
+            "name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "avatar_base64": prof.get("avatar_base64"),
+            "level": int(prof.get("level", 1) or 1),
+            "total_xp": int(prof.get("total_xp", 0) or 0),
+            "weekly_xp": int(weekly_xp),
+            "is_self": uid == user_id,
+            "tz_offset_minutes": their_tz,
+            "is_week_closed": _is_local_sunday(their_tz),  # already in Sunday locally
+            "medals_count": len([m for m in medals if not m.get("revoked")]),
+            "medals_revoked": len([m for m in medals if m.get("revoked")]),
+        })
+    # Sort highest → lowest
+    rows.sort(key=lambda r: (-r["weekly_xp"], r["name"].lower()))
+
+    winner = None
+    declared = False
+    if rows and viewer_is_sunday and rows[0]["weekly_xp"] > 0:
+        declared = True
+        winner = rows[0]
+        # Award medal to winner for the week that just ended (display_week_key)
+        # Check if there are unresolved active reports against the winner for this week
+        active_reports = await _winner_report_verdict(winner["user_id"], display_week_key, member_ids)
+        if active_reports.get("guilty"):
+            # Revoked winner — do NOT grant bonus, but mark medal as revoked
+            existing = await db.leaderboard_medals.find_one({
+                "user_id": winner["user_id"],
+                "week_key": display_week_key,
+            })
+            if not existing:
+                await db.leaderboard_medals.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": winner["user_id"],
+                    "week_key": display_week_key,
+                    "awarded_at": now_iso(),
+                    "xp": winner["weekly_xp"],
+                    "revoked": True,
+                    "revoked_reason": "Reported for cheating by majority of leaderboard",
+                })
+            winner["medal_revoked"] = True
+        else:
+            await _grant_winner_medal(winner["user_id"], display_week_key, winner["weekly_xp"])
+            winner["medal_revoked"] = False
+
+    # Pending reports visible to this viewer
+    reports = await _active_reports_for_viewer(user_id, member_ids, display_week_key)
+
+    return {
+        "week_key": display_week_key,
+        "viewer_is_sunday": viewer_is_sunday,
+        "winner_declared": declared,
+        "winner": winner,
+        "rows": rows,
+        "reports": reports,
+    }
+
+
+@api_router.get("/leaderboard/profile/{other_id}")
+async def leaderboard_profile(
+    other_id: str,
+    tz: int = 0,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Profile view from leaderboard: player + medals + cheating-flag history."""
+    prof = await db.profile.find_one({"_id": other_id})
+    if not prof:
+        raise HTTPException(404, "Player not found")
+    their_tz = int(prof.get("tz_offset_minutes", tz) or tz)
+    weekly_xp = await _sum_week_xp(other_id, their_tz)
+    medals = await _compute_medals(other_id)
+    rel = await _find_relationship(user_id, other_id)
+    status = "self" if other_id == user_id else _relationship_status(rel, user_id)
+    base = _serialize_player(prof, status)
+    base.update({
+        "weekly_xp": int(weekly_xp),
+        "medals": medals,
+        "is_flagged_cheater": any(m.get("revoked") for m in medals),
+    })
+    return base
+
+
+# ═════════════════════ Leaderboard Report System ═════════════════════
+class ReportSubmitPayload(BaseModel):
+    reported_user_id: str
+    reason: str
+
+
+async def _leaderboard_member_ids(user_id: str) -> list:
+    """Return list of user_ids who are on this viewer's leaderboard
+    (viewer + their friends)."""
+    ids = [user_id] + await _friend_ids(user_id)
+    return list(dict.fromkeys(ids))
+
+
+async def _winner_report_verdict(winner_id: str, week_key: str, leaderboard_member_ids: list) -> dict:
+    """Evaluate whether the winner has been reported by > half of leaderboard.
+    Counts unique reporters + unique 'likers' as supporters."""
+    reports_cur = db.leaderboard_reports.find({
+        "reported_user_id": winner_id,
+        "week_key": week_key,
+    })
+    supporters = set()
+    has_report = False
+    async for r in reports_cur:
+        has_report = True
+        supporters.add(r.get("reporter_id"))
+        for sup in (r.get("supporters") or []):
+            supporters.add(sup)
+    # Only count supporters who are on this week's leaderboard (friends+winner)
+    valid = [s for s in supporters if s in leaderboard_member_ids]
+    threshold = max(1, (len(leaderboard_member_ids) // 2) + 1)
+    return {
+        "has_report": has_report,
+        "supporters": valid,
+        "threshold": threshold,
+        "guilty": has_report and len(valid) >= threshold,
+    }
+
+
+async def _active_reports_for_viewer(viewer_id: str, member_ids: list, week_key: str) -> list:
+    """Return list of active reports this viewer should see in their notifications."""
+    out = []
+    cursor = db.leaderboard_reports.find({
+        "week_key": week_key,
+        "reporter_id": {"$in": member_ids},
+    }).sort("created_at", -1)
+    async for r in cursor:
+        reporter = await db.profile.find_one(
+            {"_id": r["reporter_id"]},
+            {"full_name": 1, "name": 1, "avatar_base64": 1},
+        )
+        reported = await db.profile.find_one(
+            {"_id": r["reported_user_id"]},
+            {"full_name": 1, "name": 1, "avatar_base64": 1},
+        )
+        supporters = r.get("supporters") or []
+        out.append({
+            "id": r["id"],
+            "reporter_id": r["reporter_id"],
+            "reporter_name": (reporter or {}).get("full_name") or (reporter or {}).get("name") or "Anonymous",
+            "reported_user_id": r["reported_user_id"],
+            "reported_name": (reported or {}).get("full_name") or (reported or {}).get("name") or "Anonymous",
+            "reason": r.get("reason", ""),
+            "created_at": r.get("created_at"),
+            "week_key": r.get("week_key"),
+            "supporters_count": len(supporters),
+            "viewer_supported": viewer_id in supporters,
+            "viewer_is_reporter": viewer_id == r["reporter_id"],
+        })
+    return out
+
+
+@api_router.post("/leaderboard/report")
+async def leaderboard_report(body: ReportSubmitPayload, user_id: str = Depends(get_user_or_legacy)):
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(400, "Please include a reason for the report.")
+    if body.reported_user_id == user_id:
+        raise HTTPException(400, "You can't report yourself.")
+    # Must be on viewer's leaderboard
+    member_ids = await _leaderboard_member_ids(user_id)
+    if body.reported_user_id not in member_ids:
+        raise HTTPException(400, "Player not on your leaderboard.")
+    tz = await _get_profile_tz(user_id)
+    _, _, week_key = _local_week_bounds(tz)
+    # One active report per reporter per reported-player per week
+    existing = await db.leaderboard_reports.find_one({
+        "reporter_id": user_id,
+        "reported_user_id": body.reported_user_id,
+        "week_key": week_key,
+    })
+    if existing:
+        raise HTTPException(400, "You've already reported this player this week.")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "reporter_id": user_id,
+        "reported_user_id": body.reported_user_id,
+        "reason": body.reason.strip()[:500],
+        "week_key": week_key,
+        "created_at": now_iso(),
+        "supporters": [user_id],   # reporter auto-supports
+    }
+    await db.leaderboard_reports.insert_one(doc)
+    return {"report": doc}
+
+
+@api_router.post("/leaderboard/report/{report_id}/support")
+async def leaderboard_report_support(report_id: str, user_id: str = Depends(get_user_or_legacy)):
+    report = await db.leaderboard_reports.find_one({"id": report_id})
+    if not report:
+        raise HTTPException(404, "Report not found")
+    member_ids = await _leaderboard_member_ids(user_id)
+    if report["reporter_id"] not in member_ids and report["reported_user_id"] not in member_ids:
+        raise HTTPException(403, "Not visible to you.")
+    supporters = set(report.get("supporters") or [])
+    supporters.add(user_id)
+    await db.leaderboard_reports.update_one(
+        {"id": report_id},
+        {"$set": {"supporters": list(supporters)}},
+    )
+    return {"supporters_count": len(supporters)}
+
+
+@api_router.delete("/leaderboard/report/{report_id}/support")
+async def leaderboard_report_unsupport(report_id: str, user_id: str = Depends(get_user_or_legacy)):
+    report = await db.leaderboard_reports.find_one({"id": report_id})
+    if not report:
+        raise HTTPException(404, "Report not found")
+    supporters = [s for s in (report.get("supporters") or []) if s != user_id]
+    await db.leaderboard_reports.update_one(
+        {"id": report_id},
+        {"$set": {"supporters": supporters}},
+    )
+    return {"supporters_count": len(supporters)}
 
 
 # ------------------------------------------------------------------

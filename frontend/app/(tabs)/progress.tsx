@@ -5,12 +5,14 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
+  TouchableOpacity,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from 'expo-router';
 import Svg, { Rect, Line, Text as SvgText } from 'react-native-svg';
 import Card from '../../src/components/Card';
+import PointsPlusModal from '../../src/components/PointsPlusModal';
 import { api, WeeklyStats, Profile, Achievement } from '../../src/api';
 import { colors, focusMeta, spacing, radii, FocusArea } from '../../src/theme';
 
@@ -22,6 +24,7 @@ export default function Progress() {
   const [byArea, setByArea] = useState<Record<FocusArea, number> | null>(null);
   const [achievements, setAchievements] = useState<Achievement[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showPointsPlus, setShowPointsPlus] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -71,8 +74,24 @@ export default function Progress() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <Text style={styles.kicker}>Progress</Text>
-        <Text style={styles.title}>Your Ascension</Text>
+        <View style={styles.topBar}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.kicker}>Progress</Text>
+            <Text style={styles.title}>Your Ascension</Text>
+          </View>
+          <TouchableOpacity
+            testID="points-plus-btn"
+            onPress={() => setShowPointsPlus(true)}
+            activeOpacity={0.85}
+            style={styles.pointsPlusBtn}
+          >
+            <Ionicons name="flash" size={14} color={colors.bg} />
+            <Text style={styles.pointsPlusText}>Points+</Text>
+            {profile.active_boost ? (
+              <View style={styles.pointsPlusActiveDot} />
+            ) : null}
+          </TouchableOpacity>
+        </View>
 
         {/* Top stat cards */}
         <View style={styles.row}>
@@ -203,6 +222,13 @@ export default function Progress() {
           ))}
         </View>
       </ScrollView>
+
+      <PointsPlusModal
+        visible={showPointsPlus}
+        onClose={() => setShowPointsPlus(false)}
+        profile={profile}
+        onProfileUpdate={(p) => setProfile(p)}
+      />
     </SafeAreaView>
   );
 }
@@ -213,6 +239,32 @@ const styles = StyleSheet.create({
   scroll: { padding: spacing.md, paddingBottom: 120 },
   kicker: { color: colors.green, fontSize: 12, letterSpacing: 2, fontWeight: '800' },
   title: { color: colors.text, fontSize: 26, fontWeight: '800', marginTop: 2, marginBottom: spacing.md },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  pointsPlusBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: colors.amber,
+    borderRadius: radii.pill,
+    marginTop: spacing.sm,
+  },
+  pointsPlusText: { color: colors.bg, fontWeight: '900', fontSize: 13, letterSpacing: 0.3 },
+  pointsPlusActiveDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.green,
+    marginLeft: 2,
+    borderWidth: 1,
+    borderColor: colors.bg,
+  },
   row: { flexDirection: 'row', gap: spacing.sm },
   stat: { flex: 1, alignItems: 'center', paddingVertical: spacing.md },
   statVal: { color: colors.text, fontSize: 18, fontWeight: '800', marginTop: 4 },

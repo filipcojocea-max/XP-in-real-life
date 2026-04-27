@@ -1,431 +1,414 @@
-"""Backend tests for 4 newly-added/modified features:
-1. 200-level XP system (/api/levels + level computed in profile)
-2. Un-tick restored (uncomplete refunds XP)
-3. Custom task XP cap = 20 (POST/PUT)
-4. Anonymous mode via X-Anonymous-Id header
+"""Backend tests for the four newly-added features:
+  1. Points+ Boost Inventory (claim / activate-from-inventory / status)
+  2. Friends Weekly Leaderboard
+  3. Leaderboard Report-Player System
+  4. Leaderboard Player Profile
+
+Run via: python /app/backend_test.py
 """
+from __future__ import annotations
 import sys
 import uuid
+import json
 import requests
-from datetime import datetime, timezone
 
-BASE = "https://xp-confidence.preview.emergentagent.com/api"
-
-results = []
-
-
-def record(name, ok, info=""):
-    status = "PASS" if ok else "FAIL"
-    print(f"[{status}] {name} :: {info}")
-    results.append((name, ok, info))
-
-
-def post(path, json=None, headers=None):
-    return requests.post(BASE + path, json=json or {}, headers=headers or {}, timeout=30)
+# Read the public ingress URL from frontend/.env (EXPO_PUBLIC_BACKEND_URL)
+def _read_backend_url() -> str:
+    env_path = "/app/frontend/.env"
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise RuntimeError("EXPO_PUBLIC_BACKEND_URL not found in /app/frontend/.env")
 
 
-def get(path, headers=None):
-    return requests.get(BASE + path, headers=headers or {}, timeout=30)
+BASE = _read_backend_url().rstrip("/") + "/api"
+print(f"Testing against {BASE}")
+
+PASS, FAIL = [], []
 
 
-def put(path, json=None, headers=None):
-    return requests.put(BASE + path, json=json or {}, headers=headers or {}, timeout=30)
+def _check(label: str, cond: bool, info: str = ""):
+    if cond:
+        PASS.append(label)
+        print(f"  ✓ {label}")
+    else:
+        FAIL.append(f"{label} :: {info}")
+        print(f"  ✗ {label} :: {info}")
 
 
-def register_and_verify(full_name, email, password):
-    r = post("/auth/register", {"full_name": full_name, "email": email, "password": password})
-    assert r.status_code == 200, f"register failed: {r.status_code} {r.text}"
-    code = r.json().get("dev_code")
-    assert code, f"no dev_code returned: {r.text}"
-    r2 = post("/auth/verify", {"email": email, "code": code})
-    assert r2.status_code == 200, f"verify failed: {r2.status_code} {r2.text}"
-    body = r2.json()
-    return body["token"], body["user"]
+def _hdr_anon(aid: str) -> dict:
+    return {"X-Anonymous-Id": aid, "Content-Type": "application/json"}
 
 
-# ===================================================================
-# 1. 200-level XP system
-# ===================================================================
-def test_levels_endpoint():
-    print("\n=== Test 1: 200-level XP system ===")
-    r = get("/levels")
-    if r.status_code != 200:
-        record("GET /levels returns 200", False, f"{r.status_code} {r.text}")
+def _hdr_auth(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+# 1. POINTS+ BOOST INVENTORY
+def test_boost_inventory():
+    print("\n═══ 1. Points+ Boost Inventory ═══")
+    aid = f"boost-test-{uuid.uuid4().hex[:16]}"
+    h = _hdr_anon(aid)
+
+    r = requests.get(f"{BASE}/profile", headers=h)
+    _check("profile bootstrap (anon)", r.status_code == 200, f"status={r.status_code}")
+
+    r = requests.get(f"{BASE}/boosts/status", headers=h)
+    _check("GET /boosts/status (pre-unlock)", r.status_code == 200, str(r.status_code))
+    if r.ok:
+        s = r.json()
+        _check("status: boosts_unlocked=false", s.get("boosts_unlocked") is False, str(s))
+        _check("status: active_boost=null", s.get("active_boost") is None, str(s))
+        _check("status: inventory=[]", s.get("boost_inventory") == [], str(s))
+
+    r = requests.post(f"{BASE}/boosts/claim", headers=h,
+                      data=json.dumps({"type": "triple_day"}))
+    _check("claim without unlock → 403", r.status_code == 403,
+           f"got {r.status_code}: {r.text[:200]}")
+    if r.status_code == 403:
+        try:
+            d = r.json().get("detail")
+            err = (d or {}).get("error") if isinstance(d, dict) else None
+            _check("403 detail.error == 'boosts_locked'", err == "boosts_locked", str(d))
+        except Exception as e:
+            FAIL.append(f"403 body parse: {e}")
+
+    r = requests.post(f"{BASE}/boosts/unlock", headers=h,
+                      data=json.dumps({"code": "WRONGCODE"}))
+    _check("unlock wrong code → 400", r.status_code == 400, f"got {r.status_code}")
+
+    r = requests.post(f"{BASE}/boosts/unlock", headers=h,
+                      data=json.dumps({"code": "XP270905W20"}))
+    _check("unlock correct code → 200", r.status_code == 200,
+           f"got {r.status_code}: {r.text[:200]}")
+    if r.ok:
+        body = r.json()
+        _check("unlock: boosts_unlocked=true",
+               body.get("boosts_unlocked") is True and
+               body.get("profile", {}).get("boosts_unlocked") is True,
+               str(body)[:300])
+
+    r = requests.post(f"{BASE}/boosts/claim", headers=h,
+                      data=json.dumps({"type": "triple_day"}))
+    _check("claim triple_day after unlock → 200", r.status_code == 200,
+           f"got {r.status_code}: {r.text[:200]}")
+    claimed_id_1 = None
+    if r.ok:
+        body = r.json()
+        claimed = body.get("claimed", {})
+        claimed_id_1 = claimed.get("id")
+        _check("claim returns 'claimed' with id+type",
+               bool(claimed_id_1) and claimed.get("type") == "triple_day", str(claimed))
+        _check("claimed multiplier=3, duration_days=1",
+               claimed.get("multiplier") == 3 and claimed.get("duration_days") == 1, str(claimed))
+        inv = body.get("profile", {}).get("boost_inventory", [])
+        _check("profile.boost_inventory grew by 1 after claim",
+               len(inv) == 1 and inv[0].get("id") == claimed_id_1, str(inv))
+
+    r = requests.post(f"{BASE}/boosts/claim", headers=h,
+                      data=json.dumps({"type": "double_week"}))
+    _check("claim double_week → 200", r.status_code == 200, f"got {r.status_code}")
+    claimed_id_2 = None
+    if r.ok:
+        claimed_id_2 = r.json().get("claimed", {}).get("id")
+        inv = r.json().get("profile", {}).get("boost_inventory", [])
+        _check("inventory now has 2 entries", len(inv) == 2, f"len={len(inv)}")
+
+    r = requests.post(f"{BASE}/boosts/activate", headers=h,
+                      data=json.dumps({"inventory_id": "non-existent-uuid-xyz"}))
+    _check("activate bogus inventory_id → 404", r.status_code == 404,
+           f"got {r.status_code}")
+
+    if claimed_id_1:
+        r = requests.post(f"{BASE}/boosts/activate", headers=h,
+                          data=json.dumps({"inventory_id": claimed_id_1}))
+        _check("activate valid inventory_id → 200", r.status_code == 200,
+               f"got {r.status_code}: {r.text[:200]}")
+        if r.ok:
+            body = r.json()
+            ab = body.get("active_boost", {})
+            _check("active_boost has multiplier=3", (ab or {}).get("multiplier") == 3, str(ab))
+            _check("active_boost has expires_at", bool((ab or {}).get("expires_at")), str(ab))
+            _check("active_boost type=triple_day", (ab or {}).get("type") == "triple_day", str(ab))
+
+    r = requests.get(f"{BASE}/boosts/status", headers=h)
+    if r.ok:
+        s = r.json()
+        _check("status.boosts_unlocked=true after unlock", s.get("boosts_unlocked") is True, str(s))
+        _check("status.active_boost present after activate",
+               s.get("active_boost") is not None and s["active_boost"].get("multiplier") == 3,
+               str(s.get("active_boost")))
+        inv = s.get("boost_inventory", [])
+        ids = [it.get("id") for it in inv]
+        _check("status.boost_inventory excludes activated entry",
+               claimed_id_1 not in ids, f"ids={ids}, activated={claimed_id_1}")
+        _check("status.boost_inventory still has un-activated entry",
+               claimed_id_2 in ids, f"ids={ids}, expected={claimed_id_2}")
+
+    r = requests.post(f"{BASE}/boosts/activate", headers=h,
+                      data=json.dumps({"type": "double_week"}))
+    _check("legacy activate by {type} still works → 200", r.status_code == 200,
+           f"got {r.status_code}: {r.text[:200]}")
+    if r.ok:
+        ab = r.json().get("active_boost", {})
+        _check("legacy activate sets active_boost.type=double_week",
+               (ab or {}).get("type") == "double_week", str(ab))
+
+
+# 2. FRIENDS WEEKLY LEADERBOARD
+def test_weekly_leaderboard():
+    print("\n═══ 2. Friends Weekly Leaderboard ═══")
+    aid = f"lb-test-{uuid.uuid4().hex[:16]}"
+    h = _hdr_anon(aid)
+
+    r = requests.get(f"{BASE}/profile", headers=h)
+    _check("profile bootstrap for LB user", r.status_code == 200, str(r.status_code))
+
+    r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
+    _check("GET /friends/leaderboard?tz=0 → 200", r.status_code == 200,
+           f"got {r.status_code}: {r.text[:200]}")
+    if r.ok:
+        body = r.json()
+        rows = body.get("rows", [])
+        _check("fresh user: 1 row (self)", len(rows) == 1, f"rows={len(rows)}")
+        if rows:
+            r0 = rows[0]
+            _check("self row weekly_xp=0", r0.get("weekly_xp") == 0, str(r0))
+            _check("self row is_self=true", r0.get("is_self") is True, str(r0))
+        _check("response has reports[] field", isinstance(body.get("reports"), list),
+               str(body)[:200])
+        _check("response has viewer_is_sunday boolean",
+               isinstance(body.get("viewer_is_sunday"), bool), str(body)[:200])
+        _check("response has week_key", bool(body.get("week_key")), str(body)[:200])
+
+    r2 = requests.get(f"{BASE}/friends/leaderboard?tz=330", headers=h)
+    _check("LB with tz=330 → 200", r2.status_code == 200, str(r2.status_code))
+    pr = requests.get(f"{BASE}/profile", headers=h)
+    if pr.ok:
+        _check("profile.tz_offset_minutes persisted to 330",
+               pr.json().get("tz_offset_minutes") == 330,
+               str(pr.json().get("tz_offset_minutes")))
+
+    requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
+
+    tasks_resp = requests.get(f"{BASE}/tasks", headers=h)
+    _check("GET /tasks for LB user", tasks_resp.status_code == 200, str(tasks_resp.status_code))
+    if not tasks_resp.ok:
         return
-    record("GET /levels returns 200", True)
-    data = r.json()
-
-    record(
-        "max_level == 200",
-        data.get("max_level") == 200,
-        f"got {data.get('max_level')}",
-    )
-    record(
-        "total_xp_cap == 1000000",
-        data.get("total_xp_cap") == 1_000_000,
-        f"got {data.get('total_xp_cap')}",
-    )
-    formula = data.get("formula", "")
-    record(
-        "formula contains '49.6 * L^1.87'",
-        "49.6" in formula and "1.87" in formula,
-        f"formula='{formula}'",
-    )
-
-    levels = data.get("levels") or []
-    record("levels list has 200 entries", len(levels) == 200, f"got {len(levels)}")
-
-    if len(levels) == 200:
-        sample = levels[0]
-        record(
-            "level entry has level/cum_xp/delta_to_reach",
-            all(k in sample for k in ("level", "cum_xp", "delta_to_reach")),
-            f"keys={list(sample.keys())}",
-        )
-
-        l1 = levels[0]
-        l50 = levels[49]
-        l200 = levels[199]
-        record("L1 cum_xp == 0", l1["cum_xp"] == 0, f"got {l1['cum_xp']}")
-        record(
-            "L50 cum_xp ~75000 (73000-76000)",
-            73000 <= l50["cum_xp"] <= 76000,
-            f"got {l50['cum_xp']}",
-        )
-        record(
-            "L200 cum_xp ~996000 (990000-1000000)",
-            990000 <= l200["cum_xp"] <= 1_000_000,
-            f"got {l200['cum_xp']}",
-        )
-
-
-def test_level_grows_in_profile():
-    print("\n=== Test 1b: Profile level reflects XP ===")
-    email = f"levels_{uuid.uuid4().hex[:8]}@xprealgame.io"
-    token, user = register_and_verify("Level Tester", email, "TestPass123!")
-    h = {"Authorization": f"Bearer {token}"}
-
-    r = get("/profile", headers=h)
-    if r.status_code != 200:
-        record("Initial profile 200", False, f"{r.status_code} {r.text}")
-        return
-    p = r.json()
-    record(
-        "Initial level==1, xp==0",
-        p.get("level") == 1 and p.get("total_xp") == 0,
-        f"level={p.get('level')} xp={p.get('total_xp')}",
-    )
-
-    r = get("/tasks", headers=h)
-    if r.status_code != 200:
-        record("List tasks 200", False, r.text)
-        return
-    tasks = r.json().get("tasks", [])
-    record("Default tasks seeded for new user", len(tasks) >= 8, f"got {len(tasks)}")
-
-    cum5 = round(49.6 * (5 ** 1.87))
-    record(
-        "Computed L5 cum_xp from formula matches spec (~1006)",
-        1000 <= cum5 <= 1015,
-        f"cum5={cum5}",
-    )
-    levels_resp = get("/levels").json().get("levels", [])
-    if levels_resp:
-        lvl_for_1000 = 1
-        for row in levels_resp:
-            if row["cum_xp"] <= 1000:
-                lvl_for_1000 = row["level"]
-            else:
-                break
-        record(
-            "1000 XP -> level 5 per /levels table",
-            lvl_for_1000 == 5,
-            f"level for 1000 XP = {lvl_for_1000}",
-        )
-
-    today = datetime.now(timezone.utc).date().isoformat()
-    total_xp_gained = 0
-    for t in tasks[:4]:
-        r = post(f"/tasks/{t['id']}/complete", {"date": today}, headers=h)
-        if r.status_code == 200:
-            total_xp_gained += r.json().get("xp_awarded", 0)
-    r = get("/profile", headers=h)
-    p = r.json()
-    record(
-        "XP increased after completing 4 tasks",
-        p.get("total_xp") == total_xp_gained and total_xp_gained > 0,
-        f"profile_xp={p.get('total_xp')} expected={total_xp_gained}",
-    )
-    record(
-        "level field present and >=1",
-        isinstance(p.get("level"), int) and p["level"] >= 1,
-        f"level={p.get('level')}",
-    )
-
-
-# ===================================================================
-# 2. Un-tick (uncomplete) restored
-# ===================================================================
-def test_uncomplete_refunds_xp():
-    print("\n=== Test 2: Un-tick / uncomplete ===")
-    email = f"untick_{uuid.uuid4().hex[:8]}@xprealgame.io"
-    token, user = register_and_verify("Untick Tester", email, "TestPass123!")
-    h = {"Authorization": f"Bearer {token}"}
-
-    r = get("/tasks", headers=h)
-    tasks = r.json().get("tasks", [])
+    tasks = tasks_resp.json().get("tasks", [])
     if not tasks:
-        record("Default tasks present", False, "none")
+        FAIL.append("LB: no tasks seeded for fresh user")
         return
-    task = tasks[0]
+    target = tasks[0]
+    task_id = target["id"]
+    expected_xp = int(target["xp_value"])
+    cr = requests.post(f"{BASE}/tasks/{task_id}/complete", headers=h, data=json.dumps({}))
+    _check("complete first default task → 200", cr.status_code == 200, str(cr.status_code))
+    awarded = cr.json().get("xp_awarded", 0) if cr.ok else 0
+    _check("xp_awarded matches task xp_value (no boost active)",
+           awarded == expected_xp, f"awarded={awarded}, expected={expected_xp}")
 
-    today = datetime.now(timezone.utc).date().isoformat()
-    p_before = get("/profile", headers=h).json()
-    xp_before = p_before.get("total_xp", 0)
+    r3 = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
+    if r3.ok:
+        rows = r3.json().get("rows", [])
+        if rows:
+            self_row = next((row for row in rows if row.get("is_self")), None)
+            _check("self.weekly_xp == awarded XP after task complete",
+                   self_row and self_row.get("weekly_xp") == awarded,
+                   f"row={self_row}, awarded={awarded}")
 
-    r = post(f"/tasks/{task['id']}/complete", {"date": today}, headers=h)
+    # Sort order check would need ≥2 rows; that's covered indirectly via the
+    # registered-users path in test_report_system. Idempotency check:
+    r4a = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
+    r4b = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
+    if r4a.ok and r4b.ok:
+        ra = r4a.json().get("rows", [])
+        rb = r4b.json().get("rows", [])
+        ma = ra[0].get("medals_count") if ra else None
+        mb = rb[0].get("medals_count") if rb else None
+        _check("medals_count idempotent across same-day calls",
+               ma == mb, f"first={ma}, second={mb}")
+
+
+def _register_user(full_name: str) -> tuple[str, str, str]:
+    """Register a fresh user. Backend auto-verifies on register and returns JWT."""
+    suffix = uuid.uuid4().hex[:10]
+    email = f"{full_name.lower().replace(' ', '.')}.{suffix}@gmail.com"
+    pwd = f"Pwd-{suffix}-XYZ"
+    payload = {"full_name": full_name, "email": email, "password": pwd}
+    r = requests.post(f"{BASE}/auth/register",
+                      headers={"Content-Type": "application/json"},
+                      data=json.dumps(payload))
     if r.status_code != 200:
-        record("Complete task 200", False, f"{r.status_code} {r.text}")
+        raise RuntimeError(f"register failed: {r.status_code} {r.text[:300]}")
+    body = r.json()
+    token = body.get("token")
+    user_id = body.get("user", {}).get("id")
+    if not token or not user_id:
+        raise RuntimeError(f"register missing token/user.id: {body}")
+    return user_id, token, email
+
+
+# 3. LEADERBOARD REPORT-PLAYER SYSTEM
+def test_report_system():
+    print("\n═══ 3. Leaderboard Report-Player System ═══")
+    try:
+        a_id, a_tok, _ = _register_user("Alice Reporter")
+        b_id, b_tok, _ = _register_user("Bob Reportee")
+        _check("registered user A", bool(a_id and a_tok), f"a_id={a_id}")
+        _check("registered user B", bool(b_id and b_tok), f"b_id={b_id}")
+    except Exception as e:
+        FAIL.append(f"register two users failed: {e}")
+        return None
+
+    r = requests.post(f"{BASE}/friends/request",
+                      headers=_hdr_auth(a_tok),
+                      data=json.dumps({"user_id": b_id}))
+    _check("A sends friend request to B", r.status_code == 200,
+           str(r.status_code) + " " + r.text[:200])
+    r = requests.post(f"{BASE}/friends/accept",
+                      headers=_hdr_auth(b_tok),
+                      data=json.dumps({"user_id": a_id}))
+    _check("B accepts → status=friends",
+           r.status_code == 200 and r.json().get("status") == "friends",
+           str(r.status_code) + " " + r.text[:200])
+
+    r = requests.post(f"{BASE}/leaderboard/report",
+                      headers=_hdr_auth(a_tok),
+                      data=json.dumps({"reported_user_id": a_id, "reason": "self"}))
+    _check("A self-report → 400", r.status_code == 400, str(r.status_code))
+
+    rand_uid = str(uuid.uuid4())
+    r = requests.post(f"{BASE}/leaderboard/report",
+                      headers=_hdr_auth(a_tok),
+                      data=json.dumps({"reported_user_id": rand_uid, "reason": "stranger"}))
+    _check("report non-leaderboard member → 400", r.status_code == 400, str(r.status_code))
+
+    r = requests.post(f"{BASE}/leaderboard/report",
+                      headers=_hdr_auth(a_tok),
+                      data=json.dumps({"reported_user_id": b_id,
+                                        "reason": "Suspicious XP gain"}))
+    _check("A reports B → 200", r.status_code == 200,
+           str(r.status_code) + " " + r.text[:200])
+    report_id = None
+    if r.ok:
+        report = r.json().get("report", {})
+        report_id = report.get("id")
+        _check("report has id, reporter_id, reported_user_id, week_key",
+               bool(report_id) and report.get("reporter_id") == a_id
+               and report.get("reported_user_id") == b_id
+               and report.get("week_key"), str(report))
+        _check("reporter A auto-supports own report",
+               a_id in (report.get("supporters") or []), str(report.get("supporters")))
+
+    r = requests.post(f"{BASE}/leaderboard/report",
+                      headers=_hdr_auth(a_tok),
+                      data=json.dumps({"reported_user_id": b_id, "reason": "again"}))
+    _check("A duplicate report same week → 400", r.status_code == 400, str(r.status_code))
+
+    if not report_id:
+        return (a_id, a_tok, b_id, b_tok)
+
+    r = requests.post(f"{BASE}/leaderboard/report/{report_id}/support",
+                      headers=_hdr_auth(b_tok))
+    _check("B supports report → 200", r.status_code == 200,
+           str(r.status_code) + " " + r.text[:200])
+    if r.ok:
+        cnt = r.json().get("supporters_count")
+        _check("supporters_count == 2 after B supports", cnt == 2, f"got {cnt}")
+
+    r = requests.delete(f"{BASE}/leaderboard/report/{report_id}/support",
+                        headers=_hdr_auth(b_tok))
+    _check("B unsupport → 200", r.status_code == 200, str(r.status_code))
+    if r.ok:
+        cnt = r.json().get("supporters_count")
+        _check("supporters_count decreases after unsupport (=1)", cnt == 1, f"got {cnt}")
+
+    r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=_hdr_auth(a_tok))
+    _check("A GET leaderboard → 200", r.status_code == 200, str(r.status_code))
+    if r.ok:
+        body = r.json()
+        rows = body.get("rows", [])
+        # Sort order check: rows sorted desc by weekly_xp
+        weekly = [row.get("weekly_xp", 0) for row in rows]
+        _check("rows sorted desc by weekly_xp",
+               weekly == sorted(weekly, reverse=True), f"weekly={weekly}")
+        # A is friends with B → leaderboard should have at least 2 members
+        _check("A's leaderboard has >= 2 rows (self + B)", len(rows) >= 2, f"len={len(rows)}")
+
+        reports = body.get("reports", [])
+        ids = [rep.get("id") for rep in reports]
+        _check("reports[] surfaces A's active report",
+               report_id in ids, f"ids={ids}, expected={report_id}")
+        match = next((rep for rep in reports if rep.get("id") == report_id), None)
+        if match:
+            _check("report row has reporter_name + reported_name",
+                   bool(match.get("reporter_name")) and bool(match.get("reported_name")),
+                   str(match))
+            _check("report row has reason + week_key + supporters_count",
+                   bool(match.get("reason")) and bool(match.get("week_key"))
+                   and isinstance(match.get("supporters_count"), int),
+                   str(match))
+            _check("viewer_is_reporter=true for reporter A",
+                   match.get("viewer_is_reporter") is True, str(match))
+
+    return (a_id, a_tok, b_id, b_tok)
+
+
+# 4. LEADERBOARD PLAYER PROFILE
+def test_player_profile(ctx):
+    print("\n═══ 4. Leaderboard Player Profile ═══")
+    if not ctx:
+        FAIL.append("player profile test skipped — report test setup failed")
         return
-    cdata = r.json()
-    awarded = cdata.get("xp_awarded", 0)
-    record(
-        "complete returns xp_awarded 15-40 (default range)",
-        15 <= awarded <= 40,
-        f"awarded={awarded}",
-    )
-    p_mid = get("/profile", headers=h).json()
-    record(
-        "profile XP increased by awarded amount",
-        p_mid["total_xp"] == xp_before + awarded,
-        f"before={xp_before} after={p_mid['total_xp']} awarded={awarded}",
-    )
+    a_id, a_tok, b_id, b_tok = ctx
 
-    r = post(f"/tasks/{task['id']}/uncomplete", {"date": today}, headers=h)
-    record("uncomplete returns 200", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
-    if r.status_code == 200:
-        ud = r.json()
-        record(
-            "uncomplete response has xp_removed field",
-            "xp_removed" in ud,
-            f"keys={list(ud.keys())}",
-        )
-        record(
-            "xp_removed == awarded",
-            ud.get("xp_removed") == awarded,
-            f"xp_removed={ud.get('xp_removed')} awarded={awarded}",
-        )
+    r = requests.get(f"{BASE}/leaderboard/profile/{b_id}?tz=0",
+                     headers=_hdr_auth(a_tok))
+    _check("GET /leaderboard/profile/{other_id} → 200", r.status_code == 200,
+           f"got {r.status_code}: {r.text[:200]}")
+    if r.ok:
+        body = r.json()
+        _check("profile.user_id matches B",
+               body.get("user_id") == b_id, f"user_id={body.get('user_id')}")
+        _check("profile has weekly_xp (int)",
+               isinstance(body.get("weekly_xp"), int),
+               f"weekly_xp={body.get('weekly_xp')}")
+        _check("profile.medals == [] (fresh user)",
+               body.get("medals") == [], str(body.get("medals")))
+        _check("profile.is_flagged_cheater == false",
+               body.get("is_flagged_cheater") is False,
+               f"is_flagged_cheater={body.get('is_flagged_cheater')}")
+        _check("profile.friend_status valid",
+               body.get("friend_status") in ("friends", "self", "none",
+                                              "pending_outgoing", "pending_incoming"),
+               f"friend_status={body.get('friend_status')}")
+        _check("profile has level + total_xp + name",
+               isinstance(body.get("level"), int) and isinstance(body.get("total_xp"), int)
+               and bool(body.get("name")), str(body)[:300])
 
-    p_after = get("/profile", headers=h).json()
-    record(
-        "profile XP rolled back to before",
-        p_after["total_xp"] == xp_before,
-        f"before={xp_before} after={p_after['total_xp']}",
-    )
-
-    r = get("/tasks", headers=h)
-    tlist = r.json().get("tasks", [])
-    target = next((t for t in tlist if t["id"] == task["id"]), None)
-    record(
-        "task back to completed=false",
-        target is not None and target.get("completed") is False,
-        f"task.completed={target.get('completed') if target else 'NOT-FOUND'}",
-    )
+    r2 = requests.get(f"{BASE}/leaderboard/profile/{uuid.uuid4()}?tz=0",
+                      headers=_hdr_auth(a_tok))
+    _check("GET /leaderboard/profile/<bogus> → 404", r2.status_code == 404, str(r2.status_code))
 
 
-# ===================================================================
-# 3. Custom task XP cap = 20
-# ===================================================================
-def test_custom_task_xp_cap():
-    print("\n=== Test 3: Custom task XP cap = 20 ===")
-    email = f"xpcap_{uuid.uuid4().hex[:8]}@xprealgame.io"
-    token, user = register_and_verify("XP Cap Tester", email, "TestPass123!")
-    h = {"Authorization": f"Bearer {token}"}
+def main():
+    test_boost_inventory()
+    test_weekly_leaderboard()
+    ctx = test_report_system()
+    test_player_profile(ctx)
 
-    base_payload = {
-        "description": "Test",
-        "focus_area": "mindset",
-        "time_slot": "morning",
-        "recurring": True,
-        "scheduled_time": "10:00",
-        "reminder_enabled": True,
-    }
-
-    r = post("/tasks", {**base_payload, "title": "QC1", "xp_value": 150}, headers=h)
-    record(
-        "POST /tasks xp_value=150 -> 20 (capped)",
-        r.status_code == 200 and r.json().get("xp_value") == 20,
-        f"{r.status_code} body={r.text[:200]}",
-    )
-
-    r = post("/tasks", {**base_payload, "title": "QC2", "xp_value": 10}, headers=h)
-    record(
-        "POST /tasks xp_value=10 -> 10 (unchanged)",
-        r.status_code == 200 and r.json().get("xp_value") == 10,
-        f"{r.status_code} body={r.text[:200]}",
-    )
-
-    r = post("/tasks", {**base_payload, "title": "QC3", "xp_value": 20}, headers=h)
-    custom_task_id = r.json()["id"] if r.status_code == 200 else None
-    record(
-        "POST /tasks xp_value=20 -> 20",
-        r.status_code == 200 and r.json().get("xp_value") == 20,
-        f"{r.status_code} body={r.text[:200]}",
-    )
-
-    if custom_task_id:
-        r = put(f"/tasks/{custom_task_id}", {"xp_value": 999}, headers=h)
-        record(
-            "PUT custom task xp_value=999 -> 20 (capped)",
-            r.status_code == 200 and r.json().get("xp_value") == 20,
-            f"{r.status_code} body={r.text[:200]}",
-        )
-
-    r = get("/tasks", headers=h)
-    tasks = r.json().get("tasks", [])
-    default_task = next((t for t in tasks if t.get("is_default")), None)
-    record("Found default task", default_task is not None)
-    if default_task:
-        r = put(f"/tasks/{default_task['id']}", {"xp_value": 80}, headers=h)
-        record(
-            "PUT default task xp_value=80 -> 80 (NOT capped)",
-            r.status_code == 200 and r.json().get("xp_value") == 80,
-            f"{r.status_code} body={r.text[:200]}",
-        )
-
-    # Defaults still allow 10-40 XP for fresh user
-    email2 = f"xpcap2_{uuid.uuid4().hex[:8]}@xprealgame.io"
-    token2, _ = register_and_verify("Default XP Tester", email2, "TestPass123!")
-    h2 = {"Authorization": f"Bearer {token2}"}
-    r = get("/tasks", headers=h2)
-    if r.status_code == 200:
-        tasks2 = r.json().get("tasks", [])
-        workout = next((t for t in tasks2 if "Workout" in t.get("title", "")), None)
-        record(
-            "Default 'Workout session' has 40 XP (defaults unrestricted)",
-            workout is not None and workout.get("xp_value") == 40,
-            f"workout.xp={workout.get('xp_value') if workout else 'NOT-FOUND'}",
-        )
-        defaults = [t for t in tasks2 if t.get("is_default")]
-        xps = [t["xp_value"] for t in defaults]
-        record(
-            "Default XP values within original 10-40 range",
-            all(10 <= x <= 40 for x in xps) and len(xps) >= 8,
-            f"xps={xps}",
-        )
-
-
-# ===================================================================
-# 4. Anonymous mode via X-Anonymous-Id header
-# ===================================================================
-def test_anonymous_mode():
-    print("\n=== Test 4: Anonymous mode via X-Anonymous-Id ===")
-    r1 = get("/profile")
-    record(
-        "GET /profile no header -> 200 (main account)",
-        r1.status_code == 200,
-        f"{r1.status_code}",
-    )
-    main_profile = r1.json() if r1.status_code == 200 else {}
-    main_xp = main_profile.get("total_xp")
-    main_name = main_profile.get("name")
-
-    anon_a = f"device-aaa-{uuid.uuid4().hex[:8]}"
-    anon_b = f"device-bbb-{uuid.uuid4().hex[:8]}"
-
-    ra = get("/profile", headers={"X-Anonymous-Id": anon_a})
-    rb = get("/profile", headers={"X-Anonymous-Id": anon_b})
-    record("anon A profile 200", ra.status_code == 200, f"{ra.status_code}")
-    record("anon B profile 200", rb.status_code == 200, f"{rb.status_code}")
-
-    # Create a custom task for anon A and complete it (anon mode does not auto-seed defaults)
-    rt = get("/tasks", headers={"X-Anonymous-Id": anon_a})
-    a_tasks = rt.json().get("tasks", []) if rt.status_code == 200 else []
-    if not a_tasks:
-        rc = post(
-            "/tasks",
-            {
-                "title": "Anon A solo quest",
-                "focus_area": "mindset",
-                "time_slot": "morning",
-                "xp_value": 20,
-                "recurring": True,
-                "reminder_enabled": True,
-            },
-            headers={"X-Anonymous-Id": anon_a},
-        )
-        if rc.status_code == 200:
-            a_tasks = [rc.json()]
-
-    if a_tasks:
-        today = datetime.now(timezone.utc).date().isoformat()
-        post(
-            f"/tasks/{a_tasks[0]['id']}/complete",
-            {"date": today},
-            headers={"X-Anonymous-Id": anon_a},
-        )
-
-    pa2 = get("/profile", headers={"X-Anonymous-Id": anon_a}).json()
-    pb2 = get("/profile", headers={"X-Anonymous-Id": anon_b}).json()
-    record(
-        "anon A and anon B have different profiles (data isolation)",
-        pa2.get("total_xp", 0) != pb2.get("total_xp", 0),
-        f"A.xp={pa2.get('total_xp')} B.xp={pb2.get('total_xp')}",
-    )
-    record(
-        "anon B is fresh isolated profile (xp=0)",
-        pb2.get("total_xp") == 0,
-        f"B.xp={pb2.get('total_xp')}",
-    )
-
-    rs = get("/profile", headers={"X-Anonymous-Id": "ab"})
-    record(
-        "Too-short X-Anonymous-Id falls back to main",
-        rs.status_code == 200 and rs.json().get("total_xp") == main_xp and rs.json().get("name") == main_name,
-        f"short.xp={rs.json().get('total_xp') if rs.status_code == 200 else 'err'} main.xp={main_xp}",
-    )
-
-    email = f"jwtignore_{uuid.uuid4().hex[:8]}@xprealgame.io"
-    token, user = register_and_verify("JWT Tester", email, "TestPass123!")
-    rj = get(
-        "/profile",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "X-Anonymous-Id": "device-ignored-12345678",
-        },
-    )
-    record(
-        "Authenticated request ignores X-Anonymous-Id (uses JWT user)",
-        rj.status_code == 200 and rj.json().get("name") == user["full_name"],
-        f"name={rj.json().get('name')} expected={user['full_name']}",
-    )
-    record(
-        "JWT user has fresh xp=0 (not anon's xp)",
-        rj.status_code == 200 and rj.json().get("total_xp") == 0,
-        f"xp={rj.json().get('total_xp')}",
-    )
+    print("\n" + "=" * 60)
+    print(f"PASS: {len(PASS)}  FAIL: {len(FAIL)}")
+    if FAIL:
+        print("\nFAILURES:")
+        for f in FAIL:
+            print(f"  - {f}")
+        sys.exit(1)
+    print("\nAll tests passed.")
 
 
 if __name__ == "__main__":
-    try:
-        test_levels_endpoint()
-        test_level_grows_in_profile()
-        test_uncomplete_refunds_xp()
-        test_custom_task_xp_cap()
-        test_anonymous_mode()
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"\nFATAL: {e}")
-        sys.exit(1)
-
-    fails = [r for r in results if not r[1]]
-    print("\n" + "=" * 60)
-    print(f"TOTAL: {len(results)}  PASS: {len(results) - len(fails)}  FAIL: {len(fails)}")
-    print("=" * 60)
-    if fails:
-        print("\nFAILURES:")
-        for n, _, info in fails:
-            print(f"  - {n} :: {info}")
-        sys.exit(1)
-    sys.exit(0)
+    main()
