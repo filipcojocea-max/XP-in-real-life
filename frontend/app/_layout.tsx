@@ -58,6 +58,7 @@ export default function RootLayout() {
             <Stack.Screen name="morning-setup" options={{ animation: 'fade' }} />
             <Stack.Screen name="sleep" />
             <Stack.Screen name="challenges" />
+            <Stack.Screen name="friends" />
           </Stack>
         </AuthGate>
       </View>

@@ -247,6 +247,37 @@ export const api = {
     req<{ completions: ChallengeCompletion[]; count: number }>('/challenge/past'),
   challengePastDelete: (id: string) =>
     req<{ deleted: number }>(`/challenge/past/${id}`, { method: 'DELETE' }),
+
+  // ─── Friends+ ────────────────────────────────────────────────────────
+  listPlayers: (q: string = '') =>
+    req<{ players: Player[] }>(`/friends/players?q=${encodeURIComponent(q)}`),
+  playerProfile: (userId: string) =>
+    req<Player>(`/friends/profile/${userId}`),
+  sendFriendRequest: (userId: string) =>
+    req<{ status: FriendStatus; message: string }>('/friends/request', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId }),
+    }),
+  acceptFriendRequest: (fromUserId: string) =>
+    req<{ status: FriendStatus }>('/friends/accept', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: fromUserId }),
+    }),
+  declineFriendRequest: (otherUserId: string) =>
+    req<{ status: FriendStatus }>('/friends/decline', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: otherUserId }),
+    }),
+  removeFriend: (otherUserId: string) =>
+    req<{ status: FriendStatus }>('/friends/remove', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: otherUserId }),
+    }),
+  listFriendRequests: () =>
+    req<{ incoming: FriendRequestEntry[]; outgoing: FriendRequestEntry[] }>(
+      '/friends/requests'
+    ),
+  listFriends: () => req<{ friends: Player[] }>('/friends/list'),
   authMe: () => req<{ id: string; full_name: string; email: string; verified: boolean }>('/auth/me'),
   getProfile: () => req<Profile>('/profile'),
   updateProfile: (name: string) =>
@@ -444,3 +475,32 @@ export type ChallengeCompletion = {
   xp_awarded: number;
   completed_at: string;
 };
+
+// ───────────────────────── Friends+ ─────────────────────────
+export type FriendStatus =
+  | 'none'
+  | 'pending_outgoing'
+  | 'pending_incoming'
+  | 'friends'
+  | 'self';
+
+export type Player = {
+  user_id: string;
+  name: string;
+  level: number;
+  total_xp: number;
+  current_streak: number;
+  best_streak: number;
+  goals_completed: number;
+  tasks_completed: number;
+  bio: string;
+  avatar_base64: string | null;
+  friend_status: FriendStatus;
+};
+
+export type FriendRequestEntry = {
+  request_id: string;
+  created_at: string;
+  player: Player;
+};
+

@@ -271,6 +271,22 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
+        {/* Friends+ — social discovery */}
+        <TouchableOpacity
+          testID="profile-friends-btn"
+          style={styles.actionRow}
+          onPress={() => router.push('/friends' as any)}
+        >
+          <View style={[styles.actionIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
+            <Ionicons name="people" size={18} color={colors.cyan} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.actionTitle, { color: colors.cyan }]}>Friends+</Text>
+            <Text style={styles.actionDesc}>Connect with other players</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
         {/* Account section */}
         <View style={styles.accountSection}>
           <Text style={styles.accountSectionLabel}>Account</Text>

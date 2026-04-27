@@ -2192,6 +2192,264 @@ async def challenge_past_delete(
     return {"deleted": res.deleted_count}
 
 
+# ═════════════════════ Friends+ (Social Layer) ═════════════════════════
+# Lets registered users discover each other, send friend requests, and
+# build a friends list. Anonymous device users are intentionally excluded
+# from search results — only people with a real account are listed.
+
+class FriendActionPayload(BaseModel):
+    user_id: str  # the other user's id (target of the request / action)
+
+
+def _friend_pair_key(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
+
+
+async def _find_relationship(user_a: str, user_b: str) -> Optional[dict]:
+    """Return the most recent friend_request doc between two users (in any
+    direction). The relationship status reflects whichever doc was created
+    last."""
+    return await db.friend_requests.find_one(
+        {
+            "$or": [
+                {"from_user_id": user_a, "to_user_id": user_b},
+                {"from_user_id": user_b, "to_user_id": user_a},
+            ],
+        },
+        sort=[("created_at", -1)],
+    )
+
+
+def _relationship_status(rel: Optional[dict], me: str) -> str:
+    """Translate the relationship doc into a UI-friendly status label."""
+    if not rel:
+        return "none"
+    if rel.get("status") == "accepted":
+        return "friends"
+    if rel.get("status") == "declined":
+        return "none"
+    # pending — direction matters for UI
+    if rel.get("from_user_id") == me:
+        return "pending_outgoing"
+    return "pending_incoming"
+
+
+def _serialize_player(prof: dict, status: str = "none") -> dict:
+    """Public-facing trimmed profile for player cards / detail views."""
+    total_xp = int(prof.get("total_xp", 0) or 0)
+    return {
+        "user_id": prof.get("_id") or prof.get("user_id"),
+        "name": prof.get("full_name") or prof.get("name") or "Anonymous",
+        "level": int(prof.get("level", 1) or 1),
+        "total_xp": total_xp,
+        "current_streak": int(prof.get("current_streak", 0) or 0),
+        "best_streak": int(prof.get("best_streak", 0) or 0),
+        "goals_completed": int(prof.get("goals_completed", 0) or 0),
+        "tasks_completed": int(prof.get("tasks_completed", 0) or 0),
+        "bio": prof.get("bio") or "",
+        "avatar_base64": prof.get("avatar_base64"),
+        "friend_status": status,  # none | pending_outgoing | pending_incoming | friends | self
+    }
+
+
+def _fuzzy_score(needle: str, haystack: str) -> int:
+    """Tiny soft-match score used to surface 'similar' names when the user
+    misspells. Higher is better. 0 = no match."""
+    n = (needle or "").lower().strip()
+    h = (haystack or "").lower().strip()
+    if not n:
+        return 1  # empty query — show everything
+    if h.startswith(n):
+        return 1000 - len(h)
+    if n in h:
+        return 800 - len(h)
+    # Levenshtein-ish: count matching chars in order
+    score = 0
+    j = 0
+    for ch in h:
+        if j < len(n) and ch == n[j]:
+            score += 5
+            j += 1
+    if j == len(n):
+        score += 100  # all chars in order
+    return score if score > 30 else 0
+
+
+@api_router.get("/friends/players")
+async def list_players(q: str = "", user_id: str = Depends(get_user_or_legacy)):
+    """List of all real (signed-in) users, optionally filtered by name.
+    Soft-matches misspellings so e.g. "alise" still surfaces "Alice"."""
+    # Only registered users (those that have a row in `users`). Their _id
+    # equals the profile _id, so we use that as the join key.
+    user_ids = []
+    async for u in db.users.find({}, {"_id": 1}):
+        user_ids.append(u["_id"])
+    if not user_ids:
+        return {"players": []}
+    profs_cur = db.profile.find({"_id": {"$in": user_ids}})
+    profs: list[dict] = [p async for p in profs_cur]
+
+    # Pre-compute fuzzy scores so we can sort by relevance.
+    scored: list[tuple[int, dict]] = []
+    for p in profs:
+        if p.get("_id") == user_id:
+            continue  # skip self in player list
+        name = p.get("full_name") or p.get("name") or ""
+        score = _fuzzy_score(q, name)
+        if score > 0:
+            scored.append((score, p))
+    scored.sort(key=lambda x: (-x[0], (x[1].get("full_name") or "").lower()))
+
+    # Batch-load relationships in a single query to avoid N queries.
+    other_ids = [p.get("_id") for _, p in scored]
+    rels: dict[tuple[str, str], dict] = {}
+    if other_ids:
+        async for r in db.friend_requests.find({
+            "$or": [
+                {"from_user_id": user_id, "to_user_id": {"$in": other_ids}},
+                {"to_user_id": user_id, "from_user_id": {"$in": other_ids}},
+            ],
+        }).sort("created_at", -1):
+            other = r["to_user_id"] if r["from_user_id"] == user_id else r["from_user_id"]
+            key = (user_id, other)
+            if key not in rels:  # keep the most recent only
+                rels[key] = r
+
+    out = []
+    for _, p in scored[:200]:
+        other_id = p.get("_id")
+        rel = rels.get((user_id, other_id))
+        status = _relationship_status(rel, user_id)
+        out.append(_serialize_player(p, status))
+    return {"players": out}
+
+
+@api_router.get("/friends/profile/{other_id}")
+async def player_profile(other_id: str, user_id: str = Depends(get_user_or_legacy)):
+    """Public profile of any single user — used by the player detail modal."""
+    prof = await db.profile.find_one({"_id": other_id})
+    if not prof:
+        raise HTTPException(404, "Player not found")
+    rel = await _find_relationship(user_id, other_id)
+    status = "self" if other_id == user_id else _relationship_status(rel, user_id)
+    return _serialize_player(prof, status)
+
+
+@api_router.post("/friends/request")
+async def friends_request(body: FriendActionPayload, user_id: str = Depends(get_user_or_legacy)):
+    target = body.user_id
+    if target == user_id:
+        raise HTTPException(400, "You can't friend yourself.")
+    target_user = await db.users.find_one({"_id": target})
+    if not target_user:
+        raise HTTPException(404, "Target account not found.")
+    existing = await _find_relationship(user_id, target)
+    if existing and existing.get("status") == "accepted":
+        return {"status": "friends", "message": "Already friends"}
+    if existing and existing.get("status") == "pending":
+        # If they previously sent us a request, accept it instead.
+        if existing.get("from_user_id") == target:
+            await db.friend_requests.update_one(
+                {"id": existing["id"]},
+                {"$set": {"status": "accepted", "accepted_at": now_iso()}},
+            )
+            return {"status": "friends", "message": "Request accepted"}
+        return {"status": "pending_outgoing", "message": "Request already sent"}
+    doc = {
+        "id": str(uuid.uuid4()),
+        "from_user_id": user_id,
+        "to_user_id": target,
+        "status": "pending",
+        "created_at": now_iso(),
+    }
+    await db.friend_requests.insert_one(doc)
+    return {"status": "pending_outgoing", "message": "Friend request sent", "request_id": doc["id"]}
+
+
+@api_router.post("/friends/accept")
+async def friends_accept(body: FriendActionPayload, user_id: str = Depends(get_user_or_legacy)):
+    """Accept a pending request that was sent BY `body.user_id` TO me."""
+    rel = await db.friend_requests.find_one({
+        "from_user_id": body.user_id,
+        "to_user_id": user_id,
+        "status": "pending",
+    })
+    if not rel:
+        raise HTTPException(404, "No pending request from this user.")
+    await db.friend_requests.update_one(
+        {"id": rel["id"]},
+        {"$set": {"status": "accepted", "accepted_at": now_iso()}},
+    )
+    return {"status": "friends"}
+
+
+@api_router.post("/friends/decline")
+async def friends_decline(body: FriendActionPayload, user_id: str = Depends(get_user_or_legacy)):
+    """Decline a pending incoming request, OR cancel an outgoing one."""
+    res = await db.friend_requests.delete_many({
+        "$or": [
+            {"from_user_id": body.user_id, "to_user_id": user_id, "status": "pending"},
+            {"from_user_id": user_id, "to_user_id": body.user_id, "status": "pending"},
+        ],
+    })
+    return {"deleted": res.deleted_count, "status": "none"}
+
+
+@api_router.post("/friends/remove")
+async def friends_remove(body: FriendActionPayload, user_id: str = Depends(get_user_or_legacy)):
+    res = await db.friend_requests.delete_many({
+        "$or": [
+            {"from_user_id": user_id, "to_user_id": body.user_id, "status": "accepted"},
+            {"from_user_id": body.user_id, "to_user_id": user_id, "status": "accepted"},
+        ],
+    })
+    return {"deleted": res.deleted_count, "status": "none"}
+
+
+@api_router.get("/friends/requests")
+async def list_friend_requests(user_id: str = Depends(get_user_or_legacy)):
+    """Pending requests *received* by me (incoming) — shown in the
+    'Friend Requests' tab."""
+    out_incoming: list = []
+    async for r in db.friend_requests.find({"to_user_id": user_id, "status": "pending"}).sort("created_at", -1):
+        from_id = r["from_user_id"]
+        prof = await db.profile.find_one({"_id": from_id})
+        if not prof:
+            continue
+        out_incoming.append({
+            "request_id": r["id"],
+            "created_at": r.get("created_at"),
+            "player": _serialize_player(prof, "pending_incoming"),
+        })
+    out_outgoing: list = []
+    async for r in db.friend_requests.find({"from_user_id": user_id, "status": "pending"}).sort("created_at", -1):
+        to_id = r["to_user_id"]
+        prof = await db.profile.find_one({"_id": to_id})
+        if not prof:
+            continue
+        out_outgoing.append({
+            "request_id": r["id"],
+            "created_at": r.get("created_at"),
+            "player": _serialize_player(prof, "pending_outgoing"),
+        })
+    return {"incoming": out_incoming, "outgoing": out_outgoing}
+
+
+@api_router.get("/friends/list")
+async def list_friends(user_id: str = Depends(get_user_or_legacy)):
+    out: list = []
+    async for r in db.friend_requests.find({
+        "status": "accepted",
+        "$or": [{"from_user_id": user_id}, {"to_user_id": user_id}],
+    }).sort("accepted_at", -1):
+        other_id = r["to_user_id"] if r["from_user_id"] == user_id else r["from_user_id"]
+        prof = await db.profile.find_one({"_id": other_id})
+        if not prof:
+            continue
+        out.append(_serialize_player(prof, "friends"))
+    return {"friends": out}
+
+
 # ------------------------------------------------------------------
 # Final app wiring (must be AFTER all api_router routes are declared)
 # ------------------------------------------------------------------
