@@ -26,14 +26,18 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
     // Try to surface the FastAPI `detail` field as a human-readable message
     // so users don't see raw JSON like `{"detail":"..."}` in the UI.
     let pretty = text || path;
+    let detail: any = null;
     try {
       const data = JSON.parse(text);
+      detail = data?.detail ?? null;
       if (data?.detail) {
         if (typeof data.detail === 'string') pretty = data.detail;
         else if (Array.isArray(data.detail)) {
           pretty = data.detail
             .map((d: any) => d?.msg || JSON.stringify(d))
             .join(', ');
+        } else if (typeof data.detail === 'object' && data.detail.message) {
+          pretty = data.detail.message;
         } else {
           pretty = JSON.stringify(data.detail);
         }
@@ -43,7 +47,10 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
     } catch {
       // not JSON — keep raw text
     }
-    throw new Error(pretty);
+    const err: any = new Error(pretty);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
   return res.json() as Promise<T>;
 }
@@ -125,6 +132,11 @@ export type Goal = {
   created_at: string;
   completed_at: string | null;
   awarded_xp?: number;
+  // Cycle-lockout fields. Filled in by the backend.
+  // `next_tick_available_at` is null until the user has ticked once.
+  last_ticked_at?: string | null;
+  next_tick_available_at?: string | null;
+  is_locked?: boolean;
 };
 
 export type Achievement = {

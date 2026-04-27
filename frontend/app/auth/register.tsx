@@ -8,9 +8,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
 import { api } from '../../src/api';
 import { showAlert } from '../../src/uiAlert';
+import { useAuth } from '../../src/AuthContext';
 import { colors, spacing, radii } from '../../src/theme';
 
 export default function Register() {
+  const { signIn } = useAuth();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -29,10 +31,19 @@ export default function Register() {
     }
     setLoading(true);
     try {
-      const r = await api.authRegister(name.trim(), email.trim().toLowerCase(), password);
+      const r: any = await api.authRegister(name.trim(), email.trim().toLowerCase(), password);
+      // Email verification has been disabled — the backend returns a token
+      // and user object directly. Sign the user in immediately and route home.
+      if (r?.token && r?.user) {
+        await signIn(r.token, r.user);
+        router.replace('/');
+        return;
+      }
+      // Legacy fallback: if for any reason the backend still returns the
+      // old "verification needed" payload (e.g. a stale build), keep working.
       router.push({
         pathname: '/auth/verify',
-        params: { email: email.trim().toLowerCase(), dev_code: (r as any).dev_code || '' },
+        params: { email: email.trim().toLowerCase(), dev_code: r?.dev_code || '' },
       });
     } catch (e: any) {
       const msg = String(e?.message || e || 'Could not create your account.');

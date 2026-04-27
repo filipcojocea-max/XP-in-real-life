@@ -23,6 +23,33 @@ import { showAlert, showConfirm } from '../../src/uiAlert';
 
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
+// Cycle-lockout helpers for the Goals "tick rate-limit" feature.
+// Backend enforces this — these helpers are just for the UI countdown.
+function formatRelativeFuture(target: Date): string {
+  const now = new Date();
+  const diffMs = target.getTime() - now.getTime();
+  if (diffMs <= 0) return 'now';
+  const mins = Math.floor(diffMs / (60 * 1000));
+  if (mins < 60) return `in ${mins} min${mins === 1 ? '' : 's'}`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `in ${hours} hr${hours === 1 ? '' : 's'}`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `in ${days} day${days === 1 ? '' : 's'}`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return `in ${weeks} week${weeks === 1 ? '' : 's'}`;
+  return `on ${target.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+}
+
+// Refresh "in X mins" labels every minute so the countdown stays accurate
+// without needing to re-fetch the whole goals list.
+function useTick(intervalMs: number = 60_000) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), intervalMs);
+    return () => clearInterval(t);
+  }, [intervalMs]);
+}
+
 // XP cap by duration unit. Long-term goals = bigger reward, capped per tier.
 type DurationUnit = 'days' | 'weeks' | 'months';
 const DURATION_UNITS: DurationUnit[] = ['days', 'weeks', 'months'];
@@ -63,6 +90,9 @@ export default function Goals() {
     }, [load])
   );
 
+  // Re-render every minute so countdown labels stay current.
+  useTick(60_000);
+
   const adjust = async (g: Goal, delta: number) => {
     try {
       const res = await api.updateGoalProgress(g.id, g.current_value + delta);
@@ -71,7 +101,23 @@ export default function Goals() {
         const xp = res.awarded_xp ?? res.xp_reward ?? 100;
         showAlert('Goal complete! 🎉', `+${xp} XP for finishing "${res.title}"`);
       }
-    } catch (e) {
+    } catch (e: any) {
+      // Friendly handling for the cycle-lockout 429 error returned by the backend.
+      const detail = e?.detail;
+      if (detail && (detail.error === 'cycle_locked' || /locked/i.test(String(e?.message || '')))) {
+        const next = detail.next_tick_available_at
+          ? new Date(detail.next_tick_available_at)
+          : null;
+        showAlert(
+          'Locked for now',
+          next
+            ? `You can tick this goal again ${formatRelativeFuture(next)}.`
+            : 'This goal is locked until its next cycle.'
+        );
+        // Refresh to get the latest server-side lock state.
+        load();
+        return;
+      }
       console.log(e);
     }
   };
@@ -126,6 +172,10 @@ export default function Goals() {
           goals.map((g) => {
             const meta = focusMeta[g.focus_area];
             const pct = Math.min(1, g.current_value / g.target_value);
+            const locked = !!g.is_locked && !g.completed;
+            const nextAt = g.next_tick_available_at
+              ? new Date(g.next_tick_available_at)
+              : null;
             return (
               <Pressable
                 key={g.id}
@@ -166,6 +216,15 @@ export default function Goals() {
                     <View style={[styles.barFill, { width: `${pct * 100}%`, backgroundColor: meta.color }]} />
                   </View>
 
+                  {locked && nextAt ? (
+                    <View style={styles.lockPill} testID={`goal-lock-${g.id}`}>
+                      <Ionicons name="lock-closed" size={11} color={colors.amber} />
+                      <Text style={styles.lockPillText}>
+                        Unlocks {formatRelativeFuture(nextAt)}
+                      </Text>
+                    </View>
+                  ) : null}
+
                   <View style={styles.goalActions}>
                     <TouchableOpacity
                       testID={`goal-dec-${g.id}`}
@@ -176,17 +235,27 @@ export default function Goals() {
                     </TouchableOpacity>
                     <TouchableOpacity
                       testID={`goal-inc-${g.id}`}
-                      style={[styles.smallBtn, { backgroundColor: meta.color }]}
+                      disabled={locked}
+                      style={[
+                        styles.smallBtn,
+                        { backgroundColor: meta.color },
+                        locked && styles.btnDisabled,
+                      ]}
                       onPress={() => adjust(g, 1)}
                     >
-                      <Ionicons name="add" size={18} color={colors.bg} />
+                      <Ionicons
+                        name={locked ? 'lock-closed' : 'add'}
+                        size={18}
+                        color={colors.bg}
+                      />
                     </TouchableOpacity>
                     <TouchableOpacity
                       testID={`goal-plus10-${g.id}`}
-                      style={styles.smallBtnWide}
+                      disabled={locked}
+                      style={[styles.smallBtnWide, locked && styles.btnDisabled]}
                       onPress={() => adjust(g, 10)}
                     >
-                      <Text style={[styles.smallBtnText, { color: meta.color }]}>+10</Text>
+                      <Text style={[styles.smallBtnText, { color: locked ? colors.textMuted : meta.color }]}>+10</Text>
                     </TouchableOpacity>
                   </View>
                 </Card>
@@ -506,6 +575,26 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   smallBtnText: { fontWeight: '800', fontSize: 13 },
+  btnDisabled: { opacity: 0.45 },
+  lockPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginTop: 8,
+    borderRadius: radii.pill,
+    backgroundColor: colors.amber + '15',
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+  },
+  lockPillText: {
+    color: colors.amber,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
   hint: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: spacing.md },
 
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' },

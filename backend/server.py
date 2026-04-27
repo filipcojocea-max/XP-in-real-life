@@ -413,6 +413,8 @@ def serialize_profile(prof: dict) -> dict:
 
 
 async def check_and_unlock_achievements(prof: dict) -> List[str]:
+    if not prof:
+        return []
     unlocked = set(prof.get("achievements_unlocked", []))
     newly = []
     level = level_from_xp(prof.get("total_xp", 0))
@@ -623,45 +625,29 @@ async def auth_register(body: RegisterPayload):
     existing = await db.users.find_one({"email": email_norm})
     if existing and existing.get("verified"):
         raise HTTPException(400, "An account with this email already exists. Please log in.")
-    code = _gen_code()
-    code_expires = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
     user_id = existing["_id"] if existing else str(uuid.uuid4())
+    # Email verification has been disabled — accounts are usable immediately
+    # after registration. We still validate the email format + MX records so
+    # garbage addresses are rejected, but no 6-digit code is required.
     doc = {
         "_id": user_id,
         "email": email_norm,
         "full_name": body.full_name.strip(),
         "password_hash": hash_password(body.password),
-        "verified": False,
-        "verification_code": code,
-        "verification_expires": code_expires,
+        "verified": True,
+        "verified_at": now_iso(),
         "created_at": now_iso(),
     }
-    # 2. Try to actually deliver the verification email. If Resend is configured
-    #    and fails (e.g. invalid recipient), refuse to create the account so we
-    #    never accept a fake-but-MX-valid address.
-    sent_real = False
-    try:
-        sent_real = _send_verification_email(email_norm, code, body.full_name.strip())
-    except Exception as e:
-        raise HTTPException(
-            400,
-            f"We couldn't deliver a verification email to {email_norm}. "
-            f"Please double-check the address and try again. ({str(e)[:120]})",
-        )
     await db.users.replace_one({"_id": user_id}, doc, upsert=True)
-    response = {
-        "message": (
-            "Verification code sent. Please check your inbox (and spam folder)."
-            if sent_real else
-            "Verification code sent. Check your inbox (or backend logs in dev mode)."
-        ),
-        "email": email_norm,
-        "email_delivered": sent_real,
+    # Ensure a profile exists so the user can immediately start using the app
+    await get_or_create_profile_for(user_id, body.full_name.strip())
+    token = make_token(user_id, email_norm)
+    user_doc = await db.users.find_one({"_id": user_id})
+    return {
+        "token": token,
+        "user": _serialize_user(user_doc),
+        "message": "Account created. You're signed in.",
     }
-    # In dev mode (no RESEND_API_KEY configured), surface the code so testers can verify
-    if not os.environ.get("RESEND_API_KEY"):
-        response["dev_code"] = code
-    return response
 
 
 @api_router.post("/auth/verify")
@@ -726,22 +712,15 @@ async def auth_login(body: LoginPayload):
     user = await db.users.find_one({"email": email_norm})
     if not user or not verify_password(body.password, user.get("password_hash", "")):
         raise HTTPException(401, "Wrong email or password.")
+    # Email verification is no longer required — accounts are usable
+    # immediately after registration. Log the user in unconditionally.
     if not user.get("verified"):
-        # Re-issue a code so they can complete verification
-        code = _gen_code()
-        expires = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
         await db.users.update_one(
             {"_id": user["_id"]},
-            {"$set": {"verification_code": code, "verification_expires": expires}},
+            {"$set": {"verified": True, "verified_at": now_iso()},
+             "$unset": {"verification_code": "", "verification_expires": ""}},
         )
-        try:
-            _send_verification_email(email_norm, code, user.get("full_name", ""))
-        except Exception:
-            logging.getLogger("auth").exception("login: resend during login failed")
-        resp = {"needs_verification": True, "email": email_norm}
-        if not os.environ.get("RESEND_API_KEY"):
-            resp["dev_code"] = code
-        return resp
+        user["verified"] = True
     token = make_token(user["_id"], email_norm)
     return {"token": token, "user": _serialize_user(user)}
 
@@ -1329,11 +1308,56 @@ async def uncomplete_task(task_id: str, body: CompleteTaskBody, user_id: str = D
 
 
 # --------- Goals ---------
+# ─────────────── Goal cycle lockout (per-tick rate limit) ───────────────
+# Long-term goals can only be ticked once per cycle. The cycle length is
+# derived from the goal's `unit`:
+#   days   →  1 day   (24h)
+#   weeks  →  7 days
+#   months → 29 days
+GOAL_CYCLE_LOCKOUT: dict = {
+    "days": timedelta(days=1),
+    "weeks": timedelta(days=7),
+    "months": timedelta(days=29),
+}
+
+
+def _goal_lockout_for(unit: Optional[str]) -> Optional[timedelta]:
+    return GOAL_CYCLE_LOCKOUT.get((unit or "").lower())
+
+
+def _enrich_goal_lock_state(goal: dict) -> dict:
+    """Compute and attach `next_tick_available_at` / `is_locked` so the
+    frontend can render the cycle-lock UI without re-implementing the rules."""
+    lock = _goal_lockout_for(goal.get("unit"))
+    last_iso = goal.get("last_ticked_at")
+    if not lock or not last_iso:
+        goal["next_tick_available_at"] = None
+        goal["is_locked"] = False
+        return goal
+    try:
+        last = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except Exception:
+        goal["next_tick_available_at"] = None
+        goal["is_locked"] = False
+        return goal
+    next_at = last + lock
+    now = datetime.now(timezone.utc)
+    goal["next_tick_available_at"] = next_at.isoformat()
+    goal["is_locked"] = now < next_at
+    return goal
+
+
+def _enrich_goals(goals: list[dict]) -> list[dict]:
+    return [_enrich_goal_lock_state(g) for g in goals]
+
+
 @api_router.get("/goals")
 async def list_goals(user_id: str = Depends(get_user_or_legacy)):
     goals = await db.goals.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
     goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
-    return {"goals": goals}
+    return {"goals": _enrich_goals(goals)}
 
 
 @api_router.post("/goals")
@@ -1379,13 +1403,41 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
     if not goal:
         raise HTTPException(404, "Goal not found")
-    current = max(0, min(body.current_value, goal["target_value"]))
-    completed = current >= goal["target_value"]
-    update = {"current_value": current, "completed": completed}
+
+    # Cycle-lockout enforcement: if the user is *increasing* the tick count
+    # but the goal is still inside its lockout window, refuse the request
+    # with a clear "next available" timestamp so the UI can show a countdown.
+    requested_value = max(0, min(body.current_value, goal["target_value"]))
+    incrementing = requested_value > int(goal.get("current_value", 0))
+    lockout = _goal_lockout_for(goal.get("unit"))
+    if incrementing and lockout and goal.get("last_ticked_at"):
+        try:
+            last = datetime.fromisoformat(goal["last_ticked_at"].replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            next_at = last + lockout
+            if datetime.now(timezone.utc) < next_at:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "cycle_locked",
+                        "message": f"This goal is locked until the next {(goal.get('unit') or 'cycle').rstrip('s')} cycle.",
+                        "next_tick_available_at": next_at.isoformat(),
+                        "unit": goal.get("unit"),
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    completed = requested_value >= goal["target_value"]
+    update = {"current_value": requested_value, "completed": completed}
+    if incrementing:
+        update["last_ticked_at"] = now_iso()
     awarded_xp = 0
     if completed and not goal.get("completed"):
         update["completed_at"] = now_iso()
-        # Award the goal's stored xp_reward (legacy goals without it default to 100)
         awarded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
         await db.profile.update_one(
             {"_id": user_id},
@@ -1395,6 +1447,7 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
         await check_and_unlock_achievements(prof)
     await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    goal = _enrich_goal_lock_state(goal)
     if awarded_xp:
         goal["awarded_xp"] = awarded_xp
     return goal
@@ -1534,13 +1587,13 @@ SLEEP_QUESTIONS = [
     {"id": "wakes_at_night", "type": "single", "options": ["Never", "Sometimes", "Often", "Every night"], "q": "Do you wake up during the night?"},
     {"id": "racing_thoughts", "type": "single", "options": ["Rarely", "Sometimes", "Often", "Always"], "q": "How often do racing thoughts keep you awake?"},
     {"id": "screens_before_bed", "type": "single", "options": ["No screens 1+ hr", "30 min before", "Right up to bed", "In bed"], "q": "When do you stop using screens before bed?"},
-    {"id": "caffeine_cutoff", "type": "single", "options": ["Morning only", "Before 2pm", "Before 6pm", "Anytime / no limit"], "q": "When is your last caffeine of the day?"},
+    {"id": "caffeine_cutoff", "type": "single", "options": ["I don't drink caffeine", "Morning only", "Before 2pm", "Before 6pm", "Anytime / no limit"], "q": "When is your last caffeine of the day?"},
     {"id": "alcohol", "type": "single", "options": ["Never", "Occasionally", "A few nights/week", "Most nights"], "q": "How often do you drink alcohol in the evening?"},
     {"id": "exercise", "type": "single", "options": ["Daily", "A few times/week", "Rarely", "Never"], "q": "How often do you exercise?"},
     {"id": "exercise_time", "type": "single", "options": ["Morning", "Afternoon", "Evening", "Late night", "I don't exercise"], "q": "When do you usually exercise?"},
-    {"id": "temp_right", "type": "single", "options": ["Yes", "No"], "q": "Is your bed usually the right temperature for you to sleep well at night?"},
-    {"id": "temp_problem", "type": "single", "options": ["Is your bed too hot?", "Is your bed too cool?"], "q": "Which one is the problem?", "show_if": {"temp_right": "No"}},
-    {"id": "temp_frequency", "type": "single", "options": ["A few times", "Often", "Always"], "q": "How often does this happen?", "show_if": {"temp_right": "No"}},
+    {"id": "temp_right", "type": "single", "options": ["Yes", "Most times", "Sometimes", "No"], "q": "Is your bed usually the right temperature for you to sleep well at night?"},
+    {"id": "temp_problem", "type": "single", "options": ["Is your bed too hot?", "Is your bed too cool?"], "q": "Which one is the problem?", "show_if": {"temp_right": ["No", "Sometimes", "Most times"]}},
+    {"id": "temp_frequency", "type": "single", "options": ["A few times", "Often", "Always"], "q": "How often does this happen?", "show_if": {"temp_right": ["No", "Sometimes", "Most times"]}},
     {"id": "room_dark", "type": "single", "options": ["Pitch black", "Mostly dark", "Some light", "Lots of light"], "q": "How dark is your bedroom?"},
     {"id": "noise", "type": "single", "options": ["Silent", "White noise", "Some noise", "Very noisy"], "q": "How quiet is your sleep environment?"},
     {"id": "relaxing_activities", "type": "multi", "options": ["Reading", "Drawing", "Journaling", "Music", "Podcasts", "Meditation", "Stretching", "Bath/shower", "Tea", "Breathing exercises"], "q": "What activities do you find relaxing? (pick all that apply)"},
