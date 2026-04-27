@@ -1378,6 +1378,20 @@ async def list_goals(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.post("/goals")
 async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legacy)):
+    # Cap users to 5 active long-term goals at any time. Completed goals
+    # don't count toward the limit so users always have room to add more
+    # once they finish older ones.
+    MAX_ACTIVE_GOALS = 5
+    active_count = await db.goals.count_documents({"user_id": user_id, "completed": False})
+    if active_count >= MAX_ACTIVE_GOALS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "goal_limit_reached",
+                "message": f"You can have up to {MAX_ACTIVE_GOALS} active goals at once. Finish or delete one to add a new goal.",
+                "limit": MAX_ACTIVE_GOALS,
+            },
+        )
     unit_norm = (body.unit or "days").lower()
     xp_reward = _clamp_goal_xp(unit_norm, body.xp_reward)
     goal = {

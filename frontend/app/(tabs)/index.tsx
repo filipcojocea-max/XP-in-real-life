@@ -14,6 +14,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import Ring from '../../src/components/Ring';
 import Card from '../../src/components/Card';
 import MotivationBanner from '../../src/components/MotivationBanner';
+import PremiumShield from '../../src/components/PremiumShield';
 import { api, Profile, DailyStats } from '../../src/api';
 import { colors, focusMeta, spacing, radii } from '../../src/theme';
 import { scheduleMotivationalNotifications, pickMotivation } from '../../src/notifications';
@@ -132,10 +133,16 @@ export default function Home() {
           <Ring size={260} stroke={10} progress={xpPct} color={colors.amber} glow>
             <View style={styles.emblemCore}>
               <View style={styles.emblemGlow} />
-              <Ionicons name="shield" size={88} color={colors.cyan} />
-              <View style={styles.emblemInner}>
-                <Ionicons name="flash" size={32} color={colors.green} />
-              </View>
+              {profile.level >= 2 ? (
+                <PremiumShield size={110} />
+              ) : (
+                <>
+                  <Ionicons name="shield" size={88} color={colors.cyan} />
+                  <View style={styles.emblemInner}>
+                    <Ionicons name="flash" size={32} color={colors.green} />
+                  </View>
+                </>
+              )}
             </View>
           </Ring>
 

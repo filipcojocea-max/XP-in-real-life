@@ -23,6 +23,10 @@ import { showAlert, showConfirm } from '../../src/uiAlert';
 
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
+// Maximum number of active (uncompleted) long-term goals a user can hold
+// at one time. Mirrors the server-side cap in /api/goals.
+const GOAL_LIMIT = 5;
+
 // Cycle-lockout helpers for the Goals "tick rate-limit" feature.
 // Backend enforces this — these helpers are just for the UI countdown.
 function formatRelativeFuture(target: Date): string {
@@ -111,6 +115,10 @@ export default function Goals() {
   // Re-render every minute so countdown labels stay current.
   useTick(60_000);
 
+  // Active goals = uncompleted; once a user finishes one, they can add a new one.
+  const activeCount = goals.filter((g) => !g.completed).length;
+  const atGoalLimit = activeCount >= GOAL_LIMIT;
+
   // Show a 5-second auto-dismiss toast on a specific goal card.
   const showLockToast = useCallback((goalId: string, message: string) => {
     setLockToast((prev) => ({ ...prev, [goalId]: message }));
@@ -186,14 +194,26 @@ export default function Goals() {
         <View>
           <Text style={styles.kicker}>Long-Term Goals</Text>
           <Text style={styles.title}>Your Quests</Text>
+          <Text style={styles.goalsCount}>
+            {activeCount} / {GOAL_LIMIT} active
+          </Text>
         </View>
         <TouchableOpacity
           testID="add-goal-btn"
-          style={styles.addBtn}
-          onPress={() => setShowAdd(true)}
+          style={[styles.addBtn, atGoalLimit && styles.addBtnDisabled]}
+          onPress={() => {
+            if (atGoalLimit) {
+              showAlert(
+                'Goal limit reached',
+                `You can have up to ${GOAL_LIMIT} active goals at once. Finish or delete one to add a new goal.`
+              );
+              return;
+            }
+            setShowAdd(true);
+          }}
         >
-          <Ionicons name="add" size={20} color={colors.bg} />
-          <Text style={styles.addBtnText}>New</Text>
+          <Ionicons name={atGoalLimit ? 'lock-closed' : 'add'} size={20} color={colors.bg} />
+          <Text style={styles.addBtnText}>{atGoalLimit ? 'Full' : 'New'}</Text>
         </TouchableOpacity>
       </View>
 
@@ -570,6 +590,15 @@ const styles = StyleSheet.create({
     borderRadius: radii.pill,
   },
   addBtnText: { color: colors.bg, fontWeight: '800', fontSize: 13 },
+  addBtnDisabled: { backgroundColor: colors.textMuted, opacity: 0.6 },
+  goalsCount: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    marginTop: 4,
+    textTransform: 'uppercase',
+  },
   scroll: { padding: spacing.md, paddingBottom: 120 },
   empty: { alignItems: 'center', padding: spacing.xl },
   emptyTitle: { color: colors.text, fontSize: 16, fontWeight: '700', marginTop: spacing.md },
