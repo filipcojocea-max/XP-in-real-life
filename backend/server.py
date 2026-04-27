@@ -3035,6 +3035,7 @@ async def leaderboard_report(body: ReportSubmitPayload, user_id: str = Depends(g
         "supporters": [user_id],   # reporter auto-supports
     }
     await db.leaderboard_reports.insert_one(doc)
+    doc.pop("_id", None)
     return {"report": doc}
 
 

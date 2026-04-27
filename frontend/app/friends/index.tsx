@@ -18,8 +18,9 @@ import { router } from 'expo-router';
 import { api, Player, FriendStatus, FriendRequestEntry } from '../../src/api';
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
+import LeaderboardTab from '../../src/components/LeaderboardTab';
 
-type TopTab = 'players' | 'friends';
+type TopTab = 'players' | 'friends' | 'leaderboard';
 type FriendsSubTab = 'requests' | 'mine';
 
 export default function FriendsScreen() {
@@ -148,10 +149,11 @@ export default function FriendsScreen() {
         <View style={{ width: 36 }} />
       </View>
 
-      {/* Top tabs: Players | Friends */}
+      {/* Top tabs: Players | Friends | Leaderboard */}
       <View style={styles.tabsRow}>
         <TabPill label="Players" active={topTab === 'players'} onPress={() => setTopTab('players')} testID="ftab-players" />
         <TabPill label="Friends" active={topTab === 'friends'} onPress={() => setTopTab('friends')} testID="ftab-friends" />
+        <TabPill label="Leaderboard" active={topTab === 'leaderboard'} onPress={() => setTopTab('leaderboard')} testID="ftab-leaderboard" />
       </View>
 
       {topTab === 'players' ? (
@@ -166,7 +168,7 @@ export default function FriendsScreen() {
           onAddFriend={onAddFriend}
           savingId={savingId}
         />
-      ) : (
+      ) : topTab === 'friends' ? (
         <FriendsTab
           subTab={subTab}
           setSubTab={setSubTab}
@@ -180,6 +182,8 @@ export default function FriendsScreen() {
           onPress={setOpenProfile}
           savingId={savingId}
         />
+      ) : (
+        <LeaderboardTab />
       )}
 
       <PlayerProfileModal
