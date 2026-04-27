@@ -64,10 +64,19 @@ const UNIT_META: Record<DurationUnit, { label: string; icon: string }> = {
   months: { label: 'Months', icon: 'calendar-outline' },
 };
 
+// Per-unit lockout copy, shown as a 5-second auto-dismissing toast on the goal card.
+const LOCK_MESSAGE: Record<string, string> = {
+  days: 'You can only tick once per day',
+  weeks: 'You can only tick once per week',
+  months: 'You can only tick once per month',
+};
+
 export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  // Maps goal_id → toast message currently visible. Auto-clears after 5s.
+  const [lockToast, setLockToast] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -93,27 +102,47 @@ export default function Goals() {
   // Re-render every minute so countdown labels stay current.
   useTick(60_000);
 
+  // Show a 5-second auto-dismiss toast on a specific goal card.
+  const showLockToast = useCallback((goalId: string, message: string) => {
+    setLockToast((prev) => ({ ...prev, [goalId]: message }));
+    setTimeout(() => {
+      setLockToast((prev) => {
+        const next = { ...prev };
+        delete next[goalId];
+        return next;
+      });
+    }, 5000);
+  }, []);
+
   const adjust = async (g: Goal, delta: number) => {
+    // Pre-empt the request when we already know the goal is locked — show
+    // the toast instantly without a network round-trip.
+    if (delta > 0 && g.is_locked) {
+      const msg = LOCK_MESSAGE[(g.unit || 'days').toLowerCase()] || 'You can only tick once per cycle';
+      showLockToast(g.id, msg);
+      return;
+    }
     try {
       const res = await api.updateGoalProgress(g.id, g.current_value + delta);
       setGoals((prev) => prev.map((x) => (x.id === g.id ? res : x)));
       if (res.completed && !g.completed) {
         const xp = res.awarded_xp ?? res.xp_reward ?? 100;
         showAlert('Goal complete! 🎉', `+${xp} XP for finishing "${res.title}"`);
+      } else if (!res.completed && g.completed) {
+        // The goal was previously completed and the user just un-ticked it.
+        // The backend has already refunded the XP — surface the change.
+        const refunded = (res as any).refunded_xp ?? res.xp_reward ?? 0;
+        if (refunded) {
+          showAlert('Goal un-marked', `−${refunded} XP refunded.`);
+        }
       }
     } catch (e: any) {
       // Friendly handling for the cycle-lockout 429 error returned by the backend.
       const detail = e?.detail;
       if (detail && (detail.error === 'cycle_locked' || /locked/i.test(String(e?.message || '')))) {
-        const next = detail.next_tick_available_at
-          ? new Date(detail.next_tick_available_at)
-          : null;
-        showAlert(
-          'Locked for now',
-          next
-            ? `You can tick this goal again ${formatRelativeFuture(next)}.`
-            : 'This goal is locked until its next cycle.'
-        );
+        const unit = (detail.unit || g.unit || 'days').toLowerCase();
+        const msg = LOCK_MESSAGE[unit] || 'You can only tick once per cycle';
+        showLockToast(g.id, msg);
         // Refresh to get the latest server-side lock state.
         load();
         return;
@@ -216,12 +245,19 @@ export default function Goals() {
                     <View style={[styles.barFill, { width: `${pct * 100}%`, backgroundColor: meta.color }]} />
                   </View>
 
-                  {locked && nextAt ? (
+                  {locked && nextAt && !lockToast[g.id] ? (
                     <View style={styles.lockPill} testID={`goal-lock-${g.id}`}>
                       <Ionicons name="lock-closed" size={11} color={colors.amber} />
                       <Text style={styles.lockPillText}>
                         Unlocks {formatRelativeFuture(nextAt)}
                       </Text>
+                    </View>
+                  ) : null}
+
+                  {lockToast[g.id] ? (
+                    <View style={styles.lockToast} testID={`goal-locktoast-${g.id}`}>
+                      <Ionicons name="time" size={14} color={colors.amber} />
+                      <Text style={styles.lockToastText}>{lockToast[g.id]}</Text>
                     </View>
                   ) : null}
 
@@ -235,27 +271,28 @@ export default function Goals() {
                     </TouchableOpacity>
                     <TouchableOpacity
                       testID={`goal-inc-${g.id}`}
-                      disabled={locked}
                       style={[
                         styles.smallBtn,
-                        { backgroundColor: meta.color },
-                        locked && styles.btnDisabled,
+                        { backgroundColor: locked ? colors.surfaceGlass : meta.color },
+                        locked && { borderWidth: 1, borderColor: colors.amber + '55' },
                       ]}
                       onPress={() => adjust(g, 1)}
                     >
                       <Ionicons
                         name={locked ? 'lock-closed' : 'add'}
                         size={18}
-                        color={colors.bg}
+                        color={locked ? colors.amber : colors.bg}
                       />
                     </TouchableOpacity>
                     <TouchableOpacity
                       testID={`goal-plus10-${g.id}`}
-                      disabled={locked}
-                      style={[styles.smallBtnWide, locked && styles.btnDisabled]}
+                      style={[
+                        styles.smallBtnWide,
+                        locked && { borderColor: colors.amber + '55' },
+                      ]}
                       onPress={() => adjust(g, 10)}
                     >
-                      <Text style={[styles.smallBtnText, { color: locked ? colors.textMuted : meta.color }]}>+10</Text>
+                      <Text style={[styles.smallBtnText, { color: locked ? colors.amber : meta.color }]}>+10</Text>
                     </TouchableOpacity>
                   </View>
                 </Card>
@@ -594,6 +631,25 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.2,
+  },
+  lockToast: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: colors.amber + '18',
+    borderColor: colors.amber + '88',
+    borderWidth: 1,
+    borderRadius: radii.md,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 8,
+  },
+  lockToastText: {
+    color: colors.amber,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+    flex: 1,
   },
   hint: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: spacing.md },
 

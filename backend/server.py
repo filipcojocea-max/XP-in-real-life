@@ -1435,7 +1435,12 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     update = {"current_value": requested_value, "completed": completed}
     if incrementing:
         update["last_ticked_at"] = now_iso()
+    elif requested_value < int(goal.get("current_value", 0)):
+        # User un-ticked: clear the lockout so they can re-tick immediately
+        # (matches the "until it's clicked again" UX).
+        update["last_ticked_at"] = None
     awarded_xp = 0
+    refunded_xp = 0
     if completed and not goal.get("completed"):
         update["completed_at"] = now_iso()
         awarded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
@@ -1445,11 +1450,22 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
         )
         prof = await db.profile.find_one({"_id": user_id})
         await check_and_unlock_achievements(prof)
+    elif goal.get("completed") and not completed:
+        # User reduced progress below target after the goal had already been
+        # marked complete → revoke the previously-awarded XP.
+        refunded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
+        update["completed_at"] = None
+        await db.profile.update_one(
+            {"_id": user_id},
+            {"$inc": {"goals_completed": -1, "total_xp": -refunded_xp}},
+        )
     await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
     goal = _enrich_goal_lock_state(goal)
     if awarded_xp:
         goal["awarded_xp"] = awarded_xp
+    if refunded_xp:
+        goal["refunded_xp"] = refunded_xp
     return goal
 
 
