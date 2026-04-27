@@ -1309,13 +1309,12 @@ async def uncomplete_task(task_id: str, body: CompleteTaskBody, user_id: str = D
 
 # --------- Goals ---------
 # ─────────────── Goal cycle lockout (per-tick rate limit) ───────────────
-# Long-term goals can only be ticked once per cycle. The cycle length is
-# derived from the goal's `unit`:
-#   days   →  1 day   (24h)
-#   weeks  →  7 days
-#   months → 29 days
+# Long-term goals can only be ticked once per cycle. The cycle length depends
+# on the goal's `unit`:
+#   days   →  one tick per **calendar date** (resets at local midnight)
+#   weeks  →  one tick per 7-day rolling window (from last tick)
+#   months →  one tick per 29-day rolling window
 GOAL_CYCLE_LOCKOUT: dict = {
-    "days": timedelta(days=1),
     "weeks": timedelta(days=7),
     "months": timedelta(days=29),
 }
@@ -1325,27 +1324,44 @@ def _goal_lockout_for(unit: Optional[str]) -> Optional[timedelta]:
     return GOAL_CYCLE_LOCKOUT.get((unit or "").lower())
 
 
-def _enrich_goal_lock_state(goal: dict) -> dict:
-    """Compute and attach `next_tick_available_at` / `is_locked` so the
-    frontend can render the cycle-lock UI without re-implementing the rules."""
-    lock = _goal_lockout_for(goal.get("unit"))
+def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
+    """Returns (locked, next_unlock_dt). For `days` we use calendar-date
+    boundaries — a goal ticked on 2026-04-27 is locked until 2026-04-28 00:00
+    *local* (midnight). For weeks/months we use a rolling-window timedelta."""
+    unit = (goal.get("unit") or "").lower()
     last_iso = goal.get("last_ticked_at")
-    if not lock or not last_iso:
-        goal["next_tick_available_at"] = None
-        goal["is_locked"] = False
-        return goal
+    if not last_iso:
+        return False, None
     try:
         last = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
     except Exception:
-        goal["next_tick_available_at"] = None
-        goal["is_locked"] = False
-        return goal
+        return False, None
+
+    if unit == "days":
+        # Calendar-day reset: next unlock is the start of the day AFTER
+        # the day on which we last ticked.
+        last_local = last.astimezone()
+        next_local_midnight = (last_local + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        now = datetime.now(next_local_midnight.tzinfo)
+        return now < next_local_midnight, next_local_midnight
+
+    lock = GOAL_CYCLE_LOCKOUT.get(unit)
+    if not lock:
+        return False, None
     next_at = last + lock
-    now = datetime.now(timezone.utc)
-    goal["next_tick_available_at"] = next_at.isoformat()
-    goal["is_locked"] = now < next_at
+    return datetime.now(timezone.utc) < next_at, next_at
+
+
+def _enrich_goal_lock_state(goal: dict) -> dict:
+    """Compute and attach `next_tick_available_at` / `is_locked` so the
+    frontend can render the cycle-lock UI without re-implementing the rules."""
+    locked, next_at = _is_goal_locked(goal)
+    goal["is_locked"] = locked
+    goal["next_tick_available_at"] = next_at.isoformat() if next_at else None
     return goal
 
 
@@ -1406,30 +1422,22 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
 
     # Cycle-lockout enforcement: if the user is *increasing* the tick count
     # but the goal is still inside its lockout window, refuse the request
-    # with a clear "next available" timestamp so the UI can show a countdown.
+    # with a clear "next available" timestamp so the UI can show the proper
+    # message. The unit-aware logic lives in `_is_goal_locked`.
     requested_value = max(0, min(body.current_value, goal["target_value"]))
     incrementing = requested_value > int(goal.get("current_value", 0))
-    lockout = _goal_lockout_for(goal.get("unit"))
-    if incrementing and lockout and goal.get("last_ticked_at"):
-        try:
-            last = datetime.fromisoformat(goal["last_ticked_at"].replace("Z", "+00:00"))
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
-            next_at = last + lockout
-            if datetime.now(timezone.utc) < next_at:
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error": "cycle_locked",
-                        "message": f"This goal is locked until the next {(goal.get('unit') or 'cycle').rstrip('s')} cycle.",
-                        "next_tick_available_at": next_at.isoformat(),
-                        "unit": goal.get("unit"),
-                    },
-                )
-        except HTTPException:
-            raise
-        except Exception:
-            pass
+    if incrementing:
+        locked, next_at = _is_goal_locked(goal)
+        if locked and next_at is not None:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "cycle_locked",
+                    "message": f"This goal is locked until the next {(goal.get('unit') or 'cycle').rstrip('s')} cycle.",
+                    "next_tick_available_at": next_at.isoformat(),
+                    "unit": goal.get("unit"),
+                },
+            )
 
     completed = requested_value >= goal["target_value"]
     update = {"current_value": requested_value, "completed": completed}

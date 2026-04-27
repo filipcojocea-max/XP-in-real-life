@@ -66,10 +66,19 @@ const UNIT_META: Record<DurationUnit, { label: string; icon: string }> = {
 
 // Per-unit lockout copy, shown as a 5-second auto-dismissing toast on the goal card.
 const LOCK_MESSAGE: Record<string, string> = {
-  days: 'You can only tick once per day',
-  weeks: 'You can only tick once per week',
-  months: 'You can only tick once per month',
+  days: 'Only once a day',
+  weeks: 'Only once a week',
+  months: 'Only once a month',
 };
+
+// Per-unit "unlocks at..." pill copy. The Days unit uses calendar-day reset
+// so it's always "tomorrow" — no need for an "in X hrs" countdown.
+function unlockPillLabel(unit: string | undefined, nextAt: Date | null): string {
+  const u = (unit || '').toLowerCase();
+  if (u === 'days') return 'Unlocks tomorrow';
+  if (!nextAt) return 'Locked';
+  return `Unlocks ${formatRelativeFuture(nextAt)}`;
+}
 
 export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
@@ -245,11 +254,11 @@ export default function Goals() {
                     <View style={[styles.barFill, { width: `${pct * 100}%`, backgroundColor: meta.color }]} />
                   </View>
 
-                  {locked && nextAt && !lockToast[g.id] ? (
+                  {locked && !lockToast[g.id] ? (
                     <View style={styles.lockPill} testID={`goal-lock-${g.id}`}>
                       <Ionicons name="lock-closed" size={11} color={colors.amber} />
                       <Text style={styles.lockPillText}>
-                        Unlocks {formatRelativeFuture(nextAt)}
+                        {unlockPillLabel(g.unit, nextAt)}
                       </Text>
                     </View>
                   ) : null}

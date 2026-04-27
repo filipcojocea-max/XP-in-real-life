@@ -297,7 +297,7 @@ export default function ProfileScreen() {
                 <Ionicons name="cloud-upload" size={18} color={colors.green} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.actionTitle}>Create Account</Text>
+                <Text style={styles.actionTitle}>Login / Sign up</Text>
                 <Text style={styles.actionDesc}>Save your progress to the cloud</Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
