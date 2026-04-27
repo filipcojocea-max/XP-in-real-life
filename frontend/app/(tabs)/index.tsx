@@ -134,7 +134,7 @@ export default function Home() {
             <View style={styles.emblemCore}>
               <View style={styles.emblemGlow} />
               {profile.level >= 2 ? (
-                <PremiumShield size={110} />
+                <PremiumShield size={110} level={profile.level} />
               ) : (
                 <>
                   <Ionicons name="shield" size={88} color={colors.cyan} />
