@@ -658,6 +658,9 @@ export type Player = {
   // arrive as -1 sentinels and the frontend should render them as ∞ + golden.
   is_admin?: boolean;
   is_admin_view?: boolean;
+  // ISO-8601 UTC timestamp of the last time this player opened the app.
+  // Used by Friends → My Friends to render "Active 1.5 hrs ago" labels.
+  last_seen_at?: string | null;
 };
 
 export type FriendRequestEntry = {

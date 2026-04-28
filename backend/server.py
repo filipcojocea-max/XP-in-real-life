@@ -236,22 +236,53 @@ async def get_user_or_legacy(
     x_anonymous_id: Optional[str] = Header(None, alias="X-Anonymous-Id"),
 ) -> str:
     """Return user_id from JWT, or X-Anonymous-Id (anonymous mode), or 'main' fallback.
-    Anonymous IDs are prefixed with 'anon-' so they can't collide with real user UUIDs."""
+    Anonymous IDs are prefixed with 'anon-' so they can't collide with real user UUIDs.
+    Side-effect: refreshes the user's `last_seen_at` timestamp at most once per
+    minute so the Friends list can show "Last seen X hrs ago" without
+    hammering MongoDB on every API call."""
+    user_id: Optional[str] = None
     if creds and creds.credentials:
         try:
             payload = decode_token(creds.credentials)
-            user_id = payload.get("sub")
-            if user_id:
-                user = await db.users.find_one({"_id": user_id}, {"password_hash": 0})
+            uid = payload.get("sub")
+            if uid:
+                user = await db.users.find_one({"_id": uid}, {"password_hash": 0})
                 if user and user.get("verified"):
-                    return user_id
+                    user_id = uid
         except Exception:
             pass
-    if x_anonymous_id and len(x_anonymous_id) >= 8 and len(x_anonymous_id) <= 64:
-        # Sanitize: only [a-zA-Z0-9-]
+    if not user_id and x_anonymous_id and len(x_anonymous_id) >= 8 and len(x_anonymous_id) <= 64:
         clean = "".join(c for c in x_anonymous_id if c.isalnum() or c == "-")[:64]
-        return f"anon-{clean}"
-    return "main"
+        user_id = f"anon-{clean}"
+    if not user_id:
+        user_id = "main"
+    await _touch_last_seen(user_id)
+    return user_id
+
+
+# In-memory cache: user_id → last write timestamp (UTC). Lets us skip the
+# DB write when we've already updated within the past minute.
+_LAST_SEEN_THROTTLE: dict[str, datetime] = {}
+_LAST_SEEN_THROTTLE_SECONDS = 60
+
+
+async def _touch_last_seen(user_id: str) -> None:
+    """Best-effort refresh of profile.last_seen_at. Throttled per-process so
+    we don't issue a DB write on every single API call. Failures are
+    swallowed — `last_seen_at` is a soft, non-critical field."""
+    try:
+        now = datetime.now(timezone.utc)
+        prev = _LAST_SEEN_THROTTLE.get(user_id)
+        if prev and (now - prev).total_seconds() < _LAST_SEEN_THROTTLE_SECONDS:
+            return
+        _LAST_SEEN_THROTTLE[user_id] = now
+        await db.profile.update_one(
+            {"_id": user_id},
+            {"$set": {"last_seen_at": now.isoformat()}},
+            upsert=False,  # don't create empty profiles for unauth pings
+        )
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------
@@ -2623,6 +2654,10 @@ def _serialize_player(prof: dict, status: str = "none") -> dict:
         "friend_status": status,  # none | pending_outgoing | pending_incoming | friends | self
         "is_admin": bool(is_admin),
         "is_admin_view": bool(show_unlimited),  # frontend renders ∞ + golden when true
+        # ISO-8601 UTC timestamp of the last time this user opened the
+        # app / hit our API. Refreshed (throttled to once-per-minute) by
+        # `_touch_last_seen` inside `get_user_or_legacy`.
+        "last_seen_at": prof.get("last_seen_at"),
     }
     if show_unlimited:
         base.update({

@@ -407,6 +407,13 @@ function PlayerCard({ player, onPress, onAddFriend, saving }: {
   saving?: boolean;
 }) {
   const adminView = !!player.is_admin_view;
+  // "Active 1.5 hrs ago" label — only meaningful (and only shown) when
+  // they're already on our friends list. Anyone else's last_seen is
+  // hidden for privacy.
+  const lastSeenText =
+    player.friend_status === 'friends' && player.last_seen_at
+      ? formatLastSeen(player.last_seen_at)
+      : null;
   return (
     <TouchableOpacity
       activeOpacity={0.85}
@@ -431,10 +438,51 @@ function PlayerCard({ player, onPress, onAddFriend, saving }: {
             </Text>
           </View>
         </View>
+        {lastSeenText ? (
+          <View style={styles.lastSeenRow} testID={`last-seen-${player.user_id}`}>
+            <Ionicons name="time-outline" size={10} color={colors.textMuted} />
+            <Text style={styles.lastSeenText} numberOfLines={1}>{lastSeenText}</Text>
+          </View>
+        ) : null}
       </View>
       {onAddFriend ? <FriendActionButton player={player} onAddFriend={onAddFriend} saving={saving} /> : null}
     </TouchableOpacity>
   );
+}
+
+/**
+ * Humanise an ISO-8601 timestamp into the format the spec requested:
+ *   - <1 min  → "Active just now"
+ *   - <1 hr   → "Active less than 1hr ago"  (e.g. anything under 60 min)
+ *   - <24 hr  → "Active 1.5 hrs ago" (one decimal place)
+ *   - <30 d   → "Active 3 days ago"
+ *   - else    → "Active a while ago"
+ */
+function formatLastSeen(iso: string): string {
+  try {
+    const t = new Date(iso).getTime();
+    if (!Number.isFinite(t)) return 'Last seen on this app: unknown';
+    const diffMs = Date.now() - t;
+    if (diffMs < 0) return 'Active just now';
+    const diffMin = diffMs / 60000;
+    if (diffMin < 1) return 'Active just now';
+    if (diffMin < 60) return 'Active less than 1hr ago';
+    const diffH = diffMin / 60;
+    if (diffH < 24) {
+      // 1.0, 1.5, 2.0, ... — one decimal so "1.5 hrs ago" is preserved
+      const rounded = Math.round(diffH * 2) / 2;
+      const display = Number.isInteger(rounded) ? `${rounded.toFixed(0)}` : `${rounded.toFixed(1)}`;
+      return `Active ${display} hr${rounded === 1 ? '' : 's'} ago`;
+    }
+    const diffD = diffH / 24;
+    if (diffD < 30) {
+      const d = Math.floor(diffD);
+      return `Active ${d} day${d === 1 ? '' : 's'} ago`;
+    }
+    return 'Active a while ago';
+  } catch {
+    return 'Last seen on this app: unknown';
+  }
 }
 
 function PlayerAvatar({ player }: { player: Player }) {
@@ -730,6 +778,17 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   statChipText: { color: colors.cyan, fontSize: 11, fontWeight: '800' },
+  lastSeenRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+  },
+  lastSeenText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '500',
+  },
 
   actionBtn: {
     flexDirection: 'row',

@@ -24,8 +24,15 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   // instead of bouncing the user back into the setup flow on stale state.
   useEffect(() => {
     let cancelled = false;
+    // CRITICAL: clear `anchorChecked` BEFORE the new fetch resolves so
+    // the routing-decision effect below waits for fresh data and never
+    // routes on stale `anchorMissing=true` from the previous render.
+    // Without this, guest-mode users who answer the two day-anchor
+    // questions get bounced back to the setup screen and have to answer
+    // them again (the routing effect fires on segment change while the
+    // GET /profile is still in flight).
+    setAnchorChecked(false);
     if (loading || !hasAccess) {
-      setAnchorChecked(false);
       setAnchorMissing(false);
       return;
     }

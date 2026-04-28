@@ -10,7 +10,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from 'expo-router';
-import Svg, { Rect, Line, Text as SvgText } from 'react-native-svg';
+import Svg, { Rect, Line, Text as SvgText, Polyline, Circle } from 'react-native-svg';
 import Card from '../../src/components/Card';
 import PointsPlusModal from '../../src/components/PointsPlusModal';
 import { api, WeeklyStats, Profile, Achievement } from '../../src/api';
@@ -49,7 +49,16 @@ export default function Progress() {
     load();
   }, [load]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  // Real-time-feel: while the Progress tab is in focus, poll every
+  // 4 seconds so the current day's bar visibly rises as the user earns
+  // XP from any other tab. (useFocusEffect auto-cancels when blurred.)
+  useFocusEffect(useCallback(() => {
+    load();
+    const id = setInterval(() => {
+      load();
+    }, 4000);
+    return () => clearInterval(id);
+  }, [load]));
 
   if (loading || !weekly || !profile || !byArea) {
     return (
@@ -68,6 +77,17 @@ export default function Progress() {
   const barW = (chartW - pad * 2) / weekly.days.length - 6;
   const totalWeekXp = weekly.days.reduce((s, d) => s + d.xp, 0);
   const totalAreaXp = Object.values(byArea).reduce((s, v) => s + v, 0);
+
+  // Today is the LAST day in the weekly array (server orders oldest→newest).
+  const todayIdx = weekly.days.length - 1;
+  // Pre-computed coordinates so we can share them between the bars,
+  // their value labels, and the overlay line graph.
+  const segmentW = (chartW - pad * 2) / weekly.days.length;
+  const xCenters = weekly.days.map((_, i) => pad + i * segmentW + segmentW / 2);
+  const yForXp = (xp: number) => chartH - pad - ((chartH - pad * 2) * xp) / maxXp;
+  const linePoints = weekly.days
+    .map((d, i) => `${xCenters[i]},${yForXp(d.xp)}`)
+    .join(' ');
 
   const unlockedCount = achievements.filter((a) => a.unlocked).length;
 
@@ -112,7 +132,7 @@ export default function Progress() {
           </Card>
         </View>
 
-        {/* Weekly XP chart */}
+        {/* Weekly XP — bar chart with per-day XP labels on top */}
         <Card style={styles.chartCard}>
           <View style={styles.chartHead}>
             <Text style={styles.sectionTitle}>Weekly XP</Text>
@@ -129,8 +149,9 @@ export default function Progress() {
             />
             {weekly.days.map((d, i) => {
               const h = ((chartH - pad * 2) * d.xp) / maxXp;
-              const x = pad + i * ((chartW - pad * 2) / weekly.days.length) + 3;
+              const x = pad + i * segmentW + 3;
               const y = chartH - pad - h;
+              const isToday = i === todayIdx;
               return (
                 <React.Fragment key={d.date}>
                   <Rect
@@ -139,14 +160,115 @@ export default function Progress() {
                     width={barW}
                     height={Math.max(2, h)}
                     rx={4}
-                    fill={d.xp > 0 ? colors.green : 'rgba(255,255,255,0.1)'}
+                    // Today's bar uses the brighter cyan accent so users
+                    // can see it rise in real time as they earn XP.
+                    fill={
+                      d.xp > 0
+                        ? isToday
+                          ? colors.cyan
+                          : colors.green
+                        : 'rgba(255,255,255,0.1)'
+                    }
                   />
+                  {/* XP value above each bar — only shown if there's
+                      actually XP earned that day, otherwise it'd just
+                      clutter every bar with "0". */}
+                  {d.xp > 0 ? (
+                    <SvgText
+                      x={x + barW / 2}
+                      y={y - 4}
+                      fontSize="10"
+                      fontWeight="800"
+                      fill={isToday ? colors.cyan : colors.text}
+                      textAnchor="middle"
+                    >
+                      {d.xp}
+                    </SvgText>
+                  ) : null}
                   <SvgText
                     x={x + barW / 2}
                     y={chartH - pad + 14}
                     fontSize="10"
                     fontWeight="700"
-                    fill={colors.textMuted}
+                    fill={isToday ? colors.cyan : colors.textMuted}
+                    textAnchor="middle"
+                  >
+                    {d.day}
+                  </SvgText>
+                </React.Fragment>
+              );
+            })}
+          </Svg>
+        </Card>
+
+        {/* Weekly XP — companion line graph showing the same data as the
+            bar chart so users can read the trend at a glance. */}
+        <Card style={[styles.chartCard, { marginTop: spacing.md }]}>
+          <View style={styles.chartHead}>
+            <Text style={styles.sectionTitle}>Weekly XP — Trend</Text>
+            <Text style={[styles.chartTotal, { color: colors.cyan }]}>Line view</Text>
+          </View>
+          <Svg width={chartW} height={chartH}>
+            <Line
+              x1={pad}
+              y1={chartH - pad}
+              x2={chartW - pad}
+              y2={chartH - pad}
+              stroke={colors.border}
+              strokeWidth={1}
+            />
+            {/* Faint baseline grid at 50% & 100% of max so the trend is
+                anchored visually. */}
+            <Line
+              x1={pad}
+              y1={yForXp(maxXp / 2)}
+              x2={chartW - pad}
+              y2={yForXp(maxXp / 2)}
+              stroke={colors.border}
+              strokeWidth={1}
+              strokeDasharray="3,4"
+              opacity={0.5}
+            />
+            <Polyline
+              points={linePoints}
+              fill="none"
+              stroke={colors.cyan}
+              strokeWidth={2.5}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+            {weekly.days.map((d, i) => {
+              const cx = xCenters[i];
+              const cy = yForXp(d.xp);
+              const isToday = i === todayIdx;
+              return (
+                <React.Fragment key={`pt-${d.date}`}>
+                  <Circle
+                    cx={cx}
+                    cy={cy}
+                    r={isToday ? 5 : 3.5}
+                    fill={isToday ? colors.cyan : colors.green}
+                    stroke={colors.bg}
+                    strokeWidth={1.5}
+                  />
+                  {d.xp > 0 ? (
+                    <SvgText
+                      x={cx}
+                      y={cy - 8}
+                      fontSize="10"
+                      fontWeight="800"
+                      fill={isToday ? colors.cyan : colors.text}
+                      textAnchor="middle"
+                    >
+                      {d.xp}
+                    </SvgText>
+                  ) : null}
+                  <SvgText
+                    x={cx}
+                    y={chartH - pad + 14}
+                    fontSize="10"
+                    fontWeight="700"
+                    fill={isToday ? colors.cyan : colors.textMuted}
                     textAnchor="middle"
                   >
                     {d.day}

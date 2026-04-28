@@ -316,16 +316,6 @@ export default function Goals() {
                         color={locked ? colors.amber : colors.bg}
                       />
                     </TouchableOpacity>
-                    <TouchableOpacity
-                      testID={`goal-plus10-${g.id}`}
-                      style={[
-                        styles.smallBtnWide,
-                        locked && { borderColor: colors.amber + '55' },
-                      ]}
-                      onPress={() => adjust(g, 10)}
-                    >
-                      <Text style={[styles.smallBtnText, { color: locked ? colors.amber : meta.color }]}>+10</Text>
-                    </TouchableOpacity>
                   </View>
                 </Card>
               </Pressable>
