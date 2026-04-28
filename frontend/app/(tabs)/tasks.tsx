@@ -547,14 +547,19 @@ function TaskModal({
   editingTask,
   onClose,
   onSaved,
+  isAdmin,
 }: {
   visible: boolean;
   editingTask: Task | null;
   onClose: () => void;
   onSaved: () => void;
+  isAdmin?: boolean;
 }) {
   const isEdit = !!editingTask;
+  // Creator/Admin can edit XP on default quests and set custom XP up to 100,000.
   const isDefault = !!editingTask?.is_default;
+  const xpLocked = isDefault && !isAdmin;
+  const xpMax = isAdmin ? 100000 : 20;
 
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
@@ -623,7 +628,8 @@ function TaskModal({
       const scheduled_time = reminderOn ? formatTime(scheduledDate) : null;
       if (isEdit && editingTask) {
         // For default tasks: only send editable fields. XP, focus_area,
-        // time_slot and scheduled_time are all locked.
+        // time_slot and scheduled_time are all locked — EXCEPT for the
+        // Creator/Admin who can edit XP on default quests too.
         const payload: any = {
           title: title.trim(),
           description: desc.trim(),
@@ -634,6 +640,10 @@ function TaskModal({
           payload.focus_area = area;
           payload.time_slot = slot;
           payload.scheduled_time = scheduled_time;
+        } else if (isAdmin) {
+          // Admin-only: allow editing XP on default tasks
+          const adminXp = parseInt(xp, 10);
+          if (!isNaN(adminXp)) payload.xp_value = Math.max(1, Math.min(100000, adminXp));
         }
         const updated = await api.updateTask(editingTask.id, payload);
         if (updated.reminder_enabled && updated.scheduled_time) {
@@ -838,10 +848,12 @@ function TaskModal({
             ) : null}
 
             <View style={styles.labelRow}>
-              <Text style={styles.inputLabel}>XP Reward {!isDefault ? '(max 20)' : ''}</Text>
-              {isDefault ? <Ionicons name="lock-closed" size={11} color={colors.textMuted} /> : null}
+              <Text style={styles.inputLabel}>
+                XP Reward {xpLocked ? '' : `(max ${isAdmin ? '100000' : '20'})`}
+              </Text>
+              {xpLocked ? <Ionicons name="lock-closed" size={11} color={colors.textMuted} /> : null}
             </View>
-            {isDefault ? (
+            {xpLocked ? (
               <View style={styles.lockedXpRow} testID="task-xp-locked">
                 <Ionicons name="flash" size={16} color={colors.amber} />
                 <Text style={styles.lockedXpValue}>{xp} XP</Text>
@@ -854,12 +866,11 @@ function TaskModal({
                 style={styles.input}
                 value={xp}
                 onChangeText={(t) => {
-                  // Clamp custom-task XP at 20
                   const cleaned = t.replace(/[^0-9]/g, '');
                   if (cleaned !== '') {
                     const n = parseInt(cleaned, 10);
-                    if (n > 20) {
-                      setXp('20');
+                    if (n > xpMax) {
+                      setXp(String(xpMax));
                       return;
                     }
                   }
@@ -868,8 +879,12 @@ function TaskModal({
                 placeholderTextColor={colors.textMuted}
               />
             )}
-            {!isDefault ? (
-              <Text style={styles.xpHint}>Custom quests are capped at 20 XP each.</Text>
+            {!xpLocked ? (
+              <Text style={styles.xpHint}>
+                {isAdmin
+                  ? 'Creator · Premium+ — XP up to 100,000 per quest.'
+                  : 'Custom quests are capped at 20 XP each.'}
+              </Text>
             ) : null}
 
             <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md }}>
