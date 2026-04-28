@@ -127,19 +127,67 @@ export async function hasGrantedPermissions(): Promise<boolean> {
 
 /** Opens the Health Connect permission UI and resolves once the user is back. */
 export async function requestPermissions(): Promise<boolean> {
+  // Defensive: bail out cleanly on any non-Android platform so callers
+  // never have to special-case the call. Throws a soft, user-friendly
+  // error that the UI can render in an Alert without crashing the app.
+  if (Platform.OS !== 'android') {
+    throw new Error('Samsung Health is only available on Android.');
+  }
   const hc = tryLoadHC();
-  if (!hc) throw new Error('Health Connect is not available on this device.');
+  if (!hc) {
+    // The native module is missing — happens in Expo Go and old dev
+    // builds that haven't been re-prebuilt after adding the dependency.
+    throw new Error(
+      'Health Connect is not available in this build. Re-build the app with the latest dev client to enable Samsung Health integration.',
+    );
+  }
+
+  // STEP 1 — Make sure Health Connect itself is reachable. This call
+  // also surfaces "not installed" / "update required" cases via
+  // getSdkStatus instead of throwing a native exception that would
+  // close the app.
+  let availability: HealthConnectAvailability;
+  try {
+    availability = await getAvailability();
+  } catch (e) {
+    throw new Error(
+      'Health Connect could not be reached. Please install or update the Health Connect app from the Play Store and try again.',
+    );
+  }
+  if (availability === 'not_installed') {
+    throw new Error(
+      'Health Connect app is not installed on this device. Install it from the Play Store and try again.',
+    );
+  }
+  if (availability === 'update_required') {
+    throw new Error(
+      'Your Health Connect app is out of date. Update it from the Play Store and try again.',
+    );
+  }
+  if (availability !== 'available') {
+    throw new Error(
+      'Samsung Health is not available on this device or build.',
+    );
+  }
+
+  // STEP 2 — Initialize the SDK. Wrap in try/catch so a manifest mismatch
+  // or missing native module surfaces a friendly message instead of a
+  // hard crash.
   try {
     await hc.initialize();
   } catch (e) {
-    throw new Error('Health Connect could not be initialized. Make sure the Health Connect app is installed and up to date.');
+    throw new Error(
+      'Health Connect could not be initialized. Make sure the Health Connect app is installed, updated and that this app has been granted access in Android settings.',
+    );
   }
-  // Some manufacturers (Samsung One UI) still crash the app with a native
-  // SecurityException if any single record-type in the request list isn't
-  // declared in AndroidManifest.xml. To stay safe even when one of the
-  // permissions is rolled out late by Health Connect, ask for permissions
-  // one at a time and just skip the ones that throw — the user will still
-  // be granted the ones that succeeded.
+
+  // STEP 3 — Request the read permissions one-by-one. Some manufacturers
+  // (Samsung One UI) still throw a native SecurityException if any
+  // single record-type in the request list isn't declared in
+  // AndroidManifest.xml, which can crash the app. Asking one at a time
+  // and swallowing per-permission failures keeps the app alive even if
+  // one of the permissions is rolled out late by Health Connect — the
+  // user will still be granted the ones that succeeded.
   let anyGranted = false;
   for (const perm of REQUIRED_PERMISSIONS) {
     try {
@@ -151,7 +199,12 @@ export async function requestPermissions(): Promise<boolean> {
     }
   }
   if (anyGranted) return true;
-  return await hasGrantedPermissions();
+  // Final fallback — re-query whatever the user actually granted.
+  try {
+    return await hasGrantedPermissions();
+  } catch {
+    return false;
+  }
 }
 
 /**

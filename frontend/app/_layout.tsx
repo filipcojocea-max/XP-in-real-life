@@ -8,6 +8,7 @@ import { api } from '../src/api';
 import { enableAdminTextOverride, disableAdminTextOverride } from '../src/adminTextOverride';
 import { ImmersiveProvider } from '../src/immersive';
 import { RevealZone } from '../src/components/RevealZone';
+import { NotificationPermissionPrompt } from '../src/NotificationPermissionPrompt';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { loading, token, anonymousId } = useAuth();
@@ -125,6 +126,10 @@ export default function RootLayout() {
             </Stack>
             {/* Bottom 40-px swipe-up reveal target for Immersive Mode. */}
             <RevealZone />
+            {/* On first launch, ask for notification permission so we
+                can fire the daily motivational push at the user's
+                scheduled times. */}
+            <NotificationPermissionPrompt />
           </AuthGate>
         </View>
       </ImmersiveProvider>

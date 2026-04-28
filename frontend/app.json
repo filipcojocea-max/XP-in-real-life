@@ -2,9 +2,9 @@
   "expo": {
     "name": "XP in Real Life",
     "slug": "xp-confidence",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "orientation": "portrait",
-    "icon": "./asseyouts/images/icon.png",
+    "icon": "./assets/images/icon.png",
     "scheme": "xpconfidence",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -23,7 +23,7 @@
     },
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
-      "versionCode": 1010,
+      "versionCode": 1011,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"
@@ -38,7 +38,8 @@
         "android.permission.health.READ_SLEEP",
         "android.permission.health.READ_STEPS",
         "android.permission.health.READ_HEART_RATE",
-        "android.permission.health.READ_OXYGEN_SATURATION"
+        "android.permission.health.READ_OXYGEN_SATURATION",
+        "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
       ]
     },
     "web": {
@@ -91,7 +92,8 @@
           "microphonePermission": false,
           "recordAudioAndroid": false
         }
-      ]
+      ],
+      "react-native-health-connect"
     ],
     "experiments": {
       "typedRoutes": true
