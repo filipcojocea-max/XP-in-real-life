@@ -5,6 +5,7 @@ import { View, ActivityIndicator } from 'react-native';
 import { colors, applyAdminTheme, clearAdminTheme } from '../src/theme';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
+import { enableAdminTextOverride, disableAdminTextOverride } from '../src/adminTextOverride';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { loading, token, anonymousId } = useAuth();
@@ -34,8 +35,10 @@ function AuthGate({ children }: { children: React.ReactNode }) {
         // Apply Premium+ golden text theme for the Creator/Admin globally.
         if (p.is_admin) {
           applyAdminTheme();
+          enableAdminTextOverride();
         } else {
           clearAdminTheme();
+          disableAdminTextOverride();
         }
       } catch {
         // swallow — profile call may fail if user hasn't finished onboarding yet

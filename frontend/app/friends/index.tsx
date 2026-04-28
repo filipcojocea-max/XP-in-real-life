@@ -19,6 +19,7 @@ import { api, Player, FriendStatus, FriendRequestEntry } from '../../src/api';
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 import LeaderboardTab from '../../src/components/LeaderboardTab';
+import PremiumShield from '../../src/components/PremiumShield';
 
 type TopTab = 'players' | 'friends' | 'leaderboard';
 type FriendsSubTab = 'requests' | 'mine';
@@ -519,25 +520,40 @@ function PlayerProfileModal({
           <View style={{ width: 36 }} />
         </View>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xl }}>
-          <View style={[styles.modalAvatarWrap, player.is_admin_view && { borderWidth: 4, borderColor: '#FFD700', borderRadius: 90, padding: 4 }]}>
-            {player.avatar_base64 ? (
-              <Image
-                source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }}
-                style={[styles.bigAvatar, player.is_admin_view && { borderWidth: 2, borderColor: '#FFD700' }]}
-              />
-            ) : (
-              <View style={[styles.bigAvatar, styles.avatarFallback, player.is_admin_view && { borderColor: '#FFD700', backgroundColor: '#FFD70022' }]}>
-                <Text style={[styles.bigAvatarLetter, player.is_admin_view && { color: '#FFD700' }]}>
-                  {(player.name || '?').slice(0, 1).toUpperCase()}
+          {player.is_admin_view ? (
+            <View style={{ alignItems: 'center', marginBottom: spacing.md }}>
+              <PremiumShield level={999} size={140} />
+              <View style={{
+                marginTop: 12,
+                paddingHorizontal: 14, paddingVertical: 6,
+                borderRadius: 999,
+                backgroundColor: '#FFD700',
+                borderWidth: 2, borderColor: '#FFEB3B',
+              }}>
+                <Text style={{ color: colors.bg, fontWeight: '900', fontSize: 12, letterSpacing: 1.2 }}>
+                  ∞ CREATOR · PREMIUM+
                 </Text>
               </View>
-            )}
-            <View style={[styles.levelPill, player.is_admin_view && { backgroundColor: '#FFD700' }]}>
-              <Text style={[styles.levelPillText, player.is_admin_view && { color: colors.bg }]}>
-                {player.is_admin_view ? '∞ PREMIUM+' : `LV ${player.level}`}
-              </Text>
             </View>
-          </View>
+          ) : (
+            <View style={[styles.modalAvatarWrap]}>
+              {player.avatar_base64 ? (
+                <Image
+                  source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }}
+                  style={styles.bigAvatar}
+                />
+              ) : (
+                <View style={[styles.bigAvatar, styles.avatarFallback]}>
+                  <Text style={styles.bigAvatarLetter}>
+                    {(player.name || '?').slice(0, 1).toUpperCase()}
+                  </Text>
+                </View>
+              )}
+              <View style={styles.levelPill}>
+                <Text style={styles.levelPillText}>LV {player.level}</Text>
+              </View>
+            </View>
+          )}
           <Text style={[styles.modalName, player.is_admin_view && { color: '#FFD700' }]}>{player.name}</Text>
 
           <View style={styles.modalStatsGrid}>

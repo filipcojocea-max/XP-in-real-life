@@ -137,11 +137,23 @@ const TIERS = {
     vertex: '#FFFFFF',
     bolt: { fill: '#15803D', stroke: '#22C55E', highlight: '#BBF7D0' },
   },
+  // Creator/Admin: Lv200 design but with bright YELLOW outline
+  creator_yellow: {
+    facets: GOLD,
+    rim: ['#FFEB3B', '#FFD700', '#FBC02D'] as [string, string, string],
+    innerRim: '#FFFDE7',
+    ridge: '#FFEB3B',
+    glow: '#FFD700',
+    vertex: '#FFFFFF',
+    bolt: { fill: '#15803D', stroke: '#22C55E', highlight: '#BBF7D0' },
+  },
 } satisfies Record<string, Palette>;
 
 type TierKey = keyof typeof TIERS;
 
 function pickTier(level: number): { tier: TierKey; sizeMul: number } {
+  // Creator/Admin sentinel — backend sends level=999 when others view the admin
+  if (level >= 999) return { tier: 'creator_yellow', sizeMul: 1.18 };
   if (level >= 200) return { tier: 'gold_black', sizeMul: 1.18 };
   if (level >= 150) return { tier: 'gold_gold', sizeMul: 1 };
   if (level >= 125) return { tier: 'gold_yellow_glow', sizeMul: 1 };
