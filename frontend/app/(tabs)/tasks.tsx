@@ -54,6 +54,7 @@ export default function Tasks() {
   const [actionTask, setActionTask] = useState<Task | null>(null);
   const [xpFloater, setXpFloater] = useState<{ value: number } | null>(null);
   const [wakeTime, setWakeTime] = useState<string>('07:00');
+  const [tz, setTz] = useState<string | null>(null);
   const [customCount, setCustomCount] = useState<number>(0);
   const floatAnim = useMemo(() => new Animated.Value(0), []);
   const { isAnonymous } = useAuth();
@@ -61,9 +62,10 @@ export default function Tasks() {
   const load = useCallback(async () => {
     try {
       const prof = await api.getProfile().catch(() => null);
-      const wt = prof?.wake_time || '07:00';
+      const wt = prof?.day_start_time || prof?.wake_time || '07:00';
       setWakeTime(wt);
-      const today = userDate(wt);
+      setTz(prof?.timezone || null);
+      const today = userDate(wt, prof?.timezone || null);
       const r = await api.listTasks(today);
       setTasks(r.tasks);
       setCustomCount(r.tasks.filter((t) => !t.is_default).length);
@@ -104,7 +106,7 @@ export default function Tasks() {
       prev.map((t) => (t.id === task.id ? { ...t, completed: !wasCompleted } : t))
     );
     try {
-      const today = userDate(wakeTime);
+      const today = userDate(wakeTime, tz);
       if (wasCompleted) {
         // Un-tick: remove XP
         const res = await api.uncompleteTask(task.id, today);

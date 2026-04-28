@@ -292,6 +292,36 @@ def today_str() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def user_today_str(prof: Optional[dict]) -> str:
+    """Return the user's current 'today' as YYYY-MM-DD, using their
+    `timezone` (IANA) and `day_start_time` (HH:MM) as the day boundary.
+
+    The day rolls over at `day_start_time` local — NOT at midnight.
+    Falls back to server UTC if either field is unset.
+    """
+    if not prof:
+        return today_str()
+    tz_name = prof.get("timezone")
+    day_start = prof.get("day_start_time") or prof.get("wake_time") or "07:00"
+    if not tz_name:
+        return today_str()
+    try:
+        from zoneinfo import ZoneInfo
+        local_now = datetime.now(ZoneInfo(tz_name))
+        hh, mm = [int(x) for x in (day_start or "07:00").split(":")[:2]]
+        # If local now is BEFORE day_start, we still belong to yesterday
+        if (local_now.hour, local_now.minute) < (hh, mm):
+            local_now = local_now - timedelta(days=1)
+        return local_now.date().isoformat()
+    except Exception:
+        return today_str()
+
+
+async def user_today_str_for(user_id: str) -> str:
+    prof = await db.profile.find_one({"_id": user_id}, {"timezone": 1, "day_start_time": 1, "wake_time": 1})
+    return user_today_str(prof)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -366,8 +396,13 @@ async def get_or_create_profile_for(user_id: str, full_name: str = "Hero") -> di
             "onboarding": {},
             "bio": "",
             "avatar_base64": None,
-            "wake_time": "07:00",
+            "wake_time": "07:00",                   # legacy — kept for backward compat
             "morning_setup_done": False,
+            # New day-boundary system: `day_start_time` in user's `timezone` is
+            # the authoritative "start of day" for tasks/challenges/sleep.
+            "day_start_time": None,                 # "HH:MM" — null until answered
+            "timezone": None,                       # IANA zone e.g. "Australia/Sydney"
+            "onboarding_tz_done": False,            # forces existing users to re-answer
             "created_at": now_iso(),
         }
         await db.profile.insert_one(prof)
@@ -408,6 +443,10 @@ def serialize_profile(prof: dict) -> dict:
         "avatar_base64": prof.get("avatar_base64"),
         "wake_time": prof.get("wake_time", "07:00"),
         "morning_setup_done": prof.get("morning_setup_done", False),
+        # New day-anchor system
+        "day_start_time": prof.get("day_start_time"),
+        "timezone": prof.get("timezone"),
+        "onboarding_tz_done": bool(prof.get("onboarding_tz_done", False)),
         # XP Boost state (Points+ feature)
         "boosts_unlocked": prof.get("boosts_unlocked", False),
         "active_boost": _serialize_active_boost(prof),
@@ -621,9 +660,13 @@ def _clamp_goal_xp(unit: Optional[str], xp: Optional[int]) -> int:
 
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
-    wake_time: Optional[str] = None  # "HH:MM" 24h — used to compute daily reset boundary (wake - 2h)
-    morning_setup_done: Optional[bool] = None  # set true after the very-first "morning time" question
-    tz_offset_minutes: Optional[int] = None  # user's local UTC offset (e.g. -420 for PST); for weekly leaderboard
+    wake_time: Optional[str] = None  # legacy — kept for backward compat
+    morning_setup_done: Optional[bool] = None
+    tz_offset_minutes: Optional[int] = None  # viewer's current UTC offset (weekly leaderboard)
+    # New day-anchor system — LOCKED once set (only profile/reset clears them).
+    day_start_time: Optional[str] = None  # "HH:MM" 24h, in user's timezone
+    timezone: Optional[str] = None         # IANA e.g. "Australia/Sydney"
+    onboarding_tz_done: Optional[bool] = None
 
 
 class CompleteTaskBody(BaseModel):
@@ -1064,8 +1107,27 @@ async def get_profile(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.put("/profile")
 async def update_profile(body: ProfileUpdate, user_id: str = Depends(get_user_or_legacy)):
-    await get_or_create_profile_for(user_id)
+    prof = await get_or_create_profile_for(user_id)
     update = {k: v for k, v in body.dict().items() if v is not None}
+
+    # Lock rule: once `timezone` / `day_start_time` are set, they can only be
+    # changed via POST /api/profile/reset. Allow the first-write transparently.
+    if "timezone" in update and prof.get("timezone"):
+        raise HTTPException(400, detail={
+            "error": "tz_locked",
+            "message": "Timezone is locked. Reset your progress in Profile to change it.",
+        })
+    if "day_start_time" in update and prof.get("day_start_time"):
+        raise HTTPException(400, detail={
+            "error": "day_start_locked",
+            "message": "Morning start time is locked. Reset your progress in Profile to change it.",
+        })
+    # When user answers the two onboarding questions, auto-flip the flag
+    if ("timezone" in update or "day_start_time" in update) and (
+        update.get("timezone") or prof.get("timezone")
+    ) and (update.get("day_start_time") or prof.get("day_start_time")):
+        update["onboarding_tz_done"] = True
+
     if update:
         await db.profile.update_one({"_id": user_id}, {"$set": update})
     prof = await db.profile.find_one({"_id": user_id})
@@ -1871,12 +1933,39 @@ async def sleep_profile(user_id: str = Depends(get_user_or_legacy)):
     p = await db.sleep_profile.find_one({"user_id": user_id}, {"_id": 0})
     if not p:
         return {"onboarded": False, "questions": SLEEP_QUESTIONS}
-    # Determine if we should show "How did you sleep?" prompt:
-    # show if last check-in was for a date earlier than today.
+    # "How was your sleep?" prompt:
+    #  - Uses the user's own `day_start_time` + `timezone` to anchor the sleep-cycle day.
+    #  - Prompt is active from (day_start - 2h) until the NEXT day_start.
+    #  - Disappears once the user has logged a check-in for the current sleep-cycle day.
+    prof = await db.profile.find_one({"_id": user_id}, {"timezone": 1, "day_start_time": 1, "wake_time": 1})
+    today_user = user_today_str(prof)
     last = p.get("last_checkin_date")
-    today = today_str()
-    show_checkin = last != today
-    return {"onboarded": True, "profile": p, "questions": SLEEP_QUESTIONS, "show_checkin_prompt": show_checkin}
+    show_checkin = last != today_user
+    # Is the viewer currently within the [day_start - 2h, next day_start) window?
+    in_window = True
+    try:
+        if prof and prof.get("timezone"):
+            from zoneinfo import ZoneInfo
+            day_start = prof.get("day_start_time") or prof.get("wake_time") or "07:00"
+            hh, mm = [int(x) for x in day_start.split(":")[:2]]
+            local_now = datetime.now(ZoneInfo(prof["timezone"]))
+            start_today = local_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            window_start = start_today - timedelta(hours=2)
+            # If local_now is BEFORE day_start, today's window is still yesterday's
+            if local_now < start_today:
+                window_start = start_today - timedelta(days=1, hours=2)
+                in_window = local_now >= window_start
+            else:
+                in_window = True  # after start_today → we're in today's cycle
+    except Exception:
+        pass
+    return {
+        "onboarded": True,
+        "profile": p,
+        "questions": SLEEP_QUESTIONS,
+        "show_checkin_prompt": bool(show_checkin and in_window),
+        "checkin_day": today_user,
+    }
 
 
 @api_router.post("/sleep/onboarding")
@@ -1923,8 +2012,9 @@ async def sleep_checkin(body: SleepCheckinPayload, user_id: str = Depends(get_us
     p = await db.sleep_profile.find_one({"user_id": user_id})
     if not p:
         raise HTTPException(404, "Onboard first")
+    prof = await db.profile.find_one({"_id": user_id}, {"timezone": 1, "day_start_time": 1, "wake_time": 1})
     entry = {
-        "date": today_str(),
+        "date": user_today_str(prof),
         "rating": int(body.rating),
         "hours": body.hours,
         "notes": body.notes or "",
@@ -2061,20 +2151,34 @@ def _parse_hhmm(s: str | None, default: tuple[int, int] = (7, 0)) -> tuple[int, 
         return default
 
 
-def _challenge_day_for_user(now_dt: datetime, wake_str: str | None) -> "datetime.date":
+def _challenge_day_for_user(now_dt: datetime, wake_str: str | None, tz_name: Optional[str] = None) -> "datetime.date":
     """Return the 'challenge day' the user is currently in.
-    A challenge day starts at wake_str and lasts 24h. If `now` is before
-    today's wake-time, we are still in yesterday's challenge day."""
+    A challenge day starts at `wake_str` (HH:MM) in the user's IANA timezone
+    and lasts 24h. If `now` is BEFORE today's wake-time, we are still in
+    yesterday's challenge day.
+    """
     wake_h, wake_m = _parse_hhmm(wake_str)
-    today_wake = now_dt.replace(hour=wake_h, minute=wake_m, second=0, microsecond=0)
-    if now_dt < today_wake:
-        return (now_dt - timedelta(days=1)).date()
-    return now_dt.date()
+    local_now = now_dt
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            local_now = datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            pass
+    today_wake = local_now.replace(hour=wake_h, minute=wake_m, second=0, microsecond=0)
+    if local_now < today_wake:
+        return (local_now - timedelta(days=1)).date()
+    return local_now.date()
 
 
 async def _wake_for_user(user_id: str) -> str:
     prof = await db.profile.find_one({"_id": user_id})
-    return (prof or {}).get("wake_time") or "07:00"
+    return (prof or {}).get("day_start_time") or (prof or {}).get("wake_time") or "07:00"
+
+
+async def _tz_for_user(user_id: str) -> Optional[str]:
+    prof = await db.profile.find_one({"_id": user_id})
+    return (prof or {}).get("timezone") or None
 
 
 async def _autoroll_uncompleted_challenges(user_id: str, current_day: "datetime.date") -> None:
@@ -2141,11 +2245,13 @@ class ChallengeCompletePayload(BaseModel):
 @api_router.get("/challenge/today")
 async def challenge_today(user_id: str = Depends(get_user_or_legacy)):
     """Returns today's quote, challenge, current state and the greeting.
-    Honors the user's `wake_time` so the 24-hour cycle starts at their morning.
+    Honors the user's `day_start_time` + `timezone` so the 24-hour cycle
+    starts at their morning in their local zone.
     """
     wake = await _wake_for_user(user_id)
+    tz_name = await _tz_for_user(user_id)
     now_dt = datetime.now()
-    cur_day = _challenge_day_for_user(now_dt, wake)
+    cur_day = _challenge_day_for_user(now_dt, wake, tz_name)
     # Self-clean stale state → past as Uncompleted
     await _autoroll_uncompleted_challenges(user_id, cur_day)
 
@@ -2170,7 +2276,8 @@ async def challenge_today(user_id: str = Depends(get_user_or_legacy)):
 @api_router.post("/challenge/accept")
 async def challenge_accept(user_id: str = Depends(get_user_or_legacy)):
     wake = await _wake_for_user(user_id)
-    cur_day = _challenge_day_for_user(datetime.now(), wake)
+    tz_name = await _tz_for_user(user_id)
+    cur_day = _challenge_day_for_user(datetime.now(), wake, tz_name)
     await _autoroll_uncompleted_challenges(user_id, cur_day)
     today = cur_day.isoformat()
     ch = get_today_challenge(user_id, cur_day)
@@ -2191,7 +2298,8 @@ async def challenge_accept(user_id: str = Depends(get_user_or_legacy)):
 @api_router.post("/challenge/reject")
 async def challenge_reject(user_id: str = Depends(get_user_or_legacy)):
     wake = await _wake_for_user(user_id)
-    cur_day = _challenge_day_for_user(datetime.now(), wake)
+    tz_name = await _tz_for_user(user_id)
+    cur_day = _challenge_day_for_user(datetime.now(), wake, tz_name)
     await _autoroll_uncompleted_challenges(user_id, cur_day)
     today = cur_day.isoformat()
     ch = get_today_challenge(user_id, cur_day)
@@ -2215,7 +2323,8 @@ async def challenge_complete(
     user_id: str = Depends(get_user_or_legacy),
 ):
     wake = await _wake_for_user(user_id)
-    cur_day = _challenge_day_for_user(datetime.now(), wake)
+    tz_name = await _tz_for_user(user_id)
+    cur_day = _challenge_day_for_user(datetime.now(), wake, tz_name)
     await _autoroll_uncompleted_challenges(user_id, cur_day)
     today = cur_day.isoformat()
     ch = get_today_challenge(user_id, cur_day)
@@ -2265,16 +2374,107 @@ async def challenge_complete(
 
 @api_router.get("/challenge/past")
 async def challenge_past(user_id: str = Depends(get_user_or_legacy)):
+    wake = await _wake_for_user(user_id)
+    tz_name = await _tz_for_user(user_id)
+    cur_day = _challenge_day_for_user(datetime.now(), wake, tz_name)
+    await _autoroll_uncompleted_challenges(user_id, cur_day)
     cur = (
         db.challenge_completions.find({"user_id": user_id})
         .sort("completed_at", -1)
         .limit(200)
     )
     out: list = []
+    # Compute answer window: auto-uncompleted entries can still be answered
+    # within 24h of their day's rollover. After that window, locked.
+    now_utc = datetime.now(timezone.utc)
     async for d in cur:
         d.pop("_id", None)
+        # Answer window: 24h from the day AFTER the challenge's date
+        # (i.e., the rollover moment), honoring tz+day_start.
+        can_answer = False
+        answer_deadline_iso: Optional[str] = None
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            from datetime import date as _d
+            ch_date = _d.fromisoformat(d["date"])
+            wh, wm = _parse_hhmm(wake)
+            tz = _ZI(tz_name) if tz_name else timezone.utc
+            # Rollover was (ch_date + 1 day) at wake local
+            rollover_local = datetime(ch_date.year, ch_date.month, ch_date.day,
+                                       wh, wm, tzinfo=tz) + timedelta(days=1)
+            deadline = rollover_local + timedelta(hours=24)
+            answer_deadline_iso = deadline.astimezone(timezone.utc).isoformat()
+            can_answer = (now_utc < deadline.astimezone(timezone.utc)) and bool(d.get("auto_uncompleted"))
+        except Exception:
+            pass
+        d["can_answer"] = can_answer
+        d["answer_deadline"] = answer_deadline_iso
         out.append(d)
     return {"completions": out, "count": len(out)}
+
+
+class ChallengePastAnswerPayload(BaseModel):
+    completed: bool = True
+    how_text: Optional[str] = ""
+    difficulty: str = "easy"
+    experience_text: Optional[str] = ""
+    rating: int = 5
+
+
+@api_router.post("/challenge/past/{completion_id}/answer")
+async def challenge_past_answer(
+    completion_id: str,
+    body: ChallengePastAnswerPayload,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Late-answer a past challenge. Only allowed inside the 24h window."""
+    d = await db.challenge_completions.find_one({"id": completion_id, "user_id": user_id})
+    if not d:
+        raise HTTPException(404, "Past challenge not found")
+    if not d.get("auto_uncompleted"):
+        raise HTTPException(400, "This challenge was already answered.")
+    # Check window
+    wake = await _wake_for_user(user_id)
+    tz_name = await _tz_for_user(user_id)
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        from datetime import date as _d
+        ch_date = _d.fromisoformat(d["date"])
+        wh, wm = _parse_hhmm(wake)
+        tz = _ZI(tz_name) if tz_name else timezone.utc
+        rollover_local = datetime(ch_date.year, ch_date.month, ch_date.day,
+                                   wh, wm, tzinfo=tz) + timedelta(days=1)
+        deadline_utc = (rollover_local + timedelta(hours=24)).astimezone(timezone.utc)
+        if datetime.now(timezone.utc) >= deadline_utc:
+            raise HTTPException(400, "The 24-hour answer window has closed for this challenge.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    awarded_xp = 0
+    if body.completed:
+        awarded_xp = 60 if (body.difficulty or "").lower() == "difficult" else 30
+    rating = max(1, min(5, int(body.rating or 5)))
+    update = {
+        "completed": bool(body.completed),
+        "auto_uncompleted": False,
+        "how_text": (body.how_text or "").strip(),
+        "difficulty": (body.difficulty or "easy").lower(),
+        "experience_text": (body.experience_text or "").strip(),
+        "rating": rating,
+        "xp_awarded": awarded_xp,
+        "late_answered_at": now_iso(),
+    }
+    await db.challenge_completions.update_one(
+        {"id": completion_id, "user_id": user_id}, {"$set": update}
+    )
+    if awarded_xp:
+        await db.profile.update_one(
+            {"_id": user_id}, {"$inc": {"total_xp": awarded_xp}}
+        )
+    updated = await db.challenge_completions.find_one({"id": completion_id}, {"_id": 0})
+    return {"awarded_xp": awarded_xp, "completion": updated}
 
 
 @api_router.delete("/challenge/past/{completion_id}")

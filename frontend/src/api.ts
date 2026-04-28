@@ -85,6 +85,10 @@ export type Profile = {
   } | null;
   boost_inventory?: BoostInventoryItem[];
   tz_offset_minutes?: number;
+  // New day-anchor system
+  day_start_time?: string | null;
+  timezone?: string | null;
+  onboarding_tz_done?: boolean;
 };
 
 export type BoostInventoryItem = {
@@ -98,29 +102,63 @@ export type BoostInventoryItem = {
 };
 
 /**
- * Compute the user's "current day" date string (YYYY-MM-DD) based on local time
- * and their wake-up time. The day rolls over 2 hours BEFORE wake-time.
+ * Compute the user's "current day" date string (YYYY-MM-DD) based on their
+ * selected `day_start_time` (HH:MM) in their IANA `timezone`. The day rolls
+ * over AT day_start_time (not 2h before, not real midnight).
  *
- *   wake_time = "07:00" → boundary = 05:00. Before 5 AM = yesterday's day.
+ *   day_start_time = "07:00", tz = "Australia/Sydney"
+ *   → before 7am Sydney = yesterday's day
+ *   → on/after 7am Sydney = today
+ *
+ * If timezone is missing, falls back to device local time.
+ * Legacy callers pass just a wake_time string — we treat it as day_start_time
+ * in the device's local zone for backward compat.
  */
-export function userDate(wake_time: string = '07:00'): string {
-  const [wh = 7, wm = 0] = wake_time.split(':').map((x) => parseInt(x, 10));
-  // boundary = wake_time - 2 hours (handle wrap)
-  let bh = wh - 2;
-  let bm = wm;
-  if (bh < 0) bh += 24;
-  const now = new Date();
-  const beforeBoundary =
-    now.getHours() < bh || (now.getHours() === bh && now.getMinutes() < bm);
-  const d = new Date(now);
-  if (beforeBoundary) {
-    d.setDate(d.getDate() - 1);
+export function userDate(
+  dayStartOrWake: string = '07:00',
+  timezone?: string | null,
+): string {
+  const [wh = 7, wm = 0] = (dayStartOrWake || '07:00').split(':').map((x) => parseInt(x, 10));
+  let now: { y: number; mo: number; d: number; h: number; mi: number };
+  if (timezone && typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+    try {
+      const fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      const parts: any = {};
+      for (const p of fmt.formatToParts(new Date())) if (p.type !== 'literal') parts[p.type] = p.value;
+      now = {
+        y: parseInt(parts.year, 10),
+        mo: parseInt(parts.month, 10),
+        d: parseInt(parts.day, 10),
+        h: parseInt(parts.hour === '24' ? '0' : parts.hour, 10),
+        mi: parseInt(parts.minute, 10),
+      };
+    } catch {
+      const d = new Date();
+      now = { y: d.getFullYear(), mo: d.getMonth() + 1, d: d.getDate(), h: d.getHours(), mi: d.getMinutes() };
+    }
+  } else {
+    const d = new Date();
+    now = { y: d.getFullYear(), mo: d.getMonth() + 1, d: d.getDate(), h: d.getHours(), mi: d.getMinutes() };
   }
-  // Format as YYYY-MM-DD in local time (not UTC)
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
+  // If current local time < day_start_time → we're still in yesterday
+  const before = now.h < wh || (now.h === wh && now.mi < wm);
+  const d = new Date(Date.UTC(now.y, now.mo - 1, now.d));
+  if (before) d.setUTCDate(d.getUTCDate() - 1);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}`;
+}
+
+/** Helper to pull the right {day_start_time, timezone} tuple from a profile. */
+export function userDayAnchor(p: Profile | null | undefined) {
+  const day_start = p?.day_start_time || p?.wake_time || '07:00';
+  const tz = p?.timezone || null;
+  return { day_start, tz };
 }
 
 export type Task = {
@@ -348,6 +386,20 @@ export const api = {
     req<Profile>('/profile', {
       method: 'PUT',
       body: JSON.stringify({ wake_time, morning_setup_done: true }),
+    }),
+  // New day-anchor system: set BOTH timezone + day_start_time in a single write.
+  setDayAnchor: (timezone: string, day_start_time: string) =>
+    req<Profile>('/profile', {
+      method: 'PUT',
+      body: JSON.stringify({ timezone, day_start_time, onboarding_tz_done: true }),
+    }),
+  answerPastChallenge: (
+    completionId: string,
+    body: { completed: boolean; how_text?: string; difficulty?: 'easy' | 'difficult'; experience_text?: string; rating?: number },
+  ) =>
+    req<{ awarded_xp: number; completion: any }>(`/challenge/past/${completionId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
   resetProfile: () => req<Profile>('/profile/reset', { method: 'POST' }),
   completeOnboarding: (payload: OnboardingPayload) =>

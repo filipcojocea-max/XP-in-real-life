@@ -36,6 +36,7 @@ export default function SleepHub() {
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<SleepProfile | null>(null);
   const [showCheckin, setShowCheckin] = useState(false);
+  const [showCheckinBanner, setShowCheckinBanner] = useState(false);
   const [tab, setTab] = useState<SubTab>('plan');
 
   const load = useCallback(async () => {
@@ -46,7 +47,11 @@ export default function SleepHub() {
         return;
       }
       setProfile(r.profile || null);
-      if (r.show_checkin_prompt) setShowCheckin(true);
+      // "How was your sleep?" — persistent in-app banner (NOT auto-modal).
+      // Only shown when backend says the check-in window is active AND the
+      // user hasn't logged their sleep for the current sleep-cycle day.
+      setShowCheckinBanner(!!r.show_checkin_prompt);
+      setShowCheckin(false);
     } catch (e) {
       console.log('sleep load', e);
     } finally {
@@ -84,6 +89,25 @@ export default function SleepHub() {
         </TouchableOpacity>
       </View>
 
+      {/* Persistent "How was your sleep?" banner — stays until user rates sleep */}
+      {showCheckinBanner ? (
+        <TouchableOpacity
+          activeOpacity={0.88}
+          onPress={() => setShowCheckin(true)}
+          style={styles.sleepBanner}
+          testID="sleep-checkin-banner"
+        >
+          <View style={styles.sleepBannerIcon}>
+            <Ionicons name="moon" size={20} color={colors.cyan} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.sleepBannerTitle}>How was your sleep last night?</Text>
+            <Text style={styles.sleepBannerSub}>Tap to rate — this card stays here until you do.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.cyan} />
+        </TouchableOpacity>
+      ) : null}
+
       {/* Sub-tabs */}
       <View style={styles.subTabs}>
         <SubTabBtn active={tab === 'plan'} icon="sparkles" label="Plan" onPress={() => setTab('plan')} testID="sleep-tab-plan" />
@@ -95,11 +119,11 @@ export default function SleepHub() {
       {tab === 'coach' && <CoachTab profile={profile} />}
       {tab === 'health' && <HealthTab />}
 
-      {/* Daily check-in modal */}
+      {/* Daily check-in modal (only opens when user taps the banner) */}
       <CheckinModal
         visible={showCheckin}
         onClose={() => setShowCheckin(false)}
-        onSaved={() => { setShowCheckin(false); load(); }}
+        onSaved={() => { setShowCheckin(false); setShowCheckinBanner(false); load(); }}
       />
     </SafeAreaView>
   );
@@ -1017,6 +1041,26 @@ const styles = StyleSheet.create({
   topTitle: { color: colors.text, fontSize: 17, fontWeight: '900', letterSpacing: -0.3 },
 
   subTabs: {
+  sleepBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    backgroundColor: colors.cyan + '18',
+    borderWidth: 1,
+    borderColor: colors.cyan + '88',
+  },
+  sleepBannerIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.cyan + '22',
+    borderWidth: 1, borderColor: colors.cyan + '55',
+  },
+  sleepBannerTitle: { color: colors.cyan, fontWeight: '900', fontSize: 14 },
+  sleepBannerSub: { color: colors.textSecondary, fontSize: 12, marginTop: 2 },
     flexDirection: 'row', marginHorizontal: spacing.md,
     padding: 4, borderRadius: radii.pill,
     backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border,

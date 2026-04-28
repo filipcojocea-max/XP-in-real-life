@@ -20,6 +20,7 @@ import { api, Profile } from '../../src/api';
 import { colors, spacing, radii } from '../../src/theme';
 import { getMotivationSchedule } from '../../src/notifications';
 import { useAuth } from '../../src/AuthContext';
+import { formatZoneDisplay, findAuZone } from '../../src/auTimezones';
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -228,6 +229,35 @@ export default function ProfileScreen() {
             ))}
           </View>
         </Card>
+
+        {/* Day anchor info — locked unless reset */}
+        {profile?.timezone && profile?.day_start_time ? (
+          <View style={styles.anchorCard}>
+            <View style={styles.anchorRow}>
+              <View style={[styles.actionIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
+                <Ionicons name="earth" size={18} color={colors.cyan} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.anchorLabel}>TIMEZONE</Text>
+                <Text style={styles.anchorValue}>{formatZoneDisplay(profile.timezone)}</Text>
+              </View>
+              <Ionicons name="lock-closed" size={14} color={colors.textMuted} />
+            </View>
+            <View style={[styles.anchorRow, { marginTop: 8 }]}>
+              <View style={[styles.actionIcon, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '55' }]}>
+                <Ionicons name="sunny" size={18} color={colors.amber} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.anchorLabel}>MORNING START TIME</Text>
+                <Text style={styles.anchorValue}>{profile.day_start_time} (your new day begins here)</Text>
+              </View>
+              <Ionicons name="lock-closed" size={14} color={colors.textMuted} />
+            </View>
+            <Text style={styles.anchorFoot}>
+              🔒 Locked. To change timezone or morning time, reset progress below.
+            </Text>
+          </View>
+        ) : null}
 
         {/* Actions */}
         <TouchableOpacity
@@ -438,6 +468,18 @@ const styles = StyleSheet.create({
   actionTitle: { color: colors.text, fontSize: 14, fontWeight: '700' },
   actionDesc: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
   motivCard: { marginTop: spacing.lg },
+  anchorCard: {
+    backgroundColor: colors.surfaceGlass,
+    borderWidth: 1,
+    borderColor: colors.cyan + '55',
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  anchorRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  anchorLabel: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.5 },
+  anchorValue: { color: colors.text, fontSize: 14, fontWeight: '800', marginTop: 2 },
+  anchorFoot: { color: colors.textMuted, fontSize: 11, marginTop: 12, textAlign: 'center' },
   motivHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   motivLabel: { color: colors.cyan, fontSize: 11, fontWeight: '800', letterSpacing: 1.5, textTransform: 'uppercase' },
   motivDesc: { color: colors.textSecondary, fontSize: 12, marginTop: 6, lineHeight: 17 },

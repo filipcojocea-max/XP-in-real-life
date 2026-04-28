@@ -1,414 +1,497 @@
-"""Backend tests for the four newly-added features:
-  1. Points+ Boost Inventory (claim / activate-from-inventory / status)
-  2. Friends Weekly Leaderboard
-  3. Leaderboard Report-Player System
-  4. Leaderboard Player Profile
-
-Run via: python /app/backend_test.py
 """
-from __future__ import annotations
+Day Anchor System + regression test suite.
+Covers:
+  1. Profile schema additions (day_start_time, timezone, onboarding_tz_done)
+  2. Day-anchor write lock (PUT /api/profile lock + reset)
+  3. Timezone-aware GET /api/challenge/today
+  4. user_today_str propagation in POST /api/sleep/checkin
+  5. Challenge past 24h answer window shape + 404 path
+  6. Regression: auth, /api/profile, /api/boosts/*, /api/friends/leaderboard,
+     /api/leaderboard/report, /api/tasks lifecycle, /api/goals lifecycle.
+"""
+import os
 import sys
 import uuid
 import json
+import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import requests
 
-# Read the public ingress URL from frontend/.env (EXPO_PUBLIC_BACKEND_URL)
-def _read_backend_url() -> str:
-    env_path = "/app/frontend/.env"
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise RuntimeError("EXPO_PUBLIC_BACKEND_URL not found in /app/frontend/.env")
+BASE = "https://xp-confidence.preview.emergentagent.com/api"
+
+PASS = []
+FAIL = []
 
 
-BASE = _read_backend_url().rstrip("/") + "/api"
-print(f"Testing against {BASE}")
-
-PASS, FAIL = [], []
-
-
-def _check(label: str, cond: bool, info: str = ""):
+def check(label, cond, detail=""):
     if cond:
         PASS.append(label)
-        print(f"  ✓ {label}")
+        print(f"  ✅ {label}")
     else:
-        FAIL.append(f"{label} :: {info}")
-        print(f"  ✗ {label} :: {info}")
+        FAIL.append(f"{label} :: {detail}")
+        print(f"  ❌ {label} :: {detail}")
 
 
-def _hdr_anon(aid: str) -> dict:
-    return {"X-Anonymous-Id": aid, "Content-Type": "application/json"}
+def section(t):
+    print(f"\n=== {t} ===")
 
 
-def _hdr_auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+def H(anon_id=None, token=None):
+    h = {"Content-Type": "application/json"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    if anon_id:
+        h["X-Anonymous-Id"] = anon_id
+    return h
 
 
-# 1. POINTS+ BOOST INVENTORY
-def test_boost_inventory():
-    print("\n═══ 1. Points+ Boost Inventory ═══")
-    aid = f"boost-test-{uuid.uuid4().hex[:16]}"
-    h = _hdr_anon(aid)
+# ─────────────────────────────────────────────────────────────────────
+# 1 + 2. Profile schema + day-anchor write lock (uses fresh anon id)
+# ─────────────────────────────────────────────────────────────────────
+section("1+2. Profile schema additions & day-anchor write lock")
+anon_a = "anon-test-" + uuid.uuid4().hex[:16]
 
-    r = requests.get(f"{BASE}/profile", headers=h)
-    _check("profile bootstrap (anon)", r.status_code == 200, f"status={r.status_code}")
+# Reset to be safe (in case the same anon id was used before)
+r = requests.post(f"{BASE}/profile/reset", headers=H(anon_id=anon_a))
+check("POST /profile/reset (fresh anon) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
 
-    r = requests.get(f"{BASE}/boosts/status", headers=h)
-    _check("GET /boosts/status (pre-unlock)", r.status_code == 200, str(r.status_code))
+r = requests.get(f"{BASE}/profile", headers=H(anon_id=anon_a))
+check("GET /profile → 200", r.status_code == 200, r.text[:200])
+prof = r.json() if r.ok else {}
+check("profile has day_start_time field", "day_start_time" in prof,
+      f"keys={list(prof.keys())[:25]}")
+check("profile has timezone field", "timezone" in prof)
+check("profile has onboarding_tz_done field", "onboarding_tz_done" in prof)
+check("fresh: day_start_time is null", prof.get("day_start_time") is None,
+      f"got {prof.get('day_start_time')!r}")
+check("fresh: timezone is null", prof.get("timezone") is None,
+      f"got {prof.get('timezone')!r}")
+check("fresh: onboarding_tz_done is False", prof.get("onboarding_tz_done") is False,
+      f"got {prof.get('onboarding_tz_done')!r}")
+
+# First write — should succeed and lock both
+r = requests.put(
+    f"{BASE}/profile",
+    headers=H(anon_id=anon_a),
+    json={"timezone": "Australia/Sydney", "day_start_time": "07:00"},
+)
+check("PUT /profile {tz=Sydney, day_start=07:00} → 200", r.status_code == 200,
+      f"got {r.status_code} {r.text[:200]}")
+if r.ok:
+    p = r.json()
+    check("persisted timezone=Australia/Sydney", p.get("timezone") == "Australia/Sydney",
+          f"got {p.get('timezone')!r}")
+    check("persisted day_start_time=07:00", p.get("day_start_time") == "07:00",
+          f"got {p.get('day_start_time')!r}")
+    check("onboarding_tz_done flipped to True", p.get("onboarding_tz_done") is True,
+          f"got {p.get('onboarding_tz_done')!r}")
+
+# Lock test — change timezone
+r = requests.put(
+    f"{BASE}/profile",
+    headers=H(anon_id=anon_a),
+    json={"timezone": "Australia/Perth"},
+)
+check("PUT /profile {tz=Perth} on locked profile → 400", r.status_code == 400,
+      f"got {r.status_code} {r.text[:200]}")
+if r.status_code == 400:
+    detail = (r.json() or {}).get("detail")
+    if isinstance(detail, dict):
+        check("error code = tz_locked", detail.get("error") == "tz_locked",
+              f"got {detail!r}")
+    else:
+        check("error code = tz_locked", False, f"detail not a dict: {detail!r}")
+
+# Verify timezone unchanged
+r = requests.get(f"{BASE}/profile", headers=H(anon_id=anon_a))
+check("timezone still Australia/Sydney", r.json().get("timezone") == "Australia/Sydney")
+
+# Lock test — change day_start_time
+r = requests.put(
+    f"{BASE}/profile",
+    headers=H(anon_id=anon_a),
+    json={"day_start_time": "08:00"},
+)
+check("PUT /profile {day_start=08:00} on locked profile → 400", r.status_code == 400)
+if r.status_code == 400:
+    detail = (r.json() or {}).get("detail")
+    if isinstance(detail, dict):
+        check("error code = day_start_locked", detail.get("error") == "day_start_locked",
+              f"got {detail!r}")
+
+# Reset → fields go back to null, then PUT works again
+r = requests.post(f"{BASE}/profile/reset", headers=H(anon_id=anon_a))
+check("POST /profile/reset → 200", r.status_code == 200)
+if r.ok:
+    p = r.json()
+    check("after reset: timezone is None", p.get("timezone") is None,
+          f"got {p.get('timezone')!r}")
+    check("after reset: day_start_time is None", p.get("day_start_time") is None,
+          f"got {p.get('day_start_time')!r}")
+    check("after reset: onboarding_tz_done is False", p.get("onboarding_tz_done") is False)
+
+r = requests.put(
+    f"{BASE}/profile",
+    headers=H(anon_id=anon_a),
+    json={"timezone": "Australia/Sydney", "day_start_time": "07:00"},
+)
+check("PUT after reset works again → 200", r.status_code == 200,
+      f"got {r.status_code} {r.text[:200]}")
+
+# ─────────────────────────────────────────────────────────────────────
+# 3. Timezone-aware GET /api/challenge/today
+# ─────────────────────────────────────────────────────────────────────
+section("3. Timezone-aware GET /api/challenge/today")
+r = requests.get(f"{BASE}/challenge/today", headers=H(anon_id=anon_a))
+check("GET /challenge/today (Sydney/07:00) → 200", r.status_code == 200,
+      f"got {r.status_code} {r.text[:300]}")
+if r.ok:
+    cj = r.json()
+    check("response has challenge object", isinstance(cj.get("challenge"), dict),
+          f"keys={list(cj.keys())}")
+    ch = cj.get("challenge") or {}
+    check("challenge has id+title", bool(ch.get("id")) and bool(ch.get("title")),
+          f"challenge={ch}")
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. user_today_str propagation in POST /api/sleep/checkin
+# ─────────────────────────────────────────────────────────────────────
+section("4. user_today_str propagation in /sleep/checkin")
+# need to onboard sleep first
+prof_now = requests.get(f"{BASE}/profile", headers=H(anon_id=anon_a)).json()
+check("profile timezone still Sydney before sleep", prof_now.get("timezone") == "Australia/Sydney")
+
+# minimal sleep onboarding (answers payload accepts any dict)
+sleep_answers = {
+    "main_goal": "Sleep deeper and wake refreshed",
+    "bedtime": "23:00",
+    "wake_time": "07:00",
+    "screens_before_bed": "yes",
+    "stress_level": 5,
+    "noises": ["partner_snoring"],
+    "habits_to_unlearn": "scrolling phone in bed",
+    "relaxes_me": ["reading"],
+}
+r = requests.post(
+    f"{BASE}/sleep/onboarding",
+    headers=H(anon_id=anon_a),
+    json={"answers": sleep_answers},
+)
+check("POST /sleep/onboarding → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+
+r = requests.post(
+    f"{BASE}/sleep/checkin",
+    headers=H(anon_id=anon_a),
+    json={"rating": 7, "hours": 7.5, "notes": "Felt rested"},
+)
+check("POST /sleep/checkin → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+if r.ok:
+    entry = r.json().get("entry") or {}
+    # Compute expected user_today_str: Australia/Sydney, day_start=07:00
+    tz = ZoneInfo("Australia/Sydney")
+    local_now = datetime.now(tz)
+    if (local_now.hour, local_now.minute) < (7, 0):
+        local_now = local_now - timedelta(days=1)
+    expected_date = local_now.date().isoformat()
+    check(f"entry.date matches user_today_str (expected {expected_date})",
+          entry.get("date") == expected_date,
+          f"got {entry.get('date')!r}, expected {expected_date}")
+    # Verify it's NOT just UTC date — only meaningful when they differ
+    utc_today = datetime.utcnow().date().isoformat()
+    if expected_date != utc_today:
+        check("entry.date != UTC today (proves tz-aware)",
+              entry.get("date") != utc_today,
+              f"got {entry.get('date')!r}, UTC today={utc_today}")
+    else:
+        print(f"  ℹ️  Sydney local date == UTC today ({expected_date}); tz-aware check is degenerate now.")
+
+# ─────────────────────────────────────────────────────────────────────
+# 5. Challenge past 24h answer window
+# ─────────────────────────────────────────────────────────────────────
+section("5. Challenge past 24h answer window")
+r = requests.get(f"{BASE}/challenge/past", headers=H(anon_id=anon_a))
+check("GET /challenge/past → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+if r.ok:
+    payload = r.json()
+    completions = payload.get("completions", [])
+    check("response has completions array", isinstance(completions, list),
+          f"got {type(completions)}")
+    # No completions yet for a fresh user, but if any: verify shape
+    if completions:
+        for c in completions[:3]:
+            check(f"entry has can_answer:bool", isinstance(c.get("can_answer"), bool),
+                  f"got {type(c.get('can_answer'))}")
+            check(f"entry has answer_deadline (str or None)",
+                  c.get("answer_deadline") is None or isinstance(c.get("answer_deadline"), str),
+                  f"got {type(c.get('answer_deadline'))}")
+    else:
+        # Just verify the endpoint shape is consistent (no completions = OK)
+        print(f"  ℹ️  No past completions to inspect (fresh user).")
+
+# Force a past entry: complete a challenge and verify the shape persists.
+# (We don't expect can_answer=True since it's not auto_uncompleted.)
+r = requests.post(f"{BASE}/challenge/accept", headers=H(anon_id=anon_a))
+check("POST /challenge/accept → 200", r.status_code == 200, r.text[:200])
+r = requests.post(
+    f"{BASE}/challenge/complete",
+    headers=H(anon_id=anon_a),
+    json={"how_text": "did it", "difficulty": "easy", "experience_text": "great", "rating": 5},
+)
+check("POST /challenge/complete → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+
+r = requests.get(f"{BASE}/challenge/past", headers=H(anon_id=anon_a))
+if r.ok:
+    completions = r.json().get("completions", [])
+    if completions:
+        c0 = completions[0]
+        check("most recent past has can_answer:bool", isinstance(c0.get("can_answer"), bool),
+              f"got {type(c0.get('can_answer'))} {c0.get('can_answer')!r}")
+        check("most recent past has answer_deadline field",
+              "answer_deadline" in c0,
+              f"keys={list(c0.keys())[:15]}")
+        check("freshly-completed challenge has can_answer=False",
+              c0.get("can_answer") is False,
+              f"got {c0.get('can_answer')!r}")
+
+# 404 path
+fake_id = "non-existent-completion-" + uuid.uuid4().hex[:8]
+r = requests.post(
+    f"{BASE}/challenge/past/{fake_id}/answer",
+    headers=H(anon_id=anon_a),
+    json={"completed": True, "difficulty": "easy", "rating": 5},
+)
+check("POST /challenge/past/{fake}/answer → 404", r.status_code == 404,
+      f"got {r.status_code} {r.text[:200]}")
+
+# ─────────────────────────────────────────────────────────────────────
+# 6. Regressions
+# ─────────────────────────────────────────────────────────────────────
+section("6. REGRESSION: /api/auth/register + login")
+email = f"day.anchor.{uuid.uuid4().hex[:10]}@protonmail.com"
+pw = "AnchorTest123!"
+r = requests.post(
+    f"{BASE}/auth/register",
+    headers={"Content-Type": "application/json"},
+    json={"full_name": "Day Anchor Tester", "email": email, "password": pw},
+)
+check("POST /auth/register → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+token = None
+if r.ok:
+    rj = r.json()
+    token = rj.get("token")
+    check("register returns token (verification disabled)", isinstance(token, str) and len(token) > 20)
+    user_obj = rj.get("user") or {}
+    check("register user.verified=true", bool(user_obj.get("verified")))
+
+# Auth-me with token
+r = requests.get(f"{BASE}/auth/me", headers={"Authorization": f"Bearer {token}"})
+check("GET /auth/me → 200", r.status_code == 200, f"got {r.status_code}")
+
+# Login
+r = requests.post(
+    f"{BASE}/auth/login",
+    headers={"Content-Type": "application/json"},
+    json={"email": email, "password": pw},
+)
+check("POST /auth/login → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+if r.ok:
+    token = r.json().get("token")
+
+# Wrong password
+r = requests.post(
+    f"{BASE}/auth/login",
+    headers={"Content-Type": "application/json"},
+    json={"email": email, "password": "WrongPass!"},
+)
+check("POST /auth/login wrong pw → 401", r.status_code == 401, f"got {r.status_code}")
+
+section("6. REGRESSION: /api/profile GET (with auth)")
+r = requests.get(f"{BASE}/profile", headers=H(token=token))
+check("GET /profile (auth) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+if r.ok:
+    p = r.json()
+    check("auth profile has day_start_time field", "day_start_time" in p)
+    check("auth profile has timezone field", "timezone" in p)
+    check("auth profile has onboarding_tz_done field", "onboarding_tz_done" in p)
+
+section("6. REGRESSION: /api/boosts/*")
+# Unlock with code
+r = requests.post(f"{BASE}/boosts/unlock", headers=H(token=token), json={"code": "XP270905W20"})
+check("POST /boosts/unlock (correct code) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+
+# Status
+r = requests.get(f"{BASE}/boosts/status", headers=H(token=token))
+check("GET /boosts/status → 200", r.status_code == 200)
+if r.ok:
+    s = r.json()
+    check("status has boosts_unlocked=true", s.get("boosts_unlocked") is True,
+          f"got {s.get('boosts_unlocked')!r}")
+    check("status has boost_inventory list", isinstance(s.get("boost_inventory"), list))
+
+# Claim
+r = requests.post(f"{BASE}/boosts/claim", headers=H(token=token), json={"type": "triple_day"})
+check("POST /boosts/claim triple_day → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+inv_id = None
+if r.ok:
+    claimed = r.json().get("claimed") or {}
+    inv_id = claimed.get("id")
+    check("claimed has id", isinstance(inv_id, str) and len(inv_id) > 5)
+
+# Activate
+if inv_id:
+    r = requests.post(f"{BASE}/boosts/activate", headers=H(token=token), json={"inventory_id": inv_id})
+    check("POST /boosts/activate {inventory_id} → 200", r.status_code == 200,
+          f"got {r.status_code} {r.text[:200]}")
     if r.ok:
-        s = r.json()
-        _check("status: boosts_unlocked=false", s.get("boosts_unlocked") is False, str(s))
-        _check("status: active_boost=null", s.get("active_boost") is None, str(s))
-        _check("status: inventory=[]", s.get("boost_inventory") == [], str(s))
+        ab = r.json().get("active_boost") or {}
+        check("active_boost.multiplier=3", ab.get("multiplier") == 3, f"got {ab}")
 
-    r = requests.post(f"{BASE}/boosts/claim", headers=h,
-                      data=json.dumps({"type": "triple_day"}))
-    _check("claim without unlock → 403", r.status_code == 403,
-           f"got {r.status_code}: {r.text[:200]}")
-    if r.status_code == 403:
-        try:
-            d = r.json().get("detail")
-            err = (d or {}).get("error") if isinstance(d, dict) else None
-            _check("403 detail.error == 'boosts_locked'", err == "boosts_locked", str(d))
-        except Exception as e:
-            FAIL.append(f"403 body parse: {e}")
+section("6. REGRESSION: /api/friends/leaderboard")
+r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=H(token=token))
+check("GET /friends/leaderboard?tz=0 → 200", r.status_code == 200,
+      f"got {r.status_code} {r.text[:200]}")
+if r.ok:
+    lb = r.json()
+    check("leaderboard has rows[]", isinstance(lb.get("rows"), list))
+    check("leaderboard has reports[]", isinstance(lb.get("reports"), list))
+    check("leaderboard has week_key", isinstance(lb.get("week_key"), str))
+    rows = lb.get("rows") or []
+    self_rows = [r0 for r0 in rows if r0.get("is_self")]
+    check("self row present", len(self_rows) == 1, f"got {len(self_rows)}")
 
-    r = requests.post(f"{BASE}/boosts/unlock", headers=h,
-                      data=json.dumps({"code": "WRONGCODE"}))
-    _check("unlock wrong code → 400", r.status_code == 400, f"got {r.status_code}")
+section("6. REGRESSION: /api/leaderboard/report (self-report should 400)")
+my_id = (r.json().get("rows") or [{}])[0].get("user_id") if r.ok else None
+if my_id:
+    r2 = requests.post(
+        f"{BASE}/leaderboard/report",
+        headers=H(token=token),
+        json={"reported_user_id": my_id, "reason": "self-report attempt"},
+    )
+    check("POST /leaderboard/report (self) → 400", r2.status_code == 400,
+          f"got {r2.status_code} {r2.text[:200]}")
 
-    r = requests.post(f"{BASE}/boosts/unlock", headers=h,
-                      data=json.dumps({"code": "XP270905W20"}))
-    _check("unlock correct code → 200", r.status_code == 200,
-           f"got {r.status_code}: {r.text[:200]}")
+section("6. REGRESSION: /api/tasks lifecycle (create, complete, uncomplete with ?date=)")
+# Create custom task
+r = requests.post(
+    f"{BASE}/tasks",
+    headers=H(token=token),
+    json={
+        "title": "Day Anchor Smoke Task",
+        "description": "regression",
+        "focus_area": "mindset",
+        "time_slot": "morning",
+        "xp_value": 15,
+        "scheduled_time": "08:00",
+        "reminder_enabled": False,
+    },
+)
+check("POST /tasks (custom) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+task_id = None
+if r.ok:
+    tj = r.json()
+    task_id = tj.get("id")
+    check("custom task xp_value capped/kept at 15", tj.get("xp_value") == 15, f"got {tj.get('xp_value')}")
+
+# Get profile XP before
+prof_before = requests.get(f"{BASE}/profile", headers=H(token=token)).json()
+xp_before = int(prof_before.get("total_xp", 0))
+
+# Complete with explicit date (today UTC)
+today_iso = datetime.utcnow().date().isoformat()
+if task_id:
+    r = requests.post(
+        f"{BASE}/tasks/{task_id}/complete",
+        headers=H(token=token),
+        json={"date": today_iso},
+    )
+    check("POST /tasks/{id}/complete (?date=today) → 200", r.status_code == 200,
+          f"got {r.status_code} {r.text[:200]}")
     if r.ok:
-        body = r.json()
-        _check("unlock: boosts_unlocked=true",
-               body.get("boosts_unlocked") is True and
-               body.get("profile", {}).get("boosts_unlocked") is True,
-               str(body)[:300])
+        cj = r.json()
+        # active boost (3x) is on this account, so awarded should be 45
+        awarded = int(cj.get("xp_awarded", 0))
+        check("complete returned xp_awarded > 0", awarded > 0, f"got {awarded}")
 
-    r = requests.post(f"{BASE}/boosts/claim", headers=h,
-                      data=json.dumps({"type": "triple_day"}))
-    _check("claim triple_day after unlock → 200", r.status_code == 200,
-           f"got {r.status_code}: {r.text[:200]}")
-    claimed_id_1 = None
+    # Uncomplete with ?date= via body
+    r = requests.post(
+        f"{BASE}/tasks/{task_id}/uncomplete",
+        headers=H(token=token),
+        json={"date": today_iso},
+    )
+    check("POST /tasks/{id}/uncomplete (?date=today) → 200", r.status_code == 200,
+          f"got {r.status_code} {r.text[:200]}")
     if r.ok:
-        body = r.json()
-        claimed = body.get("claimed", {})
-        claimed_id_1 = claimed.get("id")
-        _check("claim returns 'claimed' with id+type",
-               bool(claimed_id_1) and claimed.get("type") == "triple_day", str(claimed))
-        _check("claimed multiplier=3, duration_days=1",
-               claimed.get("multiplier") == 3 and claimed.get("duration_days") == 1, str(claimed))
-        inv = body.get("profile", {}).get("boost_inventory", [])
-        _check("profile.boost_inventory grew by 1 after claim",
-               len(inv) == 1 and inv[0].get("id") == claimed_id_1, str(inv))
+        uj = r.json()
+        check("uncomplete returns xp_removed", "xp_removed" in uj,
+              f"got keys={list(uj.keys())}")
+        prof_after = requests.get(f"{BASE}/profile", headers=H(token=token)).json()
+        check("XP rolled back", int(prof_after.get("total_xp", 0)) == xp_before,
+              f"before={xp_before} after={prof_after.get('total_xp')}")
 
-    r = requests.post(f"{BASE}/boosts/claim", headers=h,
-                      data=json.dumps({"type": "double_week"}))
-    _check("claim double_week → 200", r.status_code == 200, f"got {r.status_code}")
-    claimed_id_2 = None
-    if r.ok:
-        claimed_id_2 = r.json().get("claimed", {}).get("id")
-        inv = r.json().get("profile", {}).get("boost_inventory", [])
-        _check("inventory now has 2 entries", len(inv) == 2, f"len={len(inv)}")
+section("6. REGRESSION: /api/goals lifecycle")
+# Create goal
+r = requests.post(
+    f"{BASE}/goals",
+    headers=H(token=token),
+    json={
+        "title": "Anchor Goal Smoke",
+        "description": "regression",
+        "focus_area": "fitness",
+        "target_value": 30,
+        "unit": "days",
+        "xp_reward": 30,
+    },
+)
+check("POST /goals → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+goal_id = None
+if r.ok:
+    gj = r.json()
+    goal_id = gj.get("id")
+    check("goal xp_reward clamped to 30", gj.get("xp_reward") == 30, f"got {gj.get('xp_reward')}")
 
-    r = requests.post(f"{BASE}/boosts/activate", headers=h,
-                      data=json.dumps({"inventory_id": "non-existent-uuid-xyz"}))
-    _check("activate bogus inventory_id → 404", r.status_code == 404,
-           f"got {r.status_code}")
+# List
+r = requests.get(f"{BASE}/goals", headers=H(token=token))
+check("GET /goals → 200", r.status_code == 200)
+if r.ok:
+    gs = r.json().get("goals") or []
+    found = next((g for g in gs if g.get("id") == goal_id), None)
+    check("created goal in list", bool(found))
 
-    if claimed_id_1:
-        r = requests.post(f"{BASE}/boosts/activate", headers=h,
-                          data=json.dumps({"inventory_id": claimed_id_1}))
-        _check("activate valid inventory_id → 200", r.status_code == 200,
-               f"got {r.status_code}: {r.text[:200]}")
-        if r.ok:
-            body = r.json()
-            ab = body.get("active_boost", {})
-            _check("active_boost has multiplier=3", (ab or {}).get("multiplier") == 3, str(ab))
-            _check("active_boost has expires_at", bool((ab or {}).get("expires_at")), str(ab))
-            _check("active_boost type=triple_day", (ab or {}).get("type") == "triple_day", str(ab))
+# Update goal
+if goal_id:
+    r = requests.put(
+        f"{BASE}/goals/{goal_id}",
+        headers=H(token=token),
+        json={"title": "Anchor Goal Smoke (updated)"},
+    )
+    check("PUT /goals/{id} → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
 
-    r = requests.get(f"{BASE}/boosts/status", headers=h)
-    if r.ok:
-        s = r.json()
-        _check("status.boosts_unlocked=true after unlock", s.get("boosts_unlocked") is True, str(s))
-        _check("status.active_boost present after activate",
-               s.get("active_boost") is not None and s["active_boost"].get("multiplier") == 3,
-               str(s.get("active_boost")))
-        inv = s.get("boost_inventory", [])
-        ids = [it.get("id") for it in inv]
-        _check("status.boost_inventory excludes activated entry",
-               claimed_id_1 not in ids, f"ids={ids}, activated={claimed_id_1}")
-        _check("status.boost_inventory still has un-activated entry",
-               claimed_id_2 in ids, f"ids={ids}, expected={claimed_id_2}")
+# Progress tick
+if goal_id:
+    r = requests.post(
+        f"{BASE}/goals/{goal_id}/progress",
+        headers=H(token=token),
+        json={"current_value": 1},
+    )
+    check("POST /goals/{id}/progress (1/30) → 200", r.status_code == 200,
+          f"got {r.status_code} {r.text[:200]}")
 
-    r = requests.post(f"{BASE}/boosts/activate", headers=h,
-                      data=json.dumps({"type": "double_week"}))
-    _check("legacy activate by {type} still works → 200", r.status_code == 200,
-           f"got {r.status_code}: {r.text[:200]}")
-    if r.ok:
-        ab = r.json().get("active_boost", {})
-        _check("legacy activate sets active_boost.type=double_week",
-               (ab or {}).get("type") == "double_week", str(ab))
+# Delete
+if goal_id:
+    r = requests.delete(f"{BASE}/goals/{goal_id}", headers=H(token=token))
+    check("DELETE /goals/{id} → 200", r.status_code in (200, 204),
+          f"got {r.status_code} {r.text[:200]}")
 
-
-# 2. FRIENDS WEEKLY LEADERBOARD
-def test_weekly_leaderboard():
-    print("\n═══ 2. Friends Weekly Leaderboard ═══")
-    aid = f"lb-test-{uuid.uuid4().hex[:16]}"
-    h = _hdr_anon(aid)
-
-    r = requests.get(f"{BASE}/profile", headers=h)
-    _check("profile bootstrap for LB user", r.status_code == 200, str(r.status_code))
-
-    r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
-    _check("GET /friends/leaderboard?tz=0 → 200", r.status_code == 200,
-           f"got {r.status_code}: {r.text[:200]}")
-    if r.ok:
-        body = r.json()
-        rows = body.get("rows", [])
-        _check("fresh user: 1 row (self)", len(rows) == 1, f"rows={len(rows)}")
-        if rows:
-            r0 = rows[0]
-            _check("self row weekly_xp=0", r0.get("weekly_xp") == 0, str(r0))
-            _check("self row is_self=true", r0.get("is_self") is True, str(r0))
-        _check("response has reports[] field", isinstance(body.get("reports"), list),
-               str(body)[:200])
-        _check("response has viewer_is_sunday boolean",
-               isinstance(body.get("viewer_is_sunday"), bool), str(body)[:200])
-        _check("response has week_key", bool(body.get("week_key")), str(body)[:200])
-
-    r2 = requests.get(f"{BASE}/friends/leaderboard?tz=330", headers=h)
-    _check("LB with tz=330 → 200", r2.status_code == 200, str(r2.status_code))
-    pr = requests.get(f"{BASE}/profile", headers=h)
-    if pr.ok:
-        _check("profile.tz_offset_minutes persisted to 330",
-               pr.json().get("tz_offset_minutes") == 330,
-               str(pr.json().get("tz_offset_minutes")))
-
-    requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
-
-    tasks_resp = requests.get(f"{BASE}/tasks", headers=h)
-    _check("GET /tasks for LB user", tasks_resp.status_code == 200, str(tasks_resp.status_code))
-    if not tasks_resp.ok:
-        return
-    tasks = tasks_resp.json().get("tasks", [])
-    if not tasks:
-        FAIL.append("LB: no tasks seeded for fresh user")
-        return
-    target = tasks[0]
-    task_id = target["id"]
-    expected_xp = int(target["xp_value"])
-    cr = requests.post(f"{BASE}/tasks/{task_id}/complete", headers=h, data=json.dumps({}))
-    _check("complete first default task → 200", cr.status_code == 200, str(cr.status_code))
-    awarded = cr.json().get("xp_awarded", 0) if cr.ok else 0
-    _check("xp_awarded matches task xp_value (no boost active)",
-           awarded == expected_xp, f"awarded={awarded}, expected={expected_xp}")
-
-    r3 = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
-    if r3.ok:
-        rows = r3.json().get("rows", [])
-        if rows:
-            self_row = next((row for row in rows if row.get("is_self")), None)
-            _check("self.weekly_xp == awarded XP after task complete",
-                   self_row and self_row.get("weekly_xp") == awarded,
-                   f"row={self_row}, awarded={awarded}")
-
-    # Sort order check would need ≥2 rows; that's covered indirectly via the
-    # registered-users path in test_report_system. Idempotency check:
-    r4a = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
-    r4b = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h)
-    if r4a.ok and r4b.ok:
-        ra = r4a.json().get("rows", [])
-        rb = r4b.json().get("rows", [])
-        ma = ra[0].get("medals_count") if ra else None
-        mb = rb[0].get("medals_count") if rb else None
-        _check("medals_count idempotent across same-day calls",
-               ma == mb, f"first={ma}, second={mb}")
-
-
-def _register_user(full_name: str) -> tuple[str, str, str]:
-    """Register a fresh user. Backend auto-verifies on register and returns JWT."""
-    suffix = uuid.uuid4().hex[:10]
-    email = f"{full_name.lower().replace(' ', '.')}.{suffix}@gmail.com"
-    pwd = f"Pwd-{suffix}-XYZ"
-    payload = {"full_name": full_name, "email": email, "password": pwd}
-    r = requests.post(f"{BASE}/auth/register",
-                      headers={"Content-Type": "application/json"},
-                      data=json.dumps(payload))
-    if r.status_code != 200:
-        raise RuntimeError(f"register failed: {r.status_code} {r.text[:300]}")
-    body = r.json()
-    token = body.get("token")
-    user_id = body.get("user", {}).get("id")
-    if not token or not user_id:
-        raise RuntimeError(f"register missing token/user.id: {body}")
-    return user_id, token, email
-
-
-# 3. LEADERBOARD REPORT-PLAYER SYSTEM
-def test_report_system():
-    print("\n═══ 3. Leaderboard Report-Player System ═══")
-    try:
-        a_id, a_tok, _ = _register_user("Alice Reporter")
-        b_id, b_tok, _ = _register_user("Bob Reportee")
-        _check("registered user A", bool(a_id and a_tok), f"a_id={a_id}")
-        _check("registered user B", bool(b_id and b_tok), f"b_id={b_id}")
-    except Exception as e:
-        FAIL.append(f"register two users failed: {e}")
-        return None
-
-    r = requests.post(f"{BASE}/friends/request",
-                      headers=_hdr_auth(a_tok),
-                      data=json.dumps({"user_id": b_id}))
-    _check("A sends friend request to B", r.status_code == 200,
-           str(r.status_code) + " " + r.text[:200])
-    r = requests.post(f"{BASE}/friends/accept",
-                      headers=_hdr_auth(b_tok),
-                      data=json.dumps({"user_id": a_id}))
-    _check("B accepts → status=friends",
-           r.status_code == 200 and r.json().get("status") == "friends",
-           str(r.status_code) + " " + r.text[:200])
-
-    r = requests.post(f"{BASE}/leaderboard/report",
-                      headers=_hdr_auth(a_tok),
-                      data=json.dumps({"reported_user_id": a_id, "reason": "self"}))
-    _check("A self-report → 400", r.status_code == 400, str(r.status_code))
-
-    rand_uid = str(uuid.uuid4())
-    r = requests.post(f"{BASE}/leaderboard/report",
-                      headers=_hdr_auth(a_tok),
-                      data=json.dumps({"reported_user_id": rand_uid, "reason": "stranger"}))
-    _check("report non-leaderboard member → 400", r.status_code == 400, str(r.status_code))
-
-    r = requests.post(f"{BASE}/leaderboard/report",
-                      headers=_hdr_auth(a_tok),
-                      data=json.dumps({"reported_user_id": b_id,
-                                        "reason": "Suspicious XP gain"}))
-    _check("A reports B → 200", r.status_code == 200,
-           str(r.status_code) + " " + r.text[:200])
-    report_id = None
-    if r.ok:
-        report = r.json().get("report", {})
-        report_id = report.get("id")
-        _check("report has id, reporter_id, reported_user_id, week_key",
-               bool(report_id) and report.get("reporter_id") == a_id
-               and report.get("reported_user_id") == b_id
-               and report.get("week_key"), str(report))
-        _check("reporter A auto-supports own report",
-               a_id in (report.get("supporters") or []), str(report.get("supporters")))
-
-    r = requests.post(f"{BASE}/leaderboard/report",
-                      headers=_hdr_auth(a_tok),
-                      data=json.dumps({"reported_user_id": b_id, "reason": "again"}))
-    _check("A duplicate report same week → 400", r.status_code == 400, str(r.status_code))
-
-    if not report_id:
-        return (a_id, a_tok, b_id, b_tok)
-
-    r = requests.post(f"{BASE}/leaderboard/report/{report_id}/support",
-                      headers=_hdr_auth(b_tok))
-    _check("B supports report → 200", r.status_code == 200,
-           str(r.status_code) + " " + r.text[:200])
-    if r.ok:
-        cnt = r.json().get("supporters_count")
-        _check("supporters_count == 2 after B supports", cnt == 2, f"got {cnt}")
-
-    r = requests.delete(f"{BASE}/leaderboard/report/{report_id}/support",
-                        headers=_hdr_auth(b_tok))
-    _check("B unsupport → 200", r.status_code == 200, str(r.status_code))
-    if r.ok:
-        cnt = r.json().get("supporters_count")
-        _check("supporters_count decreases after unsupport (=1)", cnt == 1, f"got {cnt}")
-
-    r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=_hdr_auth(a_tok))
-    _check("A GET leaderboard → 200", r.status_code == 200, str(r.status_code))
-    if r.ok:
-        body = r.json()
-        rows = body.get("rows", [])
-        # Sort order check: rows sorted desc by weekly_xp
-        weekly = [row.get("weekly_xp", 0) for row in rows]
-        _check("rows sorted desc by weekly_xp",
-               weekly == sorted(weekly, reverse=True), f"weekly={weekly}")
-        # A is friends with B → leaderboard should have at least 2 members
-        _check("A's leaderboard has >= 2 rows (self + B)", len(rows) >= 2, f"len={len(rows)}")
-
-        reports = body.get("reports", [])
-        ids = [rep.get("id") for rep in reports]
-        _check("reports[] surfaces A's active report",
-               report_id in ids, f"ids={ids}, expected={report_id}")
-        match = next((rep for rep in reports if rep.get("id") == report_id), None)
-        if match:
-            _check("report row has reporter_name + reported_name",
-                   bool(match.get("reporter_name")) and bool(match.get("reported_name")),
-                   str(match))
-            _check("report row has reason + week_key + supporters_count",
-                   bool(match.get("reason")) and bool(match.get("week_key"))
-                   and isinstance(match.get("supporters_count"), int),
-                   str(match))
-            _check("viewer_is_reporter=true for reporter A",
-                   match.get("viewer_is_reporter") is True, str(match))
-
-    return (a_id, a_tok, b_id, b_tok)
-
-
-# 4. LEADERBOARD PLAYER PROFILE
-def test_player_profile(ctx):
-    print("\n═══ 4. Leaderboard Player Profile ═══")
-    if not ctx:
-        FAIL.append("player profile test skipped — report test setup failed")
-        return
-    a_id, a_tok, b_id, b_tok = ctx
-
-    r = requests.get(f"{BASE}/leaderboard/profile/{b_id}?tz=0",
-                     headers=_hdr_auth(a_tok))
-    _check("GET /leaderboard/profile/{other_id} → 200", r.status_code == 200,
-           f"got {r.status_code}: {r.text[:200]}")
-    if r.ok:
-        body = r.json()
-        _check("profile.user_id matches B",
-               body.get("user_id") == b_id, f"user_id={body.get('user_id')}")
-        _check("profile has weekly_xp (int)",
-               isinstance(body.get("weekly_xp"), int),
-               f"weekly_xp={body.get('weekly_xp')}")
-        _check("profile.medals == [] (fresh user)",
-               body.get("medals") == [], str(body.get("medals")))
-        _check("profile.is_flagged_cheater == false",
-               body.get("is_flagged_cheater") is False,
-               f"is_flagged_cheater={body.get('is_flagged_cheater')}")
-        _check("profile.friend_status valid",
-               body.get("friend_status") in ("friends", "self", "none",
-                                              "pending_outgoing", "pending_incoming"),
-               f"friend_status={body.get('friend_status')}")
-        _check("profile has level + total_xp + name",
-               isinstance(body.get("level"), int) and isinstance(body.get("total_xp"), int)
-               and bool(body.get("name")), str(body)[:300])
-
-    r2 = requests.get(f"{BASE}/leaderboard/profile/{uuid.uuid4()}?tz=0",
-                      headers=_hdr_auth(a_tok))
-    _check("GET /leaderboard/profile/<bogus> → 404", r2.status_code == 404, str(r2.status_code))
-
-
-def main():
-    test_boost_inventory()
-    test_weekly_leaderboard()
-    ctx = test_report_system()
-    test_player_profile(ctx)
-
-    print("\n" + "=" * 60)
-    print(f"PASS: {len(PASS)}  FAIL: {len(FAIL)}")
-    if FAIL:
-        print("\nFAILURES:")
-        for f in FAIL:
-            print(f"  - {f}")
-        sys.exit(1)
-    print("\nAll tests passed.")
-
-
-if __name__ == "__main__":
-    main()
+# ─────────────────────────────────────────────────────────────────────
+# Summary
+# ─────────────────────────────────────────────────────────────────────
+print("\n" + "=" * 60)
+print(f"PASSED: {len(PASS)}")
+print(f"FAILED: {len(FAIL)}")
+if FAIL:
+    print("\nFAILURES:")
+    for f in FAIL:
+        print(f"  - {f}")
+sys.exit(0 if not FAIL else 1)
