@@ -3720,8 +3720,9 @@ def _serialize_match(match: dict, viewer_id: str, profiles_by_id: dict) -> dict:
             else "spectator"
         ),
         "viewer_captures": int(captures.get(viewer_id, 0)),
-        "viewer_reward": int(match.get("rewards", {}).get(viewer_id, 0))
-            if match.get("status") == "finished" else 0,
+        # Always include viewer_reward so the TS type stays narrow — it's
+        # 0 until the match has finalized.
+        "viewer_reward": int((match.get("rewards", {}) or {}).get(viewer_id, 0)),
         "created_at": match.get("created_at"),
     }
 
