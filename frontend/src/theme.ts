@@ -18,6 +18,34 @@ export const colors = {
   glowCyan: 'rgba(0,217,255,0.5)',
 };
 
+// Snapshot of original text colors so we can restore on logout.
+const _ORIGINAL_TEXT = {
+  text: colors.text,
+  textSecondary: colors.textSecondary,
+  textMuted: colors.textMuted,
+};
+
+export const GOLD = '#FFD700';
+export const GOLD_SOFT = '#FFC727';
+export const GOLD_DEEP = '#B8860B';
+
+/**
+ * Switch the global text palette to a Premium+ golden theme.
+ * Mutates `colors` in place so existing static imports update everywhere.
+ * Call once on Creator/Admin login; reverse via `clearAdminTheme()` on logout.
+ */
+export function applyAdminTheme() {
+  colors.text = GOLD;
+  colors.textSecondary = GOLD_SOFT;
+  colors.textMuted = 'rgba(255,215,0,0.55)';
+}
+
+export function clearAdminTheme() {
+  colors.text = _ORIGINAL_TEXT.text;
+  colors.textSecondary = _ORIGINAL_TEXT.textSecondary;
+  colors.textMuted = _ORIGINAL_TEXT.textMuted;
+}
+
 export type FocusArea = 'social' | 'fitness' | 'appearance' | 'mindset';
 export type TimeSlot = 'morning' | 'afternoon' | 'evening';
 

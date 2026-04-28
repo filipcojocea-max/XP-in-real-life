@@ -92,6 +92,8 @@ export type Profile = {
   // Spot the Object mini-app
   spot_points?: number;
   spot_random_enabled?: boolean;
+  // Creator/Admin (Premium+)
+  is_admin?: boolean;
 };
 
 export type BoostInventoryItem = {
@@ -416,6 +418,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     }),
+
+  // ─── Admin / Creator catalog ──────────────────────────────────────
+  libraryCatalog: () => req<LibraryCatalogResponse>('/library/catalog'),
+
   authMe: () => req<{ id: string; full_name: string; email: string; verified: boolean }>('/auth/me'),
   getProfile: () => req<Profile>('/profile'),
   updateProfile: (name: string) =>
@@ -648,6 +654,10 @@ export type Player = {
   bio: string;
   avatar_base64: string | null;
   friend_status: FriendStatus;
+  // Creator/Admin flags. When `is_admin_view` is true, all numeric stats
+  // arrive as -1 sentinels and the frontend should render them as ∞ + golden.
+  is_admin?: boolean;
+  is_admin_view?: boolean;
 };
 
 export type FriendRequestEntry = {
@@ -709,6 +719,37 @@ export type LeaderboardPlayerProfile = Player & {
 };
 
 // ───────────────────────── Spot the Object ─────────────────────────
+// ───────────────────────── Library Catalog (admin) ─────────────────────────
+export type CatalogItem = {
+  id: string;
+  title: string;
+  description: string;
+  category?: string;
+  difficulty?: string;
+  options?: any[];
+};
+
+export type CatalogSection = {
+  name: string;
+  count: number;
+  items: CatalogItem[];
+};
+
+export type LibraryCatalogResponse = {
+  challenge_tasks: CatalogSection;
+  spot_the_object: CatalogSection;
+  improve_sleep_questions: CatalogSection;
+  points_plus_boosts: CatalogSection;
+};
+
+/** Helpers for rendering admin players (∞ + golden treatment). */
+export const ADMIN_INFINITY = '∞';
+export function adminStatDisplay(value: number, isAdminView?: boolean): string {
+  if (isAdminView) return ADMIN_INFINITY;
+  if (typeof value !== 'number') return '0';
+  return String(value);
+}
+
 export type SpotComment = {
   id: string;
   user_id: string;

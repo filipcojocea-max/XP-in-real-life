@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { View, ActivityIndicator } from 'react-native';
-import { colors } from '../src/theme';
+import { colors, applyAdminTheme, clearAdminTheme } from '../src/theme';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
 
@@ -31,6 +31,12 @@ function AuthGate({ children }: { children: React.ReactNode }) {
         if (cancelled) return;
         const missing = !p.timezone || !p.day_start_time || !p.onboarding_tz_done;
         setAnchorMissing(!!missing);
+        // Apply Premium+ golden text theme for the Creator/Admin globally.
+        if (p.is_admin) {
+          applyAdminTheme();
+        } else {
+          clearAdminTheme();
+        }
       } catch {
         // swallow — profile call may fail if user hasn't finished onboarding yet
       } finally {
@@ -101,6 +107,7 @@ export default function RootLayout() {
             <Stack.Screen name="challenges" />
             <Stack.Screen name="friends" />
             <Stack.Screen name="spot" />
+            <Stack.Screen name="library-catalog" />
           </Stack>
         </AuthGate>
       </View>

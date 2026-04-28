@@ -50,6 +50,27 @@ def hash_password(plain: str) -> str:
     return pwd_ctx.hash(plain)
 
 
+# ═══════════════ Creator / Admin (Premium+) ═══════════════
+# A single hard-coded creator account with elevated privileges:
+#  - All XP caps & time/amount lock-outs are bypassed.
+#  - Other users see this player with "unlimited" stats + a golden treatment.
+#  - Has access to the full mini-app catalog.
+ADMIN_EMAILS = {"filip.cojocea122@gmail.com"}
+ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_DEFAULT_PASSWORD", "XL98CZW5599")
+ADMIN_DEFAULT_NAME = "Filip · Creator"
+
+
+def _is_admin_email(email: Optional[str]) -> bool:
+    return bool(email) and email.strip().lower() in ADMIN_EMAILS
+
+
+async def _is_admin_user(user_id: str) -> bool:
+    if not user_id:
+        return False
+    u = await db.users.find_one({"_id": user_id}, {"email": 1})
+    return _is_admin_email((u or {}).get("email"))
+
+
 def verify_password(plain: str, hashed: str) -> bool:
     try:
         return pwd_ctx.verify(plain, hashed)
@@ -453,6 +474,8 @@ def serialize_profile(prof: dict) -> dict:
         # Spot-the-Object mini-app
         "spot_points": int(prof.get("spot_points", 0) or 0),
         "spot_random_enabled": bool(prof.get("spot_random_enabled", False)),
+        # Creator/Admin (Premium+) — derived from the user's email; never stored on profile
+        "is_admin": _is_admin_email(prof.get("_email_cache")),
         # XP Boost state (Points+ feature)
         "boosts_unlocked": prof.get("boosts_unlocked", False),
         "active_boost": _serialize_active_boost(prof),
@@ -1108,6 +1131,10 @@ async def root():
 @api_router.get("/profile")
 async def get_profile(user_id: str = Depends(get_user_or_legacy)):
     prof = await get_or_create_profile_for(user_id)
+    # Inject email cache so serialize_profile can derive is_admin
+    u = await db.users.find_one({"_id": user_id}, {"email": 1})
+    if u and u.get("email"):
+        prof["_email_cache"] = u.get("email")
     return serialize_profile(prof)
 
 
@@ -1325,7 +1352,8 @@ async def create_task(body: TaskCreate, user_id: str = Depends(get_user_or_legac
         "time_slot": body.time_slot,
         # Custom (user-created) tasks are capped at 20 XP. Default seeded tasks
         # bypass this and can be 5-200 (set in seed_default_tasks_for_user).
-        "xp_value": max(5, min(20, body.xp_value)),
+        # Creator/Admin bypass the cap entirely (Premium+).
+        "xp_value": (int(body.xp_value) if await _is_admin_user(user_id) else max(5, min(20, body.xp_value))),
         "recurring": body.recurring,
         "scheduled_time": body.scheduled_time,
         "reminder_enabled": body.reminder_enabled,
@@ -1353,7 +1381,8 @@ async def update_task(task_id: str, body: TaskUpdate, user_id: str = Depends(get
                 f"Cannot change {', '.join(blocked)} on a default quest — only title, description, XP and reminder are editable.",
             )
     # Custom (non-default) tasks: cap XP at 20.  Default tasks are unrestricted.
-    if "xp_value" in update and not existing.get("is_default"):
+    # Creator/Admin bypass the cap entirely.
+    if "xp_value" in update and not existing.get("is_default") and not await _is_admin_user(user_id):
         update["xp_value"] = max(5, min(20, int(update["xp_value"])))
     await db.tasks.update_one({"id": task_id, "user_id": user_id}, {"$set": update})
     task = await db.tasks.find_one({"id": task_id, "user_id": user_id}, {"_id": 0})
@@ -1531,8 +1560,9 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
     # don't count toward the limit so users always have room to add more
     # once they finish older ones.
     MAX_ACTIVE_GOALS = 5
+    is_admin = await _is_admin_user(user_id)
     active_count = await db.goals.count_documents({"user_id": user_id, "completed": False})
-    if active_count >= MAX_ACTIVE_GOALS:
+    if active_count >= MAX_ACTIVE_GOALS and not is_admin:
         raise HTTPException(
             status_code=400,
             detail={
@@ -1542,7 +1572,7 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
             },
         )
     unit_norm = (body.unit or "days").lower()
-    xp_reward = _clamp_goal_xp(unit_norm, body.xp_reward)
+    xp_reward = body.xp_reward if is_admin else _clamp_goal_xp(unit_norm, body.xp_reward)
     goal = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
@@ -2535,11 +2565,43 @@ def _relationship_status(rel: Optional[dict], me: str) -> str:
     return "pending_incoming"
 
 
+async def _enrich_emails(profs: list) -> list:
+    """Batch-fetch the user emails for a list of profile dicts, attach as
+    `_email_cache` on each (in-place). This lets `_serialize_player` derive
+    `is_admin` from the user's email without a per-row lookup."""
+    if not profs:
+        return profs
+    ids = [p.get("_id") or p.get("user_id") for p in profs if p]
+    ids = [i for i in ids if i]
+    if not ids:
+        return profs
+    email_map: dict = {}
+    async for u in db.users.find({"_id": {"$in": ids}}, {"email": 1}):
+        email_map[u["_id"]] = u.get("email")
+    for p in profs:
+        if p is None:
+            continue
+        pid = p.get("_id") or p.get("user_id")
+        if pid in email_map and email_map[pid]:
+            p["_email_cache"] = email_map[pid]
+    return profs
+
+
 def _serialize_player(prof: dict, status: str = "none") -> dict:
-    """Public-facing trimmed profile for player cards / detail views."""
+    """Public-facing trimmed profile for player cards / detail views.
+
+    Special-case for the Creator/Admin: when OTHERS view this player,
+    stats are replaced with infinity, the bio is hidden, and an `is_admin_view`
+    flag is set so the frontend can render a golden treatment.
+    """
     total_xp = int(prof.get("total_xp", 0) or 0)
-    return {
-        "user_id": prof.get("_id") or prof.get("user_id"),
+    user_id = prof.get("_id") or prof.get("user_id")
+    is_admin = _is_admin_email(prof.get("_email_cache"))
+    viewing_self = status == "self"
+    show_unlimited = is_admin and not viewing_self
+
+    base = {
+        "user_id": user_id,
         "name": prof.get("full_name") or prof.get("name") or "Anonymous",
         "level": int(prof.get("level", 1) or 1),
         "total_xp": total_xp,
@@ -2550,7 +2612,20 @@ def _serialize_player(prof: dict, status: str = "none") -> dict:
         "bio": prof.get("bio") or "",
         "avatar_base64": prof.get("avatar_base64"),
         "friend_status": status,  # none | pending_outgoing | pending_incoming | friends | self
+        "is_admin": bool(is_admin),
+        "is_admin_view": bool(show_unlimited),  # frontend renders ∞ + golden when true
     }
+    if show_unlimited:
+        base.update({
+            "level": 999,         # special sentinel, frontend renders ∞
+            "total_xp": -1,        # sentinel for ∞
+            "current_streak": -1,
+            "best_streak": -1,
+            "goals_completed": -1,
+            "tasks_completed": -1,
+            "bio": "",            # cleared as requested
+        })
+    return base
 
 
 def _fuzzy_score(needle: str, haystack: str) -> int:
@@ -2617,6 +2692,8 @@ async def list_players(q: str = "", user_id: str = Depends(get_user_or_legacy)):
                 rels[key] = r
 
     out = []
+    profs_to_enrich = [p for _, p in scored[:200]]
+    await _enrich_emails(profs_to_enrich)
     for _, p in scored[:200]:
         other_id = p.get("_id")
         rel = rels.get((user_id, other_id))
@@ -2631,6 +2708,7 @@ async def player_profile(other_id: str, user_id: str = Depends(get_user_or_legac
     prof = await db.profile.find_one({"_id": other_id})
     if not prof:
         raise HTTPException(404, "Player not found")
+    await _enrich_emails([prof])
     rel = await _find_relationship(user_id, other_id)
     status = "self" if other_id == user_id else _relationship_status(rel, user_id)
     return _serialize_player(prof, status)
@@ -3529,3 +3607,147 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+@app.on_event("startup")
+async def _seed_admin_account():
+    """Idempotently create the Creator/Admin account so its credentials always
+    work. Existing password is preserved if the user has changed it via the
+    forgot-password flow."""
+    try:
+        for email_lower in ADMIN_EMAILS:
+            existing = await db.users.find_one({"email": email_lower})
+            if existing:
+                # Make sure the email is verified so the user can log in.
+                if not existing.get("email_verified"):
+                    await db.users.update_one(
+                        {"_id": existing["_id"]},
+                        {"$set": {"email_verified": True}},
+                    )
+                # Backfill profile so the admin lands directly on home (no onboarding loop).
+                await db.profile.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {
+                        "onboarding_complete": True,
+                        "morning_setup_done": True,
+                        "onboarding_tz_done": True,
+                        "day_start_time": "07:00",
+                        "timezone": "Australia/Sydney",
+                        "boosts_unlocked": True,
+                    }},
+                    upsert=False,
+                )
+                continue
+            user_id = str(uuid.uuid4())
+            now = now_iso()
+            await db.users.insert_one({
+                "_id": user_id,
+                "email": email_lower,
+                "password_hash": hash_password(ADMIN_DEFAULT_PASSWORD),
+                "email_verified": True,
+                "created_at": now,
+            })
+            # Profile auto-creates on first login; pre-seed a basic one so
+            # the admin badge surfaces immediately.
+            await db.profile.insert_one({
+                "_id": user_id,
+                "name": ADMIN_DEFAULT_NAME,
+                "full_name": ADMIN_DEFAULT_NAME,
+                "level": 1,
+                "total_xp": 0,
+                "current_streak": 0,
+                "best_streak": 0,
+                "tasks_completed": 0,
+                "goals_completed": 0,
+                "bio": "",
+                "avatar_base64": None,
+                "wake_time": "07:00",
+                "morning_setup_done": True,
+                "day_start_time": "07:00",
+                "timezone": "Australia/Sydney",
+                "onboarding_tz_done": True,
+                "onboarding_complete": True,
+                "spot_points": 0,
+                "spot_random_enabled": False,
+                "boosts_unlocked": True,
+                "boost_inventory": [],
+                "created_at": now,
+            })
+            logger.info(f"[admin-seed] Created Creator account: {email_lower}")
+    except Exception as e:
+        logger.warning(f"[admin-seed] failed: {e}")
+
+
+# ═══════════════ Mini-app Catalog (Admin-only) ═══════════════
+@api_router.get("/library/catalog")
+async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
+    """Full content catalog of every mini-app. Used by the Creator/Admin
+    dashboard to inspect every challenge / object / sleep question.
+    Restricted to admin users."""
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin access only.")
+    # Challenge Tasks
+    try:
+        from challenges_data import CHALLENGES as RAW_CHALLENGES
+        challenges = list(RAW_CHALLENGES) if RAW_CHALLENGES else []
+    except Exception:
+        challenges = []
+    # Spot the Object
+    spot_objects = list(SPOT_OBJECTS)
+    # Sleep questions
+    sleep_questions = list(SLEEP_QUESTIONS)
+    # Boost types (Points+ shop)
+    boost_defs = [
+        {"type": k, **v} for k, v in BOOST_DEFS.items()
+    ]
+    return {
+        "challenge_tasks": {
+            "name": "Challenge Tasks",
+            "count": len(challenges),
+            "items": [
+                {
+                    "id": c.get("id"),
+                    "title": c.get("title"),
+                    "description": c.get("description") or c.get("desc") or "",
+                    "category": c.get("category", ""),
+                    "difficulty": c.get("difficulty", ""),
+                }
+                for c in challenges
+            ],
+        },
+        "spot_the_object": {
+            "name": "Spot the Object",
+            "count": len(spot_objects),
+            "items": [{"id": str(i), "title": o, "description": f"Find and photograph: {o}."} for i, o in enumerate(spot_objects)],
+        },
+        "improve_sleep_questions": {
+            "name": "Improve Sleeping (Onboarding Questions)",
+            "count": len(sleep_questions),
+            "items": [
+                {
+                    "id": q.get("id"),
+                    "title": q.get("q") or q.get("question") or "",
+                    "description": f"Type: {q.get('type', '')}",
+                    "options": q.get("options") or [],
+                }
+                for q in sleep_questions
+            ],
+        },
+        "points_plus_boosts": {
+            "name": "Points+ Boosts",
+            "count": len(boost_defs),
+            "items": [
+                {
+                    "id": b.get("type"),
+                    "title": b.get("label", ""),
+                    "description": f"{b.get('multiplier')}x XP for {b.get('duration_days')} day(s)",
+                }
+                for b in boost_defs
+            ],
+        },
+    }
+
+
+# Re-attach api_router so endpoints declared after the original include
+# (admin-seed, catalog) are reachable.
+app.include_router(api_router)

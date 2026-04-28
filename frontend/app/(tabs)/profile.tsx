@@ -124,21 +124,23 @@ export default function ProfileScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <Text style={styles.kicker}>Character</Text>
+        <Text style={styles.kicker}>{profile.is_admin ? 'CREATOR · PREMIUM+' : 'Character'}</Text>
         <Text style={styles.title}>Profile</Text>
 
         <View style={styles.avatarWrap}>
-          <Ring size={150} stroke={8} progress={profile.xp_progress} color={colors.amber}>
-            <View style={styles.avatar}>
+          <Ring size={150} stroke={8} progress={profile.xp_progress} color={profile.is_admin ? '#FFD700' : colors.amber}>
+            <View style={[styles.avatar, profile.is_admin && { borderColor: '#FFD700', borderWidth: 3 }]}>
               {profile.avatar_base64 ? (
                 <Image source={{ uri: profile.avatar_base64 }} style={styles.avatarImg} />
               ) : (
-                <Ionicons name="shield" size={70} color={colors.cyan} />
+                <Ionicons name={profile.is_admin ? 'star' : 'shield'} size={70} color={profile.is_admin ? '#FFD700' : colors.cyan} />
               )}
             </View>
           </Ring>
-          <View style={styles.levelBadge}>
-            <Text style={styles.levelBadgeText}>LV {profile.level}</Text>
+          <View style={[styles.levelBadge, profile.is_admin && { backgroundColor: '#FFD700', borderColor: '#FFD700' }]}>
+            <Text style={[styles.levelBadgeText, profile.is_admin && { color: colors.bg }]}>
+              {profile.is_admin ? '∞ PREMIUM+' : `LV ${profile.level}`}
+            </Text>
           </View>
 
           {editing ? (

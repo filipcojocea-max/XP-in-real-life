@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -8,13 +8,24 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
-import { colors, spacing, radii } from '../../src/theme';
+import { router, useFocusEffect } from 'expo-router';
+import { colors, spacing, radii, GOLD } from '../../src/theme';
+import { api } from '../../src/api';
 
 type Tab = 'add' | 'mine';
 
 export default function Library() {
   const [tab, setTab] = useState<Tab>('add');
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const checkAdmin = React.useCallback(async () => {
+    try {
+      const p = await api.getProfile();
+      setIsAdmin(!!p.is_admin);
+    } catch {}
+  }, []);
+  useEffect(() => { checkAdmin(); }, [checkAdmin]);
+  useFocusEffect(React.useCallback(() => { checkAdmin(); }, [checkAdmin]));
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -71,6 +82,35 @@ export default function Library() {
       >
         {tab === 'add' ? (
           <View>
+            {/* Admin-only Catalog tile */}
+            {isAdmin ? (
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => router.push('/library-catalog' as any)}
+                style={[styles.featureCard, { borderColor: GOLD + '88', backgroundColor: GOLD + '08', marginBottom: spacing.md }]}
+                testID="library-card-catalog"
+              >
+                <View style={[styles.featureGlow, { backgroundColor: GOLD + '22' }]} />
+                <View style={styles.featureRow}>
+                  <View style={[styles.featureIcon, { backgroundColor: GOLD + '22', borderColor: GOLD + '88' }]}>
+                    <Ionicons name="library" size={32} color={GOLD} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <View style={styles.featureKickerRow}>
+                      <Text style={[styles.featureKicker, { color: GOLD }]}>CREATOR · PREMIUM+</Text>
+                    </View>
+                    <Text style={[styles.featureTitle, { color: GOLD }]}>Mini-App Catalog</Text>
+                    <Text style={styles.featureDesc}>
+                      Full details on every challenge, object, sleep question and boost. Visible only on the Creator account.
+                    </Text>
+                    <View style={[styles.featureCta, { backgroundColor: GOLD }]}>
+                      <Text style={[styles.featureCtaText, { color: colors.bg }]}>Open catalog</Text>
+                      <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+                    </View>
+                  </View>
+                </View>
+              </TouchableOpacity>
+            ) : null}
             {/* Sleep mini-app — featured */}
             <TouchableOpacity
               testID="library-card-sleep"

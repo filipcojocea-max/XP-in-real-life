@@ -405,19 +405,29 @@ function PlayerCard({ player, onPress, onAddFriend, saving }: {
   onAddFriend?: () => void;
   saving?: boolean;
 }) {
+  const adminView = !!player.is_admin_view;
   return (
-    <TouchableOpacity activeOpacity={0.85} onPress={onPress} style={styles.playerCard} testID={`player-${player.user_id}`}>
+    <TouchableOpacity
+      activeOpacity={0.85}
+      onPress={onPress}
+      style={[styles.playerCard, adminView && { borderColor: '#FFD700', backgroundColor: '#FFD70010' }]}
+      testID={`player-${player.user_id}`}
+    >
       <PlayerAvatar player={player} />
       <View style={{ flex: 1 }}>
-        <Text style={styles.playerName} numberOfLines={1}>{player.name}</Text>
+        <Text style={[styles.playerName, adminView && { color: '#FFD700' }]} numberOfLines={1}>{player.name}</Text>
         <View style={styles.playerStatsRow}>
-          <View style={styles.statChip}>
-            <Ionicons name="ribbon" size={11} color={colors.cyan} />
-            <Text style={styles.statChipText}>Lv {player.level}</Text>
+          <View style={[styles.statChip, adminView && { borderColor: '#FFD70088', backgroundColor: '#FFD70015' }]}>
+            <Ionicons name="ribbon" size={11} color={adminView ? '#FFD700' : colors.cyan} />
+            <Text style={[styles.statChipText, adminView && { color: '#FFD700' }]}>
+              {adminView ? '∞' : `Lv ${player.level}`}
+            </Text>
           </View>
-          <View style={styles.statChip}>
-            <Ionicons name="flash" size={11} color={colors.amber} />
-            <Text style={[styles.statChipText, { color: colors.amber }]}>{player.total_xp} XP</Text>
+          <View style={[styles.statChip, adminView && { borderColor: '#FFD70088', backgroundColor: '#FFD70015' }]}>
+            <Ionicons name="flash" size={11} color={adminView ? '#FFD700' : colors.amber} />
+            <Text style={[styles.statChipText, { color: adminView ? '#FFD700' : colors.amber }]}>
+              {adminView ? '∞' : `${player.total_xp} XP`}
+            </Text>
           </View>
         </View>
       </View>
@@ -427,12 +437,22 @@ function PlayerCard({ player, onPress, onAddFriend, saving }: {
 }
 
 function PlayerAvatar({ player }: { player: Player }) {
+  const adminView = !!player.is_admin_view;
+  const wrapStyle = adminView ? { borderWidth: 2, borderColor: '#FFD700', borderRadius: 26, padding: 1 } : undefined;
   if (player.avatar_base64) {
-    return <Image source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }} style={styles.avatar} />;
+    return (
+      <View style={wrapStyle as any}>
+        <Image source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }} style={styles.avatar} />
+      </View>
+    );
   }
   return (
-    <View style={[styles.avatar, styles.avatarFallback]}>
-      <Text style={styles.avatarLetter}>{(player.name || '?').slice(0, 1).toUpperCase()}</Text>
+    <View style={wrapStyle as any}>
+      <View style={[styles.avatar, styles.avatarFallback, adminView && { backgroundColor: '#FFD70022', borderColor: '#FFD700' }]}>
+        <Text style={[styles.avatarLetter, adminView && { color: '#FFD700' }]}>
+          {(player.name || '?').slice(0, 1).toUpperCase()}
+        </Text>
+      </View>
     </View>
   );
 }
@@ -499,29 +519,41 @@ function PlayerProfileModal({
           <View style={{ width: 36 }} />
         </View>
         <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xl }}>
-          <View style={styles.modalAvatarWrap}>
+          <View style={[styles.modalAvatarWrap, player.is_admin_view && { borderWidth: 4, borderColor: '#FFD700', borderRadius: 90, padding: 4 }]}>
             {player.avatar_base64 ? (
-              <Image source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }} style={styles.bigAvatar} />
+              <Image
+                source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }}
+                style={[styles.bigAvatar, player.is_admin_view && { borderWidth: 2, borderColor: '#FFD700' }]}
+              />
             ) : (
-              <View style={[styles.bigAvatar, styles.avatarFallback]}>
-                <Text style={styles.bigAvatarLetter}>{(player.name || '?').slice(0, 1).toUpperCase()}</Text>
+              <View style={[styles.bigAvatar, styles.avatarFallback, player.is_admin_view && { borderColor: '#FFD700', backgroundColor: '#FFD70022' }]}>
+                <Text style={[styles.bigAvatarLetter, player.is_admin_view && { color: '#FFD700' }]}>
+                  {(player.name || '?').slice(0, 1).toUpperCase()}
+                </Text>
               </View>
             )}
-            <View style={styles.levelPill}>
-              <Text style={styles.levelPillText}>LV {player.level}</Text>
+            <View style={[styles.levelPill, player.is_admin_view && { backgroundColor: '#FFD700' }]}>
+              <Text style={[styles.levelPillText, player.is_admin_view && { color: colors.bg }]}>
+                {player.is_admin_view ? '∞ PREMIUM+' : `LV ${player.level}`}
+              </Text>
             </View>
           </View>
-          <Text style={styles.modalName}>{player.name}</Text>
+          <Text style={[styles.modalName, player.is_admin_view && { color: '#FFD700' }]}>{player.name}</Text>
 
           <View style={styles.modalStatsGrid}>
-            <ModalStat icon="flash" color={colors.amber} value={player.total_xp.toString()} label="Total XP" />
-            <ModalStat icon="flame" color={colors.red} value={player.current_streak.toString()} label="Streak" />
-            <ModalStat icon="trophy" color={colors.amber} value={player.best_streak.toString()} label="Best" />
-            <ModalStat icon="checkmark-circle" color={colors.green} value={player.tasks_completed.toString()} label="Quests" />
-            <ModalStat icon="flag" color={colors.cyan} value={player.goals_completed.toString()} label="Goals" />
+            <ModalStat icon="flash" color={player.is_admin_view ? '#FFD700' : colors.amber}
+              value={player.is_admin_view ? '∞' : player.total_xp.toString()} label="Total XP" />
+            <ModalStat icon="flame" color={player.is_admin_view ? '#FFD700' : colors.red}
+              value={player.is_admin_view ? '∞' : player.current_streak.toString()} label="Streak" />
+            <ModalStat icon="trophy" color={player.is_admin_view ? '#FFD700' : colors.amber}
+              value={player.is_admin_view ? '∞' : player.best_streak.toString()} label="Best" />
+            <ModalStat icon="checkmark-circle" color={player.is_admin_view ? '#FFD700' : colors.green}
+              value={player.is_admin_view ? '∞' : player.tasks_completed.toString()} label="Quests" />
+            <ModalStat icon="flag" color={player.is_admin_view ? '#FFD700' : colors.cyan}
+              value={player.is_admin_view ? '∞' : player.goals_completed.toString()} label="Goals" />
           </View>
 
-          {player.bio ? (
+          {player.bio && !player.is_admin_view ? (
             <View style={styles.modalBioCard}>
               <Text style={styles.modalBioLabel}>BIO</Text>
               <Text style={styles.modalBioText}>{player.bio}</Text>
