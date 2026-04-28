@@ -47,7 +47,15 @@ export default function DayAnchorSetup() {
       await api.setDayAnchor(zone.iana, wakeTime);
       router.replace('/');
     } catch (e: any) {
-      showAlert('Could not save', String(e?.message || e));
+      // If the fields got persisted by a previous attempt but the gate bounced
+      // us back, the backend will respond 400 tz_locked / day_start_locked.
+      // In that case the answer is already saved — just continue to home.
+      const msg = String(e?.message || '');
+      if (msg.includes('tz_locked') || msg.includes('day_start_locked') || msg.includes('locked')) {
+        router.replace('/');
+        return;
+      }
+      showAlert('Could not save', msg || 'Please try again.');
     } finally {
       setSaving(false);
     }

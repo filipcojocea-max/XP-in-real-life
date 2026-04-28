@@ -15,6 +15,9 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   const [anchorMissing, setAnchorMissing] = useState(false);
 
   // Poll profile once we have access; force day-anchor setup if missing.
+  // Re-runs on segment change so that after /day-anchor-setup navigates away
+  // (via setDayAnchor → router.replace('/')), we re-check against fresh data
+  // instead of bouncing the user back into the setup flow on stale state.
   useEffect(() => {
     let cancelled = false;
     if (loading || !hasAccess) {
@@ -35,7 +38,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [loading, hasAccess, token, anonymousId]);
+  }, [loading, hasAccess, token, anonymousId, segments[0]]);
 
   useEffect(() => {
     if (loading) return;
