@@ -419,6 +419,34 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  // ─── Spot the Object — Multiplayer/Lobby (Phase 2) ──────────────
+  spotMatchCreate: (friend_ids: string[]) =>
+    req<{ match: SpotMatch }>('/spot/match/create', {
+      method: 'POST',
+      body: JSON.stringify({ friend_ids }),
+    }),
+  spotMatchList: () => req<{ matches: SpotMatch[] }>('/spot/match/list'),
+  spotMatchGet: (id: string) => req<{ match: SpotMatch }>(`/spot/match/${id}`),
+  spotMatchJoin: (id: string) =>
+    req<{ match: SpotMatch }>(`/spot/match/${id}/join`, { method: 'POST' }),
+  spotMatchDecline: (id: string) =>
+    req<{ ok: boolean }>(`/spot/match/${id}/decline`, { method: 'POST' }),
+  spotMatchStart: (id: string) =>
+    req<{ match: SpotMatch }>(`/spot/match/${id}/start`, { method: 'POST' }),
+  spotMatchCancel: (id: string) =>
+    req<{ ok: boolean }>(`/spot/match/${id}/cancel`, { method: 'POST' }),
+  spotMatchCapture: (id: string, photo_base64: string) =>
+    req<{
+      detected: boolean;
+      confidence: number;
+      can_capture: boolean;
+      captures: number;
+      match: SpotMatch;
+    }>(`/spot/match/${id}/capture`, {
+      method: 'POST',
+      body: JSON.stringify({ photo_base64 }),
+    }),
+
   // ─── Admin / Creator catalog ──────────────────────────────────────
   libraryCatalog: () => req<LibraryCatalogResponse>('/library/catalog'),
 
@@ -782,5 +810,34 @@ export type SpotEntry = {
   like_count?: number;
   comment_count?: number;
   is_self?: boolean;
+};
+
+// ───────────────────────── Spot the Object — Multiplayer ──────────
+export type SpotMatchStatus = 'waiting' | 'active' | 'finished' | 'cancelled';
+export type SpotMatchPlayer = {
+  user_id: string;
+  name: string;
+  avatar_base64: string | null;
+  is_host: boolean;
+  joined: boolean;
+  declined: boolean;
+  captures: number;
+};
+export type SpotMatch = {
+  id: string;
+  host_id: string;
+  status: SpotMatchStatus;
+  target_object: string | null;
+  started_at: string | null;
+  ends_at: string | null;
+  finished_at: string | null;
+  /** Server-computed seconds remaining; null when match is not active. */
+  seconds_left: number | null;
+  winner_id: string | null;
+  players: SpotMatchPlayer[];
+  viewer_role: 'host' | 'joined' | 'invited' | 'spectator';
+  viewer_captures: number;
+  viewer_reward: number;
+  created_at: string;
 };
 

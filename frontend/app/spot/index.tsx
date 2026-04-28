@@ -153,6 +153,25 @@ export default function SpotHub() {
           />
         </View>
 
+        {/* Mode 3: Spot the Object — Friends Multiplayer (Phase 2) */}
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onPress={() => router.push('/spot/multiplayer')}
+          testID="spot-mode-multiplayer"
+          style={styles.modeCard}
+        >
+          <View style={[styles.modeIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '88' }]}>
+            <Ionicons name="people" size={26} color={colors.cyan} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.modeTitle}>Spot with Friends</Text>
+            <Text style={styles.modeDesc}>
+              Invite friends to a 2-min lobby. Whoever spots the object the most wins +5 SP. Losers −1 SP.
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={colors.cyan} />
+        </TouchableOpacity>
+
         {/* Spot Points stat */}
         <View style={styles.statCard}>
           <View>

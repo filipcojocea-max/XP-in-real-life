@@ -3633,6 +3633,401 @@ async def spot_random_toggle(body: SpotRandomTogglePayload, user_id: str = Depen
     return {"spot_random_enabled": bool(body.enabled), "profile": serialize_profile(prof)}
 
 
+# ════════════════════════════════════════════════════════════════════
+# SPOT THE OBJECT — MULTIPLAYER LOBBY (Phase 2)
+# ════════════════════════════════════════════════════════════════════
+# Flow:
+#   1) Host POST /api/spot/match/create with friend_ids → match status='waiting'
+#   2) Each invited friend POST /api/spot/match/{id}/join (or /decline)
+#   3) Host POST /api/spot/match/{id}/start → status='active', server picks
+#      target_object, sets started_at + ends_at = started_at + 2 min
+#   4) Players POST /api/spot/match/{id}/capture with photo_b64 — successful
+#      detections increment captures[user_id]; multiple captures allowed
+#      throughout the 2-minute window (per design pick #3 = B "everyone has
+#      full 2 min, top scorer wins").
+#   5) On any read of an active match, server lazily checks if the window
+#      is over and finalizes the match — winner = player with most captures
+#      (ties = no winner). Winner +5 spot_points; everyone else -1.
+# Polling: clients GET /api/spot/match/{id} every ~2 seconds while in lobby
+# or active to drive UI state transitions.
+MATCH_DURATION_SECONDS = 120        # 2 minutes
+MATCH_WINNER_REWARD = 5             # spot_points
+MATCH_LOSER_PENALTY = -1
+MATCH_MAX_INVITES = 7               # up to 8 players incl. host
+MATCH_RECENT_WINDOW_HOURS = 24      # show finished matches for one day
+
+
+class SpotMatchCreatePayload(BaseModel):
+    friend_ids: List[str]
+
+
+class SpotMatchCapturePayload(BaseModel):
+    photo_base64: str
+
+
+def _serialize_match(match: dict, viewer_id: str, profiles_by_id: dict) -> dict:
+    """Trim a match doc into the shape the frontend wants. `profiles_by_id`
+    is a {user_id: profile_doc} cache so we can attach `name` + `avatar`
+    onto each player without a per-player Mongo round-trip."""
+    captures = match.get("captures", {}) or {}
+    joined = match.get("joined", []) or []
+    invited = match.get("invited", []) or []
+    host_id = match.get("host_id")
+    # All known participants (host + invited + joined, dedup, ordered)
+    all_uids: list[str] = []
+    seen = set()
+    for uid in [host_id] + invited + joined:
+        if uid and uid not in seen:
+            all_uids.append(uid)
+            seen.add(uid)
+    players = []
+    for uid in all_uids:
+        prof = profiles_by_id.get(uid) or {}
+        players.append({
+            "user_id": uid,
+            "name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "avatar_base64": prof.get("avatar_base64"),
+            "is_host": uid == host_id,
+            "joined": uid in joined or uid == host_id,
+            "declined": uid in (match.get("declined", []) or []),
+            "captures": int(captures.get(uid, 0)),
+        })
+    started_at = match.get("started_at")
+    ends_at = match.get("ends_at")
+    seconds_left = None
+    if match.get("status") == "active" and ends_at:
+        try:
+            ends_dt = datetime.fromisoformat(ends_at.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            seconds_left = max(0, int((ends_dt - now).total_seconds()))
+        except Exception:
+            seconds_left = None
+    return {
+        "id": match["id"],
+        "host_id": host_id,
+        "status": match.get("status", "waiting"),
+        "target_object": match.get("target_object"),
+        "started_at": started_at,
+        "ends_at": ends_at,
+        "finished_at": match.get("finished_at"),
+        "seconds_left": seconds_left,
+        "winner_id": match.get("winner_id"),
+        "players": players,
+        "viewer_role": (
+            "host" if viewer_id == host_id
+            else "joined" if viewer_id in joined
+            else "invited" if viewer_id in invited
+            else "spectator"
+        ),
+        "viewer_captures": int(captures.get(viewer_id, 0)),
+        "viewer_reward": int(match.get("rewards", {}).get(viewer_id, 0))
+            if match.get("status") == "finished" else 0,
+        "created_at": match.get("created_at"),
+    }
+
+
+async def _finalize_match_if_due(match: dict) -> dict:
+    """If a match is past its end time, settle it: pick winner, apply
+    rewards/penalties to spot_points, mark status='finished'. Returns the
+    (possibly updated) match document."""
+    if match.get("status") != "active":
+        return match
+    ends_at = match.get("ends_at")
+    if not ends_at:
+        return match
+    try:
+        ends_dt = datetime.fromisoformat(ends_at.replace("Z", "+00:00"))
+    except Exception:
+        return match
+    if datetime.now(timezone.utc) < ends_dt:
+        return match
+    # Time's up — settle.
+    captures: dict = match.get("captures", {}) or {}
+    joined = list({match.get("host_id"), *(match.get("joined") or [])})
+    joined = [u for u in joined if u]
+    # Find winner: highest captures, no ties.
+    if joined:
+        scored = [(uid, int(captures.get(uid, 0))) for uid in joined]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top_score = scored[0][1]
+        leaders = [uid for uid, s in scored if s == top_score]
+        winner_id = leaders[0] if (len(leaders) == 1 and top_score > 0) else None
+    else:
+        winner_id = None
+    # Compute & apply rewards.
+    rewards: dict = {}
+    for uid in joined:
+        if winner_id and uid == winner_id:
+            rewards[uid] = MATCH_WINNER_REWARD
+        elif winner_id:  # there IS a winner and this user isn't them
+            rewards[uid] = MATCH_LOSER_PENALTY
+        else:
+            rewards[uid] = 0  # tie / no captures — no swing
+        if rewards[uid]:
+            await db.profile.update_one(
+                {"_id": uid}, {"$inc": {"spot_points": rewards[uid]}}
+            )
+    finalized_at = now_iso()
+    await db.spot_matches.update_one(
+        {"id": match["id"]},
+        {"$set": {
+            "status": "finished",
+            "winner_id": winner_id,
+            "rewards": rewards,
+            "finished_at": finalized_at,
+        }},
+    )
+    match["status"] = "finished"
+    match["winner_id"] = winner_id
+    match["rewards"] = rewards
+    match["finished_at"] = finalized_at
+    return match
+
+
+async def _load_profiles_cache(user_ids: list[str]) -> dict:
+    """Bulk-fetch profile docs for a list of ids → {uid: doc}."""
+    if not user_ids:
+        return {}
+    cur = db.profile.find(
+        {"_id": {"$in": list(set(user_ids))}},
+        {"full_name": 1, "name": 1, "avatar_base64": 1, "spot_points": 1, "last_seen_at": 1},
+    )
+    out = {}
+    async for p in cur:
+        out[p["_id"]] = p
+    return out
+
+
+@api_router.post("/spot/match/create")
+async def spot_match_create(
+    body: SpotMatchCreatePayload, user_id: str = Depends(get_user_or_legacy)
+):
+    """Host creates a new lobby. Match starts in status='waiting'; the
+    target_object is NOT picked until the host taps Start (so anyone
+    peeking at the lobby can't pre-cheat)."""
+    friend_ids = [fid for fid in (body.friend_ids or []) if fid and fid != user_id]
+    friend_ids = list(dict.fromkeys(friend_ids))[:MATCH_MAX_INVITES]
+    if not friend_ids:
+        raise HTTPException(400, "Pick at least one friend to invite.")
+    # Sanity: only invite actual confirmed friends.
+    confirmed = []
+    for fid in friend_ids:
+        rel = await db.friend_requests.find_one({
+            "$or": [
+                {"from_user_id": user_id, "to_user_id": fid, "status": "accepted"},
+                {"from_user_id": fid, "to_user_id": user_id, "status": "accepted"},
+            ]
+        })
+        if rel:
+            confirmed.append(fid)
+    if not confirmed:
+        raise HTTPException(400, "No confirmed friends in the invite list.")
+    match_doc = {
+        "id": str(uuid.uuid4()),
+        "host_id": user_id,
+        "invited": confirmed,
+        "joined": [user_id],   # host auto-joins
+        "declined": [],
+        "captures": {user_id: 0},
+        "status": "waiting",
+        "target_object": None,
+        "started_at": None,
+        "ends_at": None,
+        "finished_at": None,
+        "winner_id": None,
+        "rewards": {},
+        "created_at": now_iso(),
+    }
+    await db.spot_matches.insert_one(match_doc)
+    profiles = await _load_profiles_cache([user_id, *confirmed])
+    return {"match": _serialize_match(match_doc, user_id, profiles)}
+
+
+@api_router.get("/spot/match/list")
+async def spot_match_list(user_id: str = Depends(get_user_or_legacy)):
+    """All matches relevant to this user — open lobbies, active games,
+    plus finished matches inside the last 24h so the user sees their
+    recent results without us bloating the response forever."""
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=MATCH_RECENT_WINDOW_HOURS)
+    cutoff_iso = cutoff_dt.isoformat()
+    cur = db.spot_matches.find({
+        "$and": [
+            {"$or": [
+                {"host_id": user_id},
+                {"invited": user_id},
+                {"joined": user_id},
+            ]},
+            {"$or": [
+                {"status": {"$in": ["waiting", "active"]}},
+                {"status": "finished", "finished_at": {"$gte": cutoff_iso}},
+                {"status": "cancelled", "created_at": {"$gte": cutoff_iso}},
+            ]},
+        ]
+    }).sort("created_at", -1).limit(50)
+    matches: list[dict] = []
+    needs_finalize: list[dict] = []
+    all_uids: set[str] = set()
+    async for m in cur:
+        m.pop("_id", None)
+        if m.get("status") == "active":
+            needs_finalize.append(m)
+        matches.append(m)
+        all_uids.add(m.get("host_id"))
+        for u in (m.get("invited") or []):
+            all_uids.add(u)
+        for u in (m.get("joined") or []):
+            all_uids.add(u)
+    # Finalize any expired-active matches in-place
+    for m in needs_finalize:
+        await _finalize_match_if_due(m)
+    profiles = await _load_profiles_cache([u for u in all_uids if u])
+    return {"matches": [_serialize_match(m, user_id, profiles) for m in matches]}
+
+
+@api_router.get("/spot/match/{match_id}")
+async def spot_match_get(match_id: str, user_id: str = Depends(get_user_or_legacy)):
+    m = await db.spot_matches.find_one({"id": match_id})
+    if not m:
+        raise HTTPException(404, "Match not found.")
+    m.pop("_id", None)
+    m = await _finalize_match_if_due(m)
+    uids = [m.get("host_id"), *(m.get("invited") or []), *(m.get("joined") or [])]
+    profiles = await _load_profiles_cache([u for u in uids if u])
+    return {"match": _serialize_match(m, user_id, profiles)}
+
+
+@api_router.post("/spot/match/{match_id}/join")
+async def spot_match_join(match_id: str, user_id: str = Depends(get_user_or_legacy)):
+    m = await db.spot_matches.find_one({"id": match_id})
+    if not m:
+        raise HTTPException(404, "Match not found.")
+    if m.get("status") not in ("waiting", "active"):
+        raise HTTPException(400, "This match has already finished.")
+    if user_id != m.get("host_id") and user_id not in (m.get("invited") or []):
+        raise HTTPException(403, "You weren't invited to this match.")
+    await db.spot_matches.update_one(
+        {"id": match_id},
+        {"$addToSet": {"joined": user_id},
+         "$pull": {"declined": user_id},
+         "$set": {f"captures.{user_id}": (m.get("captures", {}) or {}).get(user_id, 0)}},
+    )
+    m = await db.spot_matches.find_one({"id": match_id})
+    m.pop("_id", None)
+    uids = [m.get("host_id"), *(m.get("invited") or []), *(m.get("joined") or [])]
+    profiles = await _load_profiles_cache([u for u in uids if u])
+    return {"match": _serialize_match(m, user_id, profiles)}
+
+
+@api_router.post("/spot/match/{match_id}/decline")
+async def spot_match_decline(match_id: str, user_id: str = Depends(get_user_or_legacy)):
+    m = await db.spot_matches.find_one({"id": match_id})
+    if not m:
+        raise HTTPException(404, "Match not found.")
+    if m.get("status") not in ("waiting", "active"):
+        raise HTTPException(400, "This match has already finished.")
+    await db.spot_matches.update_one(
+        {"id": match_id},
+        {"$addToSet": {"declined": user_id},
+         "$pull": {"joined": user_id, "invited": user_id}},
+    )
+    return {"ok": True}
+
+
+@api_router.post("/spot/match/{match_id}/start")
+async def spot_match_start(match_id: str, user_id: str = Depends(get_user_or_legacy)):
+    """Host taps Start Now → match goes active, target_object is rolled."""
+    m = await db.spot_matches.find_one({"id": match_id})
+    if not m:
+        raise HTTPException(404, "Match not found.")
+    if m.get("host_id") != user_id:
+        raise HTTPException(403, "Only the host can start the match.")
+    if m.get("status") != "waiting":
+        raise HTTPException(400, "Match is not in a startable state.")
+    if len(m.get("joined", []) or []) < 1:
+        raise HTTPException(400, "At least one player must join before starting.")
+    started_at = datetime.now(timezone.utc)
+    ends_at = started_at + timedelta(seconds=MATCH_DURATION_SECONDS)
+    target = random.choice(SPOT_OBJECTS)
+    await db.spot_matches.update_one(
+        {"id": match_id},
+        {"$set": {
+            "status": "active",
+            "target_object": target,
+            "started_at": started_at.isoformat(),
+            "ends_at": ends_at.isoformat(),
+        }},
+    )
+    m = await db.spot_matches.find_one({"id": match_id})
+    m.pop("_id", None)
+    uids = [m.get("host_id"), *(m.get("invited") or []), *(m.get("joined") or [])]
+    profiles = await _load_profiles_cache([u for u in uids if u])
+    return {"match": _serialize_match(m, user_id, profiles)}
+
+
+@api_router.post("/spot/match/{match_id}/cancel")
+async def spot_match_cancel(match_id: str, user_id: str = Depends(get_user_or_legacy)):
+    m = await db.spot_matches.find_one({"id": match_id})
+    if not m:
+        raise HTTPException(404, "Match not found.")
+    if m.get("host_id") != user_id:
+        raise HTTPException(403, "Only the host can cancel the match.")
+    if m.get("status") != "waiting":
+        raise HTTPException(400, "Match has already started.")
+    await db.spot_matches.update_one(
+        {"id": match_id}, {"$set": {"status": "cancelled", "finished_at": now_iso()}}
+    )
+    return {"ok": True}
+
+
+@api_router.post("/spot/match/{match_id}/capture")
+async def spot_match_capture(
+    match_id: str,
+    body: SpotMatchCapturePayload,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Player snaps the object during an active match. We re-run vision
+    against the match's locked-in target_object; on success we increment
+    captures[user_id] (no upper bound — top scorer wins)."""
+    if not body.photo_base64:
+        raise HTTPException(400, "photo_base64 required")
+    if len(body.photo_base64) > 8_000_000:
+        raise HTTPException(400, "Image too large (8MB limit)")
+    m = await db.spot_matches.find_one({"id": match_id})
+    if not m:
+        raise HTTPException(404, "Match not found.")
+    m = await _finalize_match_if_due(m)
+    if m.get("status") != "active":
+        raise HTTPException(400, "Match is not active.")
+    if user_id != m.get("host_id") and user_id not in (m.get("joined") or []):
+        raise HTTPException(403, "You aren't part of this match.")
+    target = m.get("target_object") or ""
+    result = await _spot_vision_check(target, body.photo_base64)
+    detected = bool(result.get("detected"))
+    confidence = float(result.get("confidence") or 0.0)
+    can_capture = detected and confidence >= 0.55
+    new_count = int((m.get("captures", {}) or {}).get(user_id, 0))
+    if can_capture:
+        new_count += 1
+        await db.spot_matches.update_one(
+            {"id": match_id},
+            {"$set": {f"captures.{user_id}": new_count}},
+        )
+    # Re-fetch + lazy finalize in case the capture pushed us past the deadline
+    m = await db.spot_matches.find_one({"id": match_id})
+    m.pop("_id", None)
+    m = await _finalize_match_if_due(m)
+    uids = [m.get("host_id"), *(m.get("invited") or []), *(m.get("joined") or [])]
+    profiles = await _load_profiles_cache([u for u in uids if u])
+    return {
+        "detected": detected,
+        "confidence": confidence,
+        "can_capture": can_capture,
+        "captures": new_count,
+        "match": _serialize_match(m, user_id, profiles),
+    }
+# ════════════════════════════════════════════════════════════════════
+
+
 # ------------------------------------------------------------------
 # Final app wiring (must be AFTER all api_router routes are declared)
 # ------------------------------------------------------------------
