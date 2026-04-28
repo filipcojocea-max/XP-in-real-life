@@ -6,6 +6,8 @@ import { colors, applyAdminTheme, clearAdminTheme } from '../src/theme';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
 import { enableAdminTextOverride, disableAdminTextOverride } from '../src/adminTextOverride';
+import { ImmersiveProvider } from '../src/immersive';
+import { RevealZone } from '../src/components/RevealZone';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { loading, token, anonymousId } = useAuth();
@@ -30,7 +32,15 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       try {
         const p = await api.getProfile();
         if (cancelled) return;
-        const missing = !p.timezone || !p.day_start_time || !p.onboarding_tz_done;
+        // The day-anchor onboarding is considered DONE the moment a user
+        // has BOTH a timezone and a day_start_time on their profile. We
+        // intentionally don't gate on `onboarding_tz_done` alone — that
+        // flag was added later and may be missing/false on legacy
+        // profiles from before the field existed. Without this guard,
+        // an app update would re-prompt those users to choose timezone
+        // & morning time even though they already have. Once both
+        // values are present, the prompt is gone for good.
+        const missing = !p.timezone || !p.day_start_time;
         setAnchorMissing(!!missing);
         // Apply Premium+ golden text theme for the Creator/Admin globally.
         if (p.is_admin) {
@@ -90,30 +100,34 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 export default function RootLayout() {
   return (
     <AuthProvider>
-      <View style={{ flex: 1, backgroundColor: colors.bg }}>
-        <StatusBar style="light" />
-        <AuthGate>
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: colors.bg },
-              animation: 'fade',
-            }}
-          >
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="auth" />
-            <Stack.Screen name="focus" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
-            <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
-            <Stack.Screen name="morning-setup" options={{ animation: 'fade' }} />
-            <Stack.Screen name="day-anchor-setup" options={{ animation: 'fade', gestureEnabled: false }} />
-            <Stack.Screen name="sleep" />
-            <Stack.Screen name="challenges" />
-            <Stack.Screen name="friends" />
-            <Stack.Screen name="spot" />
-            <Stack.Screen name="library-catalog" />
-          </Stack>
-        </AuthGate>
-      </View>
+      <ImmersiveProvider>
+        <View style={{ flex: 1, backgroundColor: colors.bg }}>
+          <StatusBar style="light" />
+          <AuthGate>
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.bg },
+                animation: 'fade',
+              }}
+            >
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="auth" />
+              <Stack.Screen name="focus" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
+              <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
+              <Stack.Screen name="morning-setup" options={{ animation: 'fade' }} />
+              <Stack.Screen name="day-anchor-setup" options={{ animation: 'fade', gestureEnabled: false }} />
+              <Stack.Screen name="sleep" />
+              <Stack.Screen name="challenges" />
+              <Stack.Screen name="friends" />
+              <Stack.Screen name="spot" />
+              <Stack.Screen name="library-catalog" />
+            </Stack>
+            {/* Bottom 40-px swipe-up reveal target for Immersive Mode. */}
+            <RevealZone />
+          </AuthGate>
+        </View>
+      </ImmersiveProvider>
     </AuthProvider>
   );
 }

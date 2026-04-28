@@ -470,7 +470,16 @@ def serialize_profile(prof: dict) -> dict:
         # New day-anchor system
         "day_start_time": prof.get("day_start_time"),
         "timezone": prof.get("timezone"),
-        "onboarding_tz_done": bool(prof.get("onboarding_tz_done", False)),
+        # Treat the day-anchor onboarding as DONE if either the explicit
+        # flag is set OR the two source fields (timezone + day_start_time)
+        # are both populated. This prevents legacy/upgrade users — whose
+        # documents pre-date the `onboarding_tz_done` flag — from being
+        # re-prompted to choose their timezone & morning start time after
+        # an app update.
+        "onboarding_tz_done": bool(
+            prof.get("onboarding_tz_done")
+            or (prof.get("timezone") and prof.get("day_start_time"))
+        ),
         # Spot-the-Object mini-app
         "spot_points": int(prof.get("spot_points", 0) or 0),
         "spot_random_enabled": bool(prof.get("spot_random_enabled", False)),
@@ -3676,6 +3685,39 @@ async def _seed_admin_account():
             logger.info(f"[admin-seed] Created Creator account: {email_lower}")
     except Exception as e:
         logger.warning(f"[admin-seed] failed: {e}")
+
+
+@app.on_event("startup")
+async def _backfill_onboarding_tz_done_flag():
+    """One-time idempotent migration: any profile that already has BOTH
+    `timezone` and `day_start_time` populated should be considered as
+    having completed the day-anchor onboarding. This guarantees that
+    after an app update, returning users with the data already on file
+    are NEVER re-prompted to choose timezone / morning start time again,
+    even if they pre-date the `onboarding_tz_done` flag.
+
+    Cheap to run on every startup — the filter excludes anything that
+    is already correctly flagged."""
+    try:
+        result = await db.profile.update_many(
+            {
+                "timezone": {"$exists": True, "$nin": [None, ""]},
+                "day_start_time": {"$exists": True, "$nin": [None, ""]},
+                "$or": [
+                    {"onboarding_tz_done": {"$exists": False}},
+                    {"onboarding_tz_done": False},
+                    {"onboarding_tz_done": None},
+                ],
+            },
+            {"$set": {"onboarding_tz_done": True}},
+        )
+        if result.modified_count:
+            logger.info(
+                f"[migrate] Backfilled onboarding_tz_done=true on "
+                f"{result.modified_count} legacy profile(s)."
+            )
+    except Exception as e:
+        logger.warning(f"[migrate] backfill onboarding_tz_done failed: {e}")
 
 
 # ═══════════════ Mini-app Catalog (Admin-only) ═══════════════
