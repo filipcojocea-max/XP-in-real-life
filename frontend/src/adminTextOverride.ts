@@ -28,6 +28,10 @@ export function isAdminTextOverrideOn(): boolean {
 function _patchOnce() {
   if (_patched) return;
   _patched = true;
+  // On web, styling is handled via the injected CSS <style> tag.
+  // Patching Text.render on web breaks react-native-web's style processing
+  // (CSSStyleDeclaration indexed property error). Skip native patch on web.
+  if (Platform.OS === 'web') return;
   const TextAny: any = Text as any;
   const originalRender = TextAny.render;
   if (typeof originalRender === 'function') {

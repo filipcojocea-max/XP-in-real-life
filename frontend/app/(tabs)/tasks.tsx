@@ -56,6 +56,7 @@ export default function Tasks() {
   const [wakeTime, setWakeTime] = useState<string>('07:00');
   const [tz, setTz] = useState<string | null>(null);
   const [customCount, setCustomCount] = useState<number>(0);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const floatAnim = useMemo(() => new Animated.Value(0), []);
   const { isAnonymous } = useAuth();
 
@@ -65,6 +66,7 @@ export default function Tasks() {
       const wt = prof?.day_start_time || prof?.wake_time || '07:00';
       setWakeTime(wt);
       setTz(prof?.timezone || null);
+      setIsAdmin(!!prof?.is_admin);
       const today = userDate(wt, prof?.timezone || null);
       const r = await api.listTasks(today);
       setTasks(r.tasks);
@@ -424,6 +426,7 @@ export default function Tasks() {
       <TaskModal
         visible={showAdd || modalTask !== null}
         editingTask={modalTask}
+        isAdmin={isAdmin}
         onClose={() => {
           setShowAdd(false);
           setModalTask(null);

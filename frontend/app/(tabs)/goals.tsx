@@ -88,6 +88,7 @@ export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
   // Maps goal_id → toast message currently visible. Auto-clears after 5s.
   const [lockToast, setLockToast] = useState<Record<string, string>>({});
 
@@ -95,6 +96,8 @@ export default function Goals() {
     try {
       const r = await api.listGoals();
       setGoals(r.goals);
+      const prof = await api.getProfile().catch(() => null);
+      setIsAdmin(!!prof?.is_admin);
     } catch (e) {
       console.log('goals', e);
     } finally {
@@ -332,7 +335,7 @@ export default function Goals() {
         <Text style={styles.hint}>Tip: long-press to delete.</Text>
       </ScrollView>
 
-      <AddGoalModal visible={showAdd} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); load(); }} />
+      <AddGoalModal visible={showAdd} isAdmin={isAdmin} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); load(); }} />
     </SafeAreaView>
   );
 }
@@ -341,10 +344,12 @@ function AddGoalModal({
   visible,
   onClose,
   onAdded,
+  isAdmin,
 }: {
   visible: boolean;
   onClose: () => void;
   onAdded: () => void;
+  isAdmin?: boolean;
 }) {
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
@@ -372,7 +377,9 @@ function AddGoalModal({
     }
   }, [visible, defaultXpFor]);
 
-  const cap = XP_CAPS[unit];
+  // Creator/Admin: bypass per-unit XP caps and allow up to 100,000 XP per goal.
+  const ADMIN_CAP = 100000;
+  const cap = isAdmin ? ADMIN_CAP : XP_CAPS[unit];
   const xpNum = parseInt(xp, 10);
   const xpInvalid = !isNaN(xpNum) && (xpNum < 1 || xpNum > cap);
 
@@ -384,7 +391,8 @@ function AddGoalModal({
       setXp(String(defaultXpFor(u)));
       return;
     }
-    if (current > XP_CAPS[u]) setXp(String(XP_CAPS[u]));
+    const newCap = isAdmin ? ADMIN_CAP : XP_CAPS[u];
+    if (current > newCap) setXp(String(newCap));
   };
 
   const onChangeXp = (t: string) => {
@@ -535,7 +543,7 @@ function AddGoalModal({
             <Text style={[styles.inputLabel, { marginTop: 0 }]}>XP Reward</Text>
             <Text style={styles.xpCapPill} testID="goal-xp-cap">
               <Ionicons name="flash" size={11} color={colors.amber} />
-              {`  max ${cap} XP for ${unit}`}
+              {isAdmin ? `  Creator · max ${cap} XP` : `  max ${cap} XP for ${unit}`}
             </Text>
           </View>
           <TextInput
@@ -548,11 +556,13 @@ function AddGoalModal({
             placeholderTextColor={colors.textMuted}
           />
           <Text style={styles.xpHint} testID="goal-xp-hint">
-            {unit === 'days'
-              ? 'Daily goals can award up to 30 XP.'
-              : unit === 'weeks'
-                ? 'Weekly goals can award up to 225 XP.'
-                : 'Monthly goals can award up to 900 XP.'}
+            {isAdmin
+              ? 'Creator · Premium+ — goals can award up to 100,000 XP each.'
+              : unit === 'days'
+                ? 'Daily goals can award up to 30 XP.'
+                : unit === 'weeks'
+                  ? 'Weekly goals can award up to 225 XP.'
+                  : 'Monthly goals can award up to 900 XP.'}
           </Text>
 
           <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg }}>
