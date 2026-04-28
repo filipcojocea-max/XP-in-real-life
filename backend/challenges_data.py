@@ -510,7 +510,7 @@ QUOTES: list[dict] = [
     {"text": "The successful warrior is the average person — with laser-like focus.", "author": "Bruce Lee"},
     {"text": "Tomorrow is a mystery. Today is a gift. That's why it's called the present.", "author": "Bil Keane"},
     {"text": "You are not stuck. You are committed to certain patterns.", "author": "Anthony Robbins"},
-    {"text": "The best time to plant a tree was 20 years ago. The second best time is now.", "author": "Chinese Proverb"},
+    {"text": "The best time to plant a tree was 20 years ago. The second best time is NOW.", "author": "Chinese Proverb"},
     {"text": "We are what we repeatedly do. Excellence is not an act, but a habit.", "author": "Aristotle"},
     {"text": "Stop waiting for someday. Today is the day.", "author": "Anonymous"},
     {"text": "Be so good they can't ignore you.", "author": "Steve Martin"},
