@@ -522,6 +522,11 @@ def serialize_profile(prof: dict) -> dict:
         "boost_inventory": _serialize_boost_inventory(prof),
         "tz_offset_minutes": int(prof.get("tz_offset_minutes", 0) or 0),
         "created_at": prof.get("created_at"),
+        # Last time this user opened the app — kept on the personal
+        # profile too for symmetry with `_serialize_player` so any future
+        # UI surface that reads /api/profile can render an "Active X hrs
+        # ago" label without an extra round-trip.
+        "last_seen_at": prof.get("last_seen_at"),
     }
 
 
