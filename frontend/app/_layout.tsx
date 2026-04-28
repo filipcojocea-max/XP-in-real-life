@@ -100,6 +100,7 @@ export default function RootLayout() {
             <Stack.Screen name="sleep" />
             <Stack.Screen name="challenges" />
             <Stack.Screen name="friends" />
+            <Stack.Screen name="spot" />
           </Stack>
         </AuthGate>
       </View>

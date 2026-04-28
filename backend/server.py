@@ -403,6 +403,9 @@ async def get_or_create_profile_for(user_id: str, full_name: str = "Hero") -> di
             "day_start_time": None,                 # "HH:MM" — null until answered
             "timezone": None,                       # IANA zone e.g. "Australia/Sydney"
             "onboarding_tz_done": False,            # forces existing users to re-answer
+            # Spot-the-Object mini-app
+            "spot_points": 0,
+            "spot_random_enabled": False,
             "created_at": now_iso(),
         }
         await db.profile.insert_one(prof)
@@ -447,6 +450,9 @@ def serialize_profile(prof: dict) -> dict:
         "day_start_time": prof.get("day_start_time"),
         "timezone": prof.get("timezone"),
         "onboarding_tz_done": bool(prof.get("onboarding_tz_done", False)),
+        # Spot-the-Object mini-app
+        "spot_points": int(prof.get("spot_points", 0) or 0),
+        "spot_random_enabled": bool(prof.get("spot_random_enabled", False)),
         # XP Boost state (Points+ feature)
         "boosts_unlocked": prof.get("boosts_unlocked", False),
         "active_boost": _serialize_active_boost(prof),
@@ -3267,6 +3273,237 @@ async def leaderboard_report_unsupport(report_id: str, user_id: str = Depends(ge
         {"$set": {"supporters": supporters}},
     )
     return {"supporters_count": len(supporters)}
+
+
+# ═════════════════════ Spot the Object (mini-app) ═════════════════════
+# Phase 1: Solo mode + GPT-4o vision validation + photo gallery + spot points.
+# Phase 2 (future): Friends event lobby + likes/comments + penalty math.
+# ──────────────────────────────────────────────────────────────────────
+
+SPOT_OBJECTS = [
+    "leaf", "tree", "flower", "indoor plant", "blade of grass",
+    "dog", "cat", "bird",
+    "book", "pen", "your phone", "laptop", "headphones", "keyboard", "computer mouse",
+    "cup", "mug", "bottle of water", "plate", "fork", "spoon",
+    "chair", "table", "lamp", "mirror", "window", "door handle",
+    "shoe", "hat", "wristwatch", "pair of glasses", "wallet", "set of keys",
+    "pillow", "blanket", "towel",
+    "anything pink", "anything blue", "anything red", "anything yellow", "anything green",
+    "piece of fruit", "apple", "banana",
+    "car", "bicycle", "ball",
+    "remote control", "candle", "clock", "scissors", "toothbrush",
+    "bowl", "fridge magnet", "soft toy", "coin", "battery", "spoon",
+]
+
+
+class SpotCheckPayload(BaseModel):
+    target_object: str
+    photo_base64: str    # raw base64 (no data: prefix)
+
+
+class SpotCompletePayload(BaseModel):
+    target_object: str
+    photo_base64: str
+    success: bool
+    remaining_seconds: int = 0
+    mode: str = "solo_constant"   # solo_constant | solo_random | friends
+
+
+class SpotCommentPayload(BaseModel):
+    text: str
+
+
+class SpotRandomTogglePayload(BaseModel):
+    enabled: bool
+
+
+@api_router.get("/spot/object")
+async def spot_get_object(user_id: str = Depends(get_user_or_legacy)):
+    """Return a fresh random object for the user to find."""
+    obj = random.choice(SPOT_OBJECTS)
+    return {"object": obj, "challenge_id": str(uuid.uuid4())}
+
+
+async def _spot_vision_check(target_object: str, photo_base64: str) -> dict:
+    """Ask GPT-4o-mini Vision whether the target object is clearly visible.
+    Returns {detected: bool, confidence: float, reason: str}."""
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        if not api_key:
+            return {"detected": False, "confidence": 0.0, "reason": "No LLM key configured"}
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"spot-{uuid.uuid4().hex[:8]}",
+            system_message=(
+                "You are a strict visual referee for a 'spot the object' photo challenge. "
+                "Look at the user's photo and decide if the requested object is CLEARLY and "
+                "PROMINENTLY in the frame (close enough, in focus, recognisable). "
+                "Reject distant, blurry, or partially-cropped objects.\n\n"
+                "Reply with EXACTLY this JSON and nothing else:\n"
+                '{"detected": true/false, "confidence": 0.0-1.0, "reason": "short reason"}'
+            ),
+        ).with_model("openai", "gpt-4o-mini")
+        msg = UserMessage(
+            text=f"Target object: {target_object}\n\nIs this object clearly visible in the attached photo?",
+            file_contents=[ImageContent(image_base64=photo_base64)],
+        )
+        response = await chat.send_message(msg)
+        raw = (response or "").strip()
+        # Pull JSON out of any markdown fencing
+        import re, json as _json
+        m = re.search(r"\{[^{}]*\}", raw, re.S)
+        data = _json.loads(m.group(0)) if m else {}
+        return {
+            "detected": bool(data.get("detected", False)),
+            "confidence": float(data.get("confidence", 0) or 0),
+            "reason": str(data.get("reason", "")),
+        }
+    except Exception as e:
+        # Vision API failure → don't block the user; mark not detected so the
+        # shutter stays locked but they can still keep trying.
+        return {"detected": False, "confidence": 0.0, "reason": f"vision unavailable: {e}"}
+
+
+@api_router.post("/spot/check")
+async def spot_check(body: SpotCheckPayload, user_id: str = Depends(get_user_or_legacy)):
+    """Live check during scanning — frontend calls this every ~2 seconds with a
+    frame. Returns whether the shutter should be unlocked."""
+    if not body.photo_base64:
+        raise HTTPException(400, "photo_base64 required")
+    if len(body.photo_base64) > 8_000_000:
+        raise HTTPException(400, "Image too large (8MB limit)")
+    result = await _spot_vision_check(body.target_object, body.photo_base64)
+    result["can_capture"] = bool(result.get("detected") and result.get("confidence", 0) >= 0.55)
+    return result
+
+
+@api_router.post("/spot/complete")
+async def spot_complete(body: SpotCompletePayload, user_id: str = Depends(get_user_or_legacy)):
+    """Save a completed spot attempt. Awards +1 spot point for successful solo
+    finds (Phase 1). Friends penalties land in Phase 2."""
+    if not body.photo_base64:
+        raise HTTPException(400, "photo_base64 required")
+    delta = 1 if body.success else 0
+    entry = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "target_object": body.target_object,
+        "photo_base64": body.photo_base64,
+        "success": bool(body.success),
+        "remaining_seconds": int(body.remaining_seconds or 0),
+        "mode": body.mode or "solo_constant",
+        "points_delta": delta,
+        "taken_at": now_iso(),
+        "likes": [],
+        "comments": [],
+    }
+    await db.spot_completions.insert_one(entry)
+    if delta:
+        await db.profile.update_one({"_id": user_id}, {"$inc": {"spot_points": delta}})
+    prof = await db.profile.find_one({"_id": user_id})
+    out = {**entry}
+    out.pop("_id", None)
+    return {
+        "entry": out,
+        "points_delta": delta,
+        "spot_points": int((prof or {}).get("spot_points", 0)),
+        "profile": serialize_profile(prof) if prof else None,
+    }
+
+
+@api_router.get("/spot/feed")
+async def spot_feed(user_id: str = Depends(get_user_or_legacy), limit: int = 50):
+    """Return recent Spot entries from self + accepted friends (gallery)."""
+    member_ids = [user_id] + await _friend_ids(user_id)
+    member_ids = list(dict.fromkeys(member_ids))
+    cur = (
+        db.spot_completions.find({"user_id": {"$in": member_ids}})
+        .sort("taken_at", -1)
+        .limit(int(max(1, min(200, limit))))
+    )
+    out = []
+    async for e in cur:
+        e.pop("_id", None)
+        p = await db.profile.find_one(
+            {"_id": e["user_id"]},
+            {"full_name": 1, "name": 1, "avatar_base64": 1, "spot_points": 1},
+        )
+        e["player_name"] = (p or {}).get("full_name") or (p or {}).get("name") or "Anonymous"
+        e["player_avatar_base64"] = (p or {}).get("avatar_base64")
+        e["player_spot_points"] = int((p or {}).get("spot_points", 0))
+        e["liked_by_you"] = user_id in (e.get("likes") or [])
+        e["like_count"] = len(e.get("likes") or [])
+        e["comment_count"] = len(e.get("comments") or [])
+        e["is_self"] = e["user_id"] == user_id
+        out.append(e)
+    return {"entries": out, "count": len(out)}
+
+
+@api_router.post("/spot/{entry_id}/like")
+async def spot_like(entry_id: str, user_id: str = Depends(get_user_or_legacy)):
+    e = await db.spot_completions.find_one({"id": entry_id})
+    if not e:
+        raise HTTPException(404, "Photo not found")
+    likes = set(e.get("likes") or [])
+    if user_id in likes:
+        likes.remove(user_id)
+    else:
+        likes.add(user_id)
+    await db.spot_completions.update_one({"id": entry_id}, {"$set": {"likes": list(likes)}})
+    return {"like_count": len(likes), "liked_by_you": user_id in likes}
+
+
+@api_router.post("/spot/{entry_id}/comment")
+async def spot_comment(entry_id: str, body: SpotCommentPayload, user_id: str = Depends(get_user_or_legacy)):
+    txt = (body.text or "").strip()
+    if not txt:
+        raise HTTPException(400, "Comment can't be empty")
+    if len(txt) > 280:
+        txt = txt[:280]
+    e = await db.spot_completions.find_one({"id": entry_id})
+    if not e:
+        raise HTTPException(404, "Photo not found")
+    p = await db.profile.find_one({"_id": user_id}, {"full_name": 1, "name": 1, "avatar_base64": 1})
+    comment = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "user_name": (p or {}).get("full_name") or (p or {}).get("name") or "Anonymous",
+        "user_avatar_base64": (p or {}).get("avatar_base64"),
+        "text": txt,
+        "created_at": now_iso(),
+    }
+    await db.spot_completions.update_one({"id": entry_id}, {"$push": {"comments": comment}})
+    e2 = await db.spot_completions.find_one({"id": entry_id}, {"_id": 0, "comments": 1})
+    return {"comments": (e2 or {}).get("comments", [])}
+
+
+@api_router.get("/spot/{entry_id}")
+async def spot_entry_detail(entry_id: str, user_id: str = Depends(get_user_or_legacy)):
+    e = await db.spot_completions.find_one({"id": entry_id}, {"_id": 0})
+    if not e:
+        raise HTTPException(404, "Photo not found")
+    p = await db.profile.find_one(
+        {"_id": e["user_id"]}, {"full_name": 1, "name": 1, "avatar_base64": 1, "spot_points": 1}
+    )
+    e["player_name"] = (p or {}).get("full_name") or (p or {}).get("name") or "Anonymous"
+    e["player_avatar_base64"] = (p or {}).get("avatar_base64")
+    e["player_spot_points"] = int((p or {}).get("spot_points", 0))
+    e["liked_by_you"] = user_id in (e.get("likes") or [])
+    e["like_count"] = len(e.get("likes") or [])
+    return e
+
+
+@api_router.post("/spot/random-toggle")
+async def spot_random_toggle(body: SpotRandomTogglePayload, user_id: str = Depends(get_user_or_legacy)):
+    """Toggle the 'random object at random time' mode. When enabled, the
+    'Play Solo' practice mode is locked client-side and the device schedules
+    3 local notifications per day (handled in the frontend)."""
+    await db.profile.update_one(
+        {"_id": user_id}, {"$set": {"spot_random_enabled": bool(body.enabled)}}
+    )
+    prof = await db.profile.find_one({"_id": user_id})
+    return {"spot_random_enabled": bool(body.enabled), "profile": serialize_profile(prof)}
 
 
 # ------------------------------------------------------------------

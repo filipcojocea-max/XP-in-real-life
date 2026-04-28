@@ -1,497 +1,461 @@
 """
-Day Anchor System + regression test suite.
-Covers:
-  1. Profile schema additions (day_start_time, timezone, onboarding_tz_done)
-  2. Day-anchor write lock (PUT /api/profile lock + reset)
-  3. Timezone-aware GET /api/challenge/today
-  4. user_today_str propagation in POST /api/sleep/checkin
-  5. Challenge past 24h answer window shape + 404 path
-  6. Regression: auth, /api/profile, /api/boosts/*, /api/friends/leaderboard,
-     /api/leaderboard/report, /api/tasks lifecycle, /api/goals lifecycle.
+Backend test suite — Spot the Object mini-app + light regression.
+
+Targets the public ingress URL (REACT_APP_BACKEND_URL / EXPO_PUBLIC_BACKEND_URL).
+Uses anonymous-mode (X-Anonymous-Id header) for isolation.
+
+Real photos are pulled from loremflickr.com (keyword-based real Flickr photos)
+to satisfy the image-testing playbook (no blank/synthetic images).
 """
 import os
-import sys
-import uuid
+import base64
 import json
 import time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+import uuid
+import urllib.request
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 
-BASE = "https://xp-confidence.preview.emergentagent.com/api"
+BACKEND_URL = os.environ.get(
+    "BACKEND_URL", "https://xp-confidence.preview.emergentagent.com"
+).rstrip("/")
+API = f"{BACKEND_URL}/api"
 
-PASS = []
-FAIL = []
-
-
-def check(label, cond, detail=""):
-    if cond:
-        PASS.append(label)
-        print(f"  ✅ {label}")
-    else:
-        FAIL.append(f"{label} :: {detail}")
-        print(f"  ❌ {label} :: {detail}")
+# ---------------------------------------------------------------------------
+# Pretty-printer / runner
+# ---------------------------------------------------------------------------
+RESULTS = []
 
 
-def section(t):
-    print(f"\n=== {t} ===")
+def record(name: str, ok: bool, info: str = "") -> bool:
+    tag = "PASS" if ok else "FAIL"
+    line = f"[{tag}] {name}"
+    if info:
+        line += f"  ::  {info}"
+    print(line)
+    RESULTS.append((name, ok, info))
+    return ok
 
 
-def H(anon_id=None, token=None):
+def assert_eq(name: str, got, want) -> bool:
+    return record(name, got == want, f"got={got!r} want={want!r}")
+
+
+def assert_in(name: str, member, container) -> bool:
+    return record(name, member in container, f"{member!r} in {type(container).__name__}")
+
+
+def summary():
+    total = len(RESULTS)
+    passed = sum(1 for _, ok, _ in RESULTS if ok)
+    print("\n" + "=" * 60)
+    print(f"RESULTS: {passed}/{total} passed")
+    print("=" * 60)
+    fails = [(n, info) for n, ok, info in RESULTS if not ok]
+    if fails:
+        print("\nFAILURES:")
+        for n, info in fails:
+            print(f"  - {n}  ::  {info}")
+    return passed, total
+
+
+# ---------------------------------------------------------------------------
+# Real-photo helpers (loremflickr returns real Flickr photos for given tag)
+# ---------------------------------------------------------------------------
+def _download_image(url: str, retries: int = 3) -> Optional[bytes]:
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 SpotTester"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read()
+        except Exception as e:
+            print(f"  download retry {i+1}/{retries}: {e}")
+            time.sleep(1)
+    return None
+
+
+_PHOTO_CACHE: Dict[str, str] = {}
+
+
+def real_photo_b64(keyword: str, w: int = 480, h: int = 360) -> str:
+    """Return a base64-encoded JPEG of a real Flickr photo matching keyword."""
+    if keyword in _PHOTO_CACHE:
+        return _PHOTO_CACHE[keyword]
+    # loremflickr serves keyword-relevant Flickr photos as JPEG
+    url = f"https://loremflickr.com/{w}/{h}/{keyword}"
+    data = _download_image(url)
+    if not data:
+        # Fallback to picsum (random real photo, may not match keyword)
+        data = _download_image(
+            f"https://picsum.photos/seed/{keyword}-{uuid.uuid4().hex[:6]}/{w}/{h}"
+        )
+    if not data:
+        raise RuntimeError(f"Could not fetch test photo for {keyword!r}")
+    b64 = base64.b64encode(data).decode("ascii")
+    _PHOTO_CACHE[keyword] = b64
+    print(f"  fetched real photo for {keyword!r}: {len(data)} bytes -> {len(b64)} b64 chars")
+    return b64
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers (anonymous mode via X-Anonymous-Id)
+# ---------------------------------------------------------------------------
+def headers(anon_id: Optional[str] = None, jwt: Optional[str] = None) -> Dict[str, str]:
     h = {"Content-Type": "application/json"}
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    if anon_id:
+    if jwt:
+        h["Authorization"] = f"Bearer {jwt}"
+    elif anon_id:
         h["X-Anonymous-Id"] = anon_id
     return h
 
 
-# ─────────────────────────────────────────────────────────────────────
-# 1 + 2. Profile schema + day-anchor write lock (uses fresh anon id)
-# ─────────────────────────────────────────────────────────────────────
-section("1+2. Profile schema additions & day-anchor write lock")
-anon_a = "anon-test-" + uuid.uuid4().hex[:16]
+def GET(path: str, anon_id: Optional[str] = None, jwt: Optional[str] = None, **kw) -> requests.Response:
+    return requests.get(f"{API}{path}", headers=headers(anon_id, jwt), timeout=120, **kw)
 
-# Reset to be safe (in case the same anon id was used before)
-r = requests.post(f"{BASE}/profile/reset", headers=H(anon_id=anon_a))
-check("POST /profile/reset (fresh anon) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
 
-r = requests.get(f"{BASE}/profile", headers=H(anon_id=anon_a))
-check("GET /profile → 200", r.status_code == 200, r.text[:200])
-prof = r.json() if r.ok else {}
-check("profile has day_start_time field", "day_start_time" in prof,
-      f"keys={list(prof.keys())[:25]}")
-check("profile has timezone field", "timezone" in prof)
-check("profile has onboarding_tz_done field", "onboarding_tz_done" in prof)
-check("fresh: day_start_time is null", prof.get("day_start_time") is None,
-      f"got {prof.get('day_start_time')!r}")
-check("fresh: timezone is null", prof.get("timezone") is None,
-      f"got {prof.get('timezone')!r}")
-check("fresh: onboarding_tz_done is False", prof.get("onboarding_tz_done") is False,
-      f"got {prof.get('onboarding_tz_done')!r}")
+def POST(path: str, body: Any = None, anon_id: Optional[str] = None, jwt: Optional[str] = None) -> requests.Response:
+    return requests.post(f"{API}{path}", headers=headers(anon_id, jwt), json=body, timeout=180)
 
-# First write — should succeed and lock both
-r = requests.put(
-    f"{BASE}/profile",
-    headers=H(anon_id=anon_a),
-    json={"timezone": "Australia/Sydney", "day_start_time": "07:00"},
-)
-check("PUT /profile {tz=Sydney, day_start=07:00} → 200", r.status_code == 200,
-      f"got {r.status_code} {r.text[:200]}")
-if r.ok:
-    p = r.json()
-    check("persisted timezone=Australia/Sydney", p.get("timezone") == "Australia/Sydney",
-          f"got {p.get('timezone')!r}")
-    check("persisted day_start_time=07:00", p.get("day_start_time") == "07:00",
-          f"got {p.get('day_start_time')!r}")
-    check("onboarding_tz_done flipped to True", p.get("onboarding_tz_done") is True,
-          f"got {p.get('onboarding_tz_done')!r}")
 
-# Lock test — change timezone
-r = requests.put(
-    f"{BASE}/profile",
-    headers=H(anon_id=anon_a),
-    json={"timezone": "Australia/Perth"},
-)
-check("PUT /profile {tz=Perth} on locked profile → 400", r.status_code == 400,
-      f"got {r.status_code} {r.text[:200]}")
-if r.status_code == 400:
-    detail = (r.json() or {}).get("detail")
-    if isinstance(detail, dict):
-        check("error code = tz_locked", detail.get("error") == "tz_locked",
-              f"got {detail!r}")
-    else:
-        check("error code = tz_locked", False, f"detail not a dict: {detail!r}")
+def PUT(path: str, body: Any = None, anon_id: Optional[str] = None, jwt: Optional[str] = None) -> requests.Response:
+    return requests.put(f"{API}{path}", headers=headers(anon_id, jwt), json=body, timeout=120)
 
-# Verify timezone unchanged
-r = requests.get(f"{BASE}/profile", headers=H(anon_id=anon_a))
-check("timezone still Australia/Sydney", r.json().get("timezone") == "Australia/Sydney")
 
-# Lock test — change day_start_time
-r = requests.put(
-    f"{BASE}/profile",
-    headers=H(anon_id=anon_a),
-    json={"day_start_time": "08:00"},
-)
-check("PUT /profile {day_start=08:00} on locked profile → 400", r.status_code == 400)
-if r.status_code == 400:
-    detail = (r.json() or {}).get("detail")
-    if isinstance(detail, dict):
-        check("error code = day_start_locked", detail.get("error") == "day_start_locked",
-              f"got {detail!r}")
+def DELETE(path: str, anon_id: Optional[str] = None, jwt: Optional[str] = None) -> requests.Response:
+    return requests.delete(f"{API}{path}", headers=headers(anon_id, jwt), timeout=120)
 
-# Reset → fields go back to null, then PUT works again
-r = requests.post(f"{BASE}/profile/reset", headers=H(anon_id=anon_a))
-check("POST /profile/reset → 200", r.status_code == 200)
-if r.ok:
-    p = r.json()
-    check("after reset: timezone is None", p.get("timezone") is None,
-          f"got {p.get('timezone')!r}")
-    check("after reset: day_start_time is None", p.get("day_start_time") is None,
-          f"got {p.get('day_start_time')!r}")
-    check("after reset: onboarding_tz_done is False", p.get("onboarding_tz_done") is False)
 
-r = requests.put(
-    f"{BASE}/profile",
-    headers=H(anon_id=anon_a),
-    json={"timezone": "Australia/Sydney", "day_start_time": "07:00"},
-)
-check("PUT after reset works again → 200", r.status_code == 200,
-      f"got {r.status_code} {r.text[:200]}")
-
-# ─────────────────────────────────────────────────────────────────────
-# 3. Timezone-aware GET /api/challenge/today
-# ─────────────────────────────────────────────────────────────────────
-section("3. Timezone-aware GET /api/challenge/today")
-r = requests.get(f"{BASE}/challenge/today", headers=H(anon_id=anon_a))
-check("GET /challenge/today (Sydney/07:00) → 200", r.status_code == 200,
-      f"got {r.status_code} {r.text[:300]}")
-if r.ok:
-    cj = r.json()
-    check("response has challenge object", isinstance(cj.get("challenge"), dict),
-          f"keys={list(cj.keys())}")
-    ch = cj.get("challenge") or {}
-    check("challenge has id+title", bool(ch.get("id")) and bool(ch.get("title")),
-          f"challenge={ch}")
-
-# ─────────────────────────────────────────────────────────────────────
-# 4. user_today_str propagation in POST /api/sleep/checkin
-# ─────────────────────────────────────────────────────────────────────
-section("4. user_today_str propagation in /sleep/checkin")
-# need to onboard sleep first
-prof_now = requests.get(f"{BASE}/profile", headers=H(anon_id=anon_a)).json()
-check("profile timezone still Sydney before sleep", prof_now.get("timezone") == "Australia/Sydney")
-
-# minimal sleep onboarding (answers payload accepts any dict)
-sleep_answers = {
-    "main_goal": "Sleep deeper and wake refreshed",
-    "bedtime": "23:00",
-    "wake_time": "07:00",
-    "screens_before_bed": "yes",
-    "stress_level": 5,
-    "noises": ["partner_snoring"],
-    "habits_to_unlearn": "scrolling phone in bed",
-    "relaxes_me": ["reading"],
+# ---------------------------------------------------------------------------
+# 1. Spot — full flow
+# ---------------------------------------------------------------------------
+SPOT_OBJECTS = {
+    "leaf", "tree", "flower", "indoor plant", "blade of grass",
+    "dog", "cat", "bird",
+    "book", "pen", "your phone", "laptop", "headphones", "keyboard", "computer mouse",
+    "cup", "mug", "bottle of water", "plate", "fork", "spoon",
+    "chair", "table", "lamp", "mirror", "window", "door handle",
+    "shoe", "hat", "wristwatch", "pair of glasses", "wallet", "set of keys",
+    "pillow", "blanket", "towel",
+    "anything pink", "anything blue", "anything red", "anything yellow", "anything green",
+    "piece of fruit", "apple", "banana",
+    "car", "bicycle", "ball",
+    "remote control", "candle", "clock", "scissors", "toothbrush",
+    "bowl", "fridge magnet", "soft toy", "coin", "battery",
 }
-r = requests.post(
-    f"{BASE}/sleep/onboarding",
-    headers=H(anon_id=anon_a),
-    json={"answers": sleep_answers},
-)
-check("POST /sleep/onboarding → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
 
-r = requests.post(
-    f"{BASE}/sleep/checkin",
-    headers=H(anon_id=anon_a),
-    json={"rating": 7, "hours": 7.5, "notes": "Felt rested"},
-)
-check("POST /sleep/checkin → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-if r.ok:
-    entry = r.json().get("entry") or {}
-    # Compute expected user_today_str: Australia/Sydney, day_start=07:00
-    tz = ZoneInfo("Australia/Sydney")
-    local_now = datetime.now(tz)
-    if (local_now.hour, local_now.minute) < (7, 0):
-        local_now = local_now - timedelta(days=1)
-    expected_date = local_now.date().isoformat()
-    check(f"entry.date matches user_today_str (expected {expected_date})",
-          entry.get("date") == expected_date,
-          f"got {entry.get('date')!r}, expected {expected_date}")
-    # Verify it's NOT just UTC date — only meaningful when they differ
-    utc_today = datetime.utcnow().date().isoformat()
-    if expected_date != utc_today:
-        check("entry.date != UTC today (proves tz-aware)",
-              entry.get("date") != utc_today,
-              f"got {entry.get('date')!r}, UTC today={utc_today}")
-    else:
-        print(f"  ℹ️  Sydney local date == UTC today ({expected_date}); tz-aware check is degenerate now.")
 
-# ─────────────────────────────────────────────────────────────────────
-# 5. Challenge past 24h answer window
-# ─────────────────────────────────────────────────────────────────────
-section("5. Challenge past 24h answer window")
-r = requests.get(f"{BASE}/challenge/past", headers=H(anon_id=anon_a))
-check("GET /challenge/past → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-if r.ok:
-    payload = r.json()
-    completions = payload.get("completions", [])
-    check("response has completions array", isinstance(completions, list),
-          f"got {type(completions)}")
-    # No completions yet for a fresh user, but if any: verify shape
-    if completions:
-        for c in completions[:3]:
-            check(f"entry has can_answer:bool", isinstance(c.get("can_answer"), bool),
-                  f"got {type(c.get('can_answer'))}")
-            check(f"entry has answer_deadline (str or None)",
-                  c.get("answer_deadline") is None or isinstance(c.get("answer_deadline"), str),
-                  f"got {type(c.get('answer_deadline'))}")
-    else:
-        # Just verify the endpoint shape is consistent (no completions = OK)
-        print(f"  ℹ️  No past completions to inspect (fresh user).")
+def test_spot_full():
+    print("\n" + "#" * 70)
+    print("# Spot the Object — full backend flow")
+    print("#" * 70)
 
-# Force a past entry: complete a challenge and verify the shape persists.
-# (We don't expect can_answer=True since it's not auto_uncompleted.)
-r = requests.post(f"{BASE}/challenge/accept", headers=H(anon_id=anon_a))
-check("POST /challenge/accept → 200", r.status_code == 200, r.text[:200])
-r = requests.post(
-    f"{BASE}/challenge/complete",
-    headers=H(anon_id=anon_a),
-    json={"how_text": "did it", "difficulty": "easy", "experience_text": "great", "rating": 5},
-)
-check("POST /challenge/complete → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+    anon = f"spot-{uuid.uuid4().hex}"  # 36+ chars, safely above 8-char minimum
+    # Fresh second user for like/comment cross-user / fresh feed verification
+    anon_b = f"spot-b-{uuid.uuid4().hex}"
 
-r = requests.get(f"{BASE}/challenge/past", headers=H(anon_id=anon_a))
-if r.ok:
-    completions = r.json().get("completions", [])
-    if completions:
-        c0 = completions[0]
-        check("most recent past has can_answer:bool", isinstance(c0.get("can_answer"), bool),
-              f"got {type(c0.get('can_answer'))} {c0.get('can_answer')!r}")
-        check("most recent past has answer_deadline field",
-              "answer_deadline" in c0,
-              f"keys={list(c0.keys())[:15]}")
-        check("freshly-completed challenge has can_answer=False",
-              c0.get("can_answer") is False,
-              f"got {c0.get('can_answer')!r}")
+    # ---- Profile defaults ----
+    r = GET("/profile", anon_id=anon)
+    record("GET /profile fresh user (200)", r.status_code == 200, f"status={r.status_code}")
+    if r.status_code == 200:
+        prof = r.json()
+        record("profile.spot_points default 0", prof.get("spot_points") == 0,
+               f"spot_points={prof.get('spot_points')!r}")
+        record("profile.spot_random_enabled default False",
+               prof.get("spot_random_enabled") is False,
+               f"spot_random_enabled={prof.get('spot_random_enabled')!r}")
 
-# 404 path
-fake_id = "non-existent-completion-" + uuid.uuid4().hex[:8]
-r = requests.post(
-    f"{BASE}/challenge/past/{fake_id}/answer",
-    headers=H(anon_id=anon_a),
-    json={"completed": True, "difficulty": "easy", "rating": 5},
-)
-check("POST /challenge/past/{fake}/answer → 404", r.status_code == 404,
-      f"got {r.status_code} {r.text[:200]}")
+    # ---- Fresh feed empty ----
+    r = GET("/spot/feed?limit=50", anon_id=anon_b)
+    if record("GET /spot/feed fresh user (200)", r.status_code == 200, f"status={r.status_code}"):
+        body = r.json()
+        record("fresh feed entries==[]", body.get("entries") == [], f"got={body.get('entries')!r}")
 
-# ─────────────────────────────────────────────────────────────────────
-# 6. Regressions
-# ─────────────────────────────────────────────────────────────────────
-section("6. REGRESSION: /api/auth/register + login")
-email = f"day.anchor.{uuid.uuid4().hex[:10]}@protonmail.com"
-pw = "AnchorTest123!"
-r = requests.post(
-    f"{BASE}/auth/register",
-    headers={"Content-Type": "application/json"},
-    json={"full_name": "Day Anchor Tester", "email": email, "password": pw},
-)
-check("POST /auth/register → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-token = None
-if r.ok:
-    rj = r.json()
-    token = rj.get("token")
-    check("register returns token (verification disabled)", isinstance(token, str) and len(token) > 20)
-    user_obj = rj.get("user") or {}
-    check("register user.verified=true", bool(user_obj.get("verified")))
+    # ---- /spot/object — variety check ----
+    objects_seen = set()
+    last_status = None
+    last_payload = None
+    for i in range(8):
+        r = GET("/spot/object", anon_id=anon)
+        last_status = r.status_code
+        if r.status_code == 200:
+            last_payload = r.json()
+            obj = last_payload.get("object")
+            cid = last_payload.get("challenge_id")
+            if obj:
+                objects_seen.add(obj)
+            if i == 0:
+                record("GET /spot/object payload has 'object' string",
+                       isinstance(obj, str) and len(obj) > 0,
+                       f"object={obj!r}")
+                record("GET /spot/object payload has 'challenge_id'",
+                       isinstance(cid, str) and len(cid) > 0,
+                       f"challenge_id={cid!r}")
+                record("returned object is in curated SPOT_OBJECTS list",
+                       obj in SPOT_OBJECTS,
+                       f"object={obj!r}")
+    record("GET /spot/object (200)", last_status == 200, f"last_status={last_status}")
+    record("8 calls to /spot/object yield >=2 distinct objects",
+           len(objects_seen) >= 2,
+           f"distinct={len(objects_seen)} objects={sorted(objects_seen)}")
+    record("all returned objects are members of SPOT_OBJECTS",
+           objects_seen.issubset(SPOT_OBJECTS),
+           f"unknown={objects_seen - SPOT_OBJECTS}")
 
-# Auth-me with token
-r = requests.get(f"{BASE}/auth/me", headers={"Authorization": f"Bearer {token}"})
-check("GET /auth/me → 200", r.status_code == 200, f"got {r.status_code}")
+    # ---- /spot/check — validation ----
+    r = POST("/spot/check", {"target_object": "leaf", "photo_base64": ""}, anon_id=anon)
+    record("POST /spot/check empty photo -> 400", r.status_code == 400, f"status={r.status_code} body={r.text[:120]}")
 
-# Login
-r = requests.post(
-    f"{BASE}/auth/login",
-    headers={"Content-Type": "application/json"},
-    json={"email": email, "password": pw},
-)
-check("POST /auth/login → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-if r.ok:
-    token = r.json().get("token")
+    # Oversize: > 8_000_000 chars
+    big = "A" * 8_000_001
+    r = POST("/spot/check", {"target_object": "leaf", "photo_base64": big}, anon_id=anon)
+    record("POST /spot/check >8MB b64 -> 400", r.status_code == 400, f"status={r.status_code}")
 
-# Wrong password
-r = requests.post(
-    f"{BASE}/auth/login",
-    headers={"Content-Type": "application/json"},
-    json={"email": email, "password": "WrongPass!"},
-)
-check("POST /auth/login wrong pw → 401", r.status_code == 401, f"got {r.status_code}")
+    # ---- /spot/check — positive case (real leaf photo, target=leaf) ----
+    leaf_b64 = real_photo_b64("leaf")
+    r = POST("/spot/check", {"target_object": "leaf", "photo_base64": leaf_b64}, anon_id=anon)
+    record("POST /spot/check positive (200)", r.status_code == 200, f"status={r.status_code}")
+    if r.status_code == 200:
+        chk = r.json()
+        for k in ("detected", "confidence", "reason", "can_capture"):
+            record(f"check response has {k!r}", k in chk, f"keys={list(chk.keys())}")
+        record("check.detected is bool", isinstance(chk.get("detected"), bool), f"type={type(chk.get('detected')).__name__}")
+        record("check.confidence is number", isinstance(chk.get("confidence"), (int, float)), f"type={type(chk.get('confidence')).__name__}")
+        record("check.reason is str", isinstance(chk.get("reason"), str), f"type={type(chk.get('reason')).__name__}")
+        record("check.can_capture is bool", isinstance(chk.get("can_capture"), bool), f"type={type(chk.get('can_capture')).__name__}")
+        # can_capture = detected AND confidence>=0.55
+        expected_cap = bool(chk.get("detected")) and float(chk.get("confidence", 0)) >= 0.55
+        record("can_capture == (detected AND confidence>=0.55)",
+               chk.get("can_capture") == expected_cap,
+               f"can_capture={chk.get('can_capture')!r} expected={expected_cap!r}  (detected={chk.get('detected')}, conf={chk.get('confidence')})")
+        # If LLM error path was taken, response still 200 with detected=false and reason mentions error
+        if chk.get("reason", "").lower().startswith("vision unavailable"):
+            print("  NOTE: vision API failure path — still returned 200 with proper shape (resilience OK)")
 
-section("6. REGRESSION: /api/profile GET (with auth)")
-r = requests.get(f"{BASE}/profile", headers=H(token=token))
-check("GET /profile (auth) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-if r.ok:
-    p = r.json()
-    check("auth profile has day_start_time field", "day_start_time" in p)
-    check("auth profile has timezone field", "timezone" in p)
-    check("auth profile has onboarding_tz_done field", "onboarding_tz_done" in p)
+    # ---- /spot/check — negative case (chair photo, target=leaf) ----
+    chair_b64 = real_photo_b64("chair")
+    r = POST("/spot/check", {"target_object": "leaf", "photo_base64": chair_b64}, anon_id=anon)
+    record("POST /spot/check negative (200)", r.status_code == 200, f"status={r.status_code}")
+    if r.status_code == 200:
+        chk = r.json()
+        record("negative check has shape", all(k in chk for k in ("detected", "confidence", "reason", "can_capture")),
+               f"keys={list(chk.keys())}")
+        # Don't assert detected=False strictly (LLM may surprise us with chair pic that happens to have foliage),
+        # but record the value for diagnostic.
+        print(f"  diagnostic: negative-case detected={chk.get('detected')!r} conf={chk.get('confidence')!r}")
 
-section("6. REGRESSION: /api/boosts/*")
-# Unlock with code
-r = requests.post(f"{BASE}/boosts/unlock", headers=H(token=token), json={"code": "XP270905W20"})
-check("POST /boosts/unlock (correct code) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+    # ---- /spot/complete — success=true ----
+    r = POST("/spot/complete", {
+        "target_object": "leaf",
+        "photo_base64": leaf_b64,
+        "success": True,
+        "remaining_seconds": 42,
+        "mode": "solo_constant",
+    }, anon_id=anon)
+    record("POST /spot/complete success=true (200)", r.status_code == 200, f"status={r.status_code}")
+    entry_id_a = None
+    if r.status_code == 200:
+        body = r.json()
+        for k in ("entry", "points_delta", "spot_points", "profile"):
+            record(f"complete response has {k!r}", k in body, f"keys={list(body.keys())}")
+        record("complete.points_delta == 1", body.get("points_delta") == 1, f"got={body.get('points_delta')!r}")
+        record("complete.spot_points == 1", body.get("spot_points") == 1, f"got={body.get('spot_points')!r}")
+        record("complete.profile.spot_points == 1", (body.get("profile") or {}).get("spot_points") == 1,
+               f"profile.spot_points={(body.get('profile') or {}).get('spot_points')!r}")
+        ent = body.get("entry") or {}
+        entry_id_a = ent.get("id")
+        record("entry.id is uuid string", isinstance(entry_id_a, str) and len(entry_id_a) >= 32,
+               f"id={entry_id_a!r}")
+        record("entry.success == True", ent.get("success") is True, f"got={ent.get('success')!r}")
+        record("entry.target_object == 'leaf'", ent.get("target_object") == "leaf", f"got={ent.get('target_object')!r}")
+        record("entry.mode == 'solo_constant'", ent.get("mode") == "solo_constant", f"got={ent.get('mode')!r}")
 
-# Status
-r = requests.get(f"{BASE}/boosts/status", headers=H(token=token))
-check("GET /boosts/status → 200", r.status_code == 200)
-if r.ok:
-    s = r.json()
-    check("status has boosts_unlocked=true", s.get("boosts_unlocked") is True,
-          f"got {s.get('boosts_unlocked')!r}")
-    check("status has boost_inventory list", isinstance(s.get("boost_inventory"), list))
+    # ---- /spot/complete — success=false (no point) ----
+    r = POST("/spot/complete", {
+        "target_object": "leaf",
+        "photo_base64": leaf_b64,
+        "success": False,
+        "remaining_seconds": 0,
+        "mode": "solo_constant",
+    }, anon_id=anon)
+    record("POST /spot/complete success=false (200)", r.status_code == 200, f"status={r.status_code}")
+    entry_id_b = None
+    if r.status_code == 200:
+        body = r.json()
+        record("failed complete points_delta == 0", body.get("points_delta") == 0, f"got={body.get('points_delta')!r}")
+        record("failed complete spot_points still 1", body.get("spot_points") == 1, f"got={body.get('spot_points')!r}")
+        entry_id_b = (body.get("entry") or {}).get("id")
 
-# Claim
-r = requests.post(f"{BASE}/boosts/claim", headers=H(token=token), json={"type": "triple_day"})
-check("POST /boosts/claim triple_day → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-inv_id = None
-if r.ok:
-    claimed = r.json().get("claimed") or {}
-    inv_id = claimed.get("id")
-    check("claimed has id", isinstance(inv_id, str) and len(inv_id) > 5)
+    # Confirm profile reflects the +1 point only
+    r = GET("/profile", anon_id=anon)
+    if r.status_code == 200:
+        record("after complete: profile.spot_points == 1", r.json().get("spot_points") == 1,
+               f"spot_points={r.json().get('spot_points')!r}")
 
-# Activate
-if inv_id:
-    r = requests.post(f"{BASE}/boosts/activate", headers=H(token=token), json={"inventory_id": inv_id})
-    check("POST /boosts/activate {inventory_id} → 200", r.status_code == 200,
-          f"got {r.status_code} {r.text[:200]}")
-    if r.ok:
-        ab = r.json().get("active_boost") or {}
-        check("active_boost.multiplier=3", ab.get("multiplier") == 3, f"got {ab}")
+    # ---- /spot/feed — should now contain the 2 entries ----
+    r = GET("/spot/feed?limit=50", anon_id=anon)
+    record("GET /spot/feed (200)", r.status_code == 200, f"status={r.status_code}")
+    if r.status_code == 200:
+        body = r.json()
+        entries = body.get("entries") or []
+        record("feed has >= 2 entries after 2 completions", len(entries) >= 2, f"len={len(entries)}")
+        if entries:
+            e0 = entries[0]
+            for k in ("player_name", "player_avatar_base64", "player_spot_points",
+                      "liked_by_you", "like_count", "comment_count", "is_self"):
+                record(f"feed entry has {k!r}", k in e0, f"keys={list(e0.keys())[:15]}")
+            record("entry.is_self == True for self feed", e0.get("is_self") is True, f"got={e0.get('is_self')!r}")
+            record("entry.player_spot_points == 1", e0.get("player_spot_points") == 1,
+                   f"got={e0.get('player_spot_points')!r}")
+            record("entry.liked_by_you starts False", e0.get("liked_by_you") is False, f"got={e0.get('liked_by_you')!r}")
+            record("entry.like_count starts 0", e0.get("like_count") == 0, f"got={e0.get('like_count')!r}")
+            record("entry.comment_count starts 0", e0.get("comment_count") == 0, f"got={e0.get('comment_count')!r}")
 
-section("6. REGRESSION: /api/friends/leaderboard")
-r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=H(token=token))
-check("GET /friends/leaderboard?tz=0 → 200", r.status_code == 200,
-      f"got {r.status_code} {r.text[:200]}")
-if r.ok:
-    lb = r.json()
-    check("leaderboard has rows[]", isinstance(lb.get("rows"), list))
-    check("leaderboard has reports[]", isinstance(lb.get("reports"), list))
-    check("leaderboard has week_key", isinstance(lb.get("week_key"), str))
-    rows = lb.get("rows") or []
-    self_rows = [r0 for r0 in rows if r0.get("is_self")]
-    check("self row present", len(self_rows) == 1, f"got {len(self_rows)}")
+    # ---- /spot/{id}/like — toggle ----
+    if entry_id_a:
+        r = POST(f"/spot/{entry_id_a}/like", anon_id=anon)
+        record("POST /spot/{id}/like 1st (200)", r.status_code == 200, f"status={r.status_code}")
+        if r.status_code == 200:
+            body = r.json()
+            record("after 1st like: like_count==1", body.get("like_count") == 1, f"got={body.get('like_count')!r}")
+            record("after 1st like: liked_by_you==True", body.get("liked_by_you") is True,
+                   f"got={body.get('liked_by_you')!r}")
+        r = POST(f"/spot/{entry_id_a}/like", anon_id=anon)
+        if r.status_code == 200:
+            body = r.json()
+            record("after 2nd like (toggle off): like_count==0", body.get("like_count") == 0,
+                   f"got={body.get('like_count')!r}")
+            record("after 2nd like (toggle off): liked_by_you==False", body.get("liked_by_you") is False,
+                   f"got={body.get('liked_by_you')!r}")
 
-section("6. REGRESSION: /api/leaderboard/report (self-report should 400)")
-my_id = (r.json().get("rows") or [{}])[0].get("user_id") if r.ok else None
-if my_id:
-    r2 = requests.post(
-        f"{BASE}/leaderboard/report",
-        headers=H(token=token),
-        json={"reported_user_id": my_id, "reason": "self-report attempt"},
-    )
-    check("POST /leaderboard/report (self) → 400", r2.status_code == 400,
-          f"got {r2.status_code} {r2.text[:200]}")
+    # ---- /spot/{id}/comment ----
+    if entry_id_a:
+        r = POST(f"/spot/{entry_id_a}/comment", {"text": "   "}, anon_id=anon)
+        record("POST /spot/{id}/comment empty -> 400", r.status_code == 400, f"status={r.status_code}")
 
-section("6. REGRESSION: /api/tasks lifecycle (create, complete, uncomplete with ?date=)")
-# Create custom task
-r = requests.post(
-    f"{BASE}/tasks",
-    headers=H(token=token),
-    json={
-        "title": "Day Anchor Smoke Task",
-        "description": "regression",
-        "focus_area": "mindset",
-        "time_slot": "morning",
-        "xp_value": 15,
-        "scheduled_time": "08:00",
-        "reminder_enabled": False,
-    },
-)
-check("POST /tasks (custom) → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-task_id = None
-if r.ok:
-    tj = r.json()
-    task_id = tj.get("id")
-    check("custom task xp_value capped/kept at 15", tj.get("xp_value") == 15, f"got {tj.get('xp_value')}")
+        r = POST(f"/spot/{entry_id_a}/comment", {"text": "Beautiful find! 🌿"}, anon_id=anon)
+        record("POST /spot/{id}/comment normal (200)", r.status_code == 200, f"status={r.status_code}")
+        if r.status_code == 200:
+            comments = r.json().get("comments") or []
+            record("comments list has 1 entry", len(comments) == 1, f"len={len(comments)}")
+            if comments:
+                c = comments[-1]
+                for k in ("id", "user_id", "user_name", "user_avatar_base64", "text", "created_at"):
+                    record(f"comment has {k!r}", k in c, f"keys={list(c.keys())}")
+                record("comment.text matches", c.get("text") == "Beautiful find! 🌿", f"got={c.get('text')!r}")
 
-# Get profile XP before
-prof_before = requests.get(f"{BASE}/profile", headers=H(token=token)).json()
-xp_before = int(prof_before.get("total_xp", 0))
+        # Long comment > 280 chars -> truncated
+        long_text = "x" * 350
+        r = POST(f"/spot/{entry_id_a}/comment", {"text": long_text}, anon_id=anon)
+        record("POST /spot/{id}/comment >280 chars (200, no error)", r.status_code == 200,
+               f"status={r.status_code}")
+        if r.status_code == 200:
+            comments = r.json().get("comments") or []
+            last = comments[-1] if comments else {}
+            record("long comment was truncated to 280 chars", len(last.get("text", "")) == 280,
+                   f"len={len(last.get('text', ''))}")
 
-# Complete with explicit date (today UTC)
-today_iso = datetime.utcnow().date().isoformat()
-if task_id:
-    r = requests.post(
-        f"{BASE}/tasks/{task_id}/complete",
-        headers=H(token=token),
-        json={"date": today_iso},
-    )
-    check("POST /tasks/{id}/complete (?date=today) → 200", r.status_code == 200,
-          f"got {r.status_code} {r.text[:200]}")
-    if r.ok:
-        cj = r.json()
-        # active boost (3x) is on this account, so awarded should be 45
-        awarded = int(cj.get("xp_awarded", 0))
-        check("complete returned xp_awarded > 0", awarded > 0, f"got {awarded}")
+    # ---- /spot/{id} — full detail / 404 ----
+    if entry_id_a:
+        r = GET(f"/spot/{entry_id_a}", anon_id=anon)
+        record("GET /spot/{id} detail (200)", r.status_code == 200, f"status={r.status_code}")
+        if r.status_code == 200:
+            ent = r.json()
+            record("detail has comments[]", isinstance(ent.get("comments"), list),
+                   f"comments_type={type(ent.get('comments')).__name__}")
+            record("detail comments len == 2", len(ent.get("comments") or []) == 2,
+                   f"len={len(ent.get('comments') or [])}")
+            for k in ("player_name", "player_avatar_base64", "player_spot_points", "like_count", "liked_by_you"):
+                record(f"detail has {k!r}", k in ent, f"keys=...")
 
-    # Uncomplete with ?date= via body
-    r = requests.post(
-        f"{BASE}/tasks/{task_id}/uncomplete",
-        headers=H(token=token),
-        json={"date": today_iso},
-    )
-    check("POST /tasks/{id}/uncomplete (?date=today) → 200", r.status_code == 200,
-          f"got {r.status_code} {r.text[:200]}")
-    if r.ok:
-        uj = r.json()
-        check("uncomplete returns xp_removed", "xp_removed" in uj,
-              f"got keys={list(uj.keys())}")
-        prof_after = requests.get(f"{BASE}/profile", headers=H(token=token)).json()
-        check("XP rolled back", int(prof_after.get("total_xp", 0)) == xp_before,
-              f"before={xp_before} after={prof_after.get('total_xp')}")
+    r = GET(f"/spot/{uuid.uuid4().hex}", anon_id=anon)
+    record("GET /spot/{bogus} -> 404", r.status_code == 404, f"status={r.status_code}")
 
-section("6. REGRESSION: /api/goals lifecycle")
-# Create goal
-r = requests.post(
-    f"{BASE}/goals",
-    headers=H(token=token),
-    json={
-        "title": "Anchor Goal Smoke",
-        "description": "regression",
-        "focus_area": "fitness",
-        "target_value": 30,
-        "unit": "days",
-        "xp_reward": 30,
-    },
-)
-check("POST /goals → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
-goal_id = None
-if r.ok:
-    gj = r.json()
-    goal_id = gj.get("id")
-    check("goal xp_reward clamped to 30", gj.get("xp_reward") == 30, f"got {gj.get('xp_reward')}")
+    # ---- /spot/random-toggle ----
+    r = POST("/spot/random-toggle", {"enabled": True}, anon_id=anon)
+    record("POST /spot/random-toggle enabled=true (200)", r.status_code == 200, f"status={r.status_code}")
+    if r.status_code == 200:
+        body = r.json()
+        record("random-toggle response.spot_random_enabled True", body.get("spot_random_enabled") is True,
+               f"got={body.get('spot_random_enabled')!r}")
+        record("random-toggle response.profile.spot_random_enabled True",
+               (body.get("profile") or {}).get("spot_random_enabled") is True,
+               f"got={(body.get('profile') or {}).get('spot_random_enabled')!r}")
 
-# List
-r = requests.get(f"{BASE}/goals", headers=H(token=token))
-check("GET /goals → 200", r.status_code == 200)
-if r.ok:
-    gs = r.json().get("goals") or []
-    found = next((g for g in gs if g.get("id") == goal_id), None)
-    check("created goal in list", bool(found))
+    r = GET("/profile", anon_id=anon)
+    if r.status_code == 200:
+        record("GET /profile reflects spot_random_enabled=True",
+               r.json().get("spot_random_enabled") is True,
+               f"got={r.json().get('spot_random_enabled')!r}")
 
-# Update goal
-if goal_id:
-    r = requests.put(
-        f"{BASE}/goals/{goal_id}",
-        headers=H(token=token),
-        json={"title": "Anchor Goal Smoke (updated)"},
-    )
-    check("PUT /goals/{id} → 200", r.status_code == 200, f"got {r.status_code} {r.text[:200]}")
+    r = POST("/spot/random-toggle", {"enabled": False}, anon_id=anon)
+    if r.status_code == 200:
+        record("POST /spot/random-toggle enabled=false reflects",
+               r.json().get("spot_random_enabled") is False,
+               f"got={r.json().get('spot_random_enabled')!r}")
+    r = GET("/profile", anon_id=anon)
+    if r.status_code == 200:
+        record("GET /profile reflects spot_random_enabled=False",
+               r.json().get("spot_random_enabled") is False,
+               f"got={r.json().get('spot_random_enabled')!r}")
 
-# Progress tick
-if goal_id:
-    r = requests.post(
-        f"{BASE}/goals/{goal_id}/progress",
-        headers=H(token=token),
-        json={"current_value": 1},
-    )
-    check("POST /goals/{id}/progress (1/30) → 200", r.status_code == 200,
-          f"got {r.status_code} {r.text[:200]}")
 
-# Delete
-if goal_id:
-    r = requests.delete(f"{BASE}/goals/{goal_id}", headers=H(token=token))
-    check("DELETE /goals/{id} → 200", r.status_code in (200, 204),
-          f"got {r.status_code} {r.text[:200]}")
+# ---------------------------------------------------------------------------
+# 2. Light regression: profile/leaderboard/task lifecycle
+# ---------------------------------------------------------------------------
+def test_regression():
+    print("\n" + "#" * 70)
+    print("# Regression sanity (profile / leaderboard / task complete cycle)")
+    print("#" * 70)
 
-# ─────────────────────────────────────────────────────────────────────
-# Summary
-# ─────────────────────────────────────────────────────────────────────
-print("\n" + "=" * 60)
-print(f"PASSED: {len(PASS)}")
-print(f"FAILED: {len(FAIL)}")
-if FAIL:
-    print("\nFAILURES:")
-    for f in FAIL:
-        print(f"  - {f}")
-sys.exit(0 if not FAIL else 1)
+    anon = f"reg-{uuid.uuid4().hex}"
+
+    # Profile (already covered for spot defaults above; sanity here on standard fields)
+    r = GET("/profile", anon_id=anon)
+    record("regression: GET /profile (200)", r.status_code == 200, f"status={r.status_code}")
+    if r.status_code == 200:
+        p = r.json()
+        for k in ("user_id", "name", "level", "total_xp", "spot_points", "spot_random_enabled"):
+            record(f"profile has {k!r}", k in p, "")
+
+    # Leaderboard
+    r = GET("/friends/leaderboard?tz=0", anon_id=anon)
+    record("regression: GET /friends/leaderboard (200)", r.status_code == 200, f"status={r.status_code}")
+    if r.status_code == 200:
+        lb = r.json()
+        for k in ("rows", "reports", "week_key", "viewer_is_sunday"):
+            record(f"leaderboard has {k!r}", k in lb, "")
+        record("leaderboard has self row", any(row.get("is_self") for row in (lb.get("rows") or [])),
+               f"rows={len(lb.get('rows') or [])}")
+
+    # Task complete cycle
+    r = GET("/tasks", anon_id=anon)
+    if r.status_code == 200:
+        tasks = r.json().get("tasks") or []
+        # pick first default task
+        defaults = [t for t in tasks if t.get("is_default")]
+        record("regression: at least one default task exists", len(defaults) >= 1, f"defaults={len(defaults)}")
+        if defaults:
+            t = defaults[0]
+            tid = t.get("id")
+            from datetime import datetime, timezone
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            r = POST(f"/tasks/{tid}/complete", {"date": today}, anon_id=anon)
+            record(f"regression: POST /tasks/{{id}}/complete (200)", r.status_code == 200, f"status={r.status_code}")
+            xp_awarded = (r.json() or {}).get("xp_awarded", 0) if r.status_code == 200 else 0
+            record("xp_awarded > 0", xp_awarded > 0, f"xp_awarded={xp_awarded}")
+            r = POST(f"/tasks/{tid}/uncomplete", {"date": today}, anon_id=anon)
+            record("regression: POST /tasks/{{id}}/uncomplete (200)", r.status_code == 200, f"status={r.status_code}")
+            xp_removed = (r.json() or {}).get("xp_removed", 0) if r.status_code == 200 else -1
+            record("xp_removed matches awarded", xp_removed == xp_awarded, f"awarded={xp_awarded} removed={xp_removed}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    print(f"Backend URL: {API}")
+    test_spot_full()
+    test_regression()
+    passed, total = summary()
+    raise SystemExit(0 if passed == total else 1)

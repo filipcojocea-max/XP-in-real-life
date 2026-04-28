@@ -163,7 +163,51 @@ export default function Library() {
               </View>
             </TouchableOpacity>
 
-            {/* Coming soon row */}
+            {/* Spot the Object mini-app — featured */}
+            <TouchableOpacity
+              testID="library-card-spot"
+              activeOpacity={0.85}
+              onPress={() => router.push('/spot' as any)}
+              style={[styles.featureCard, { marginTop: spacing.md, borderColor: colors.amber + '55' }]}
+            >
+              <View style={[styles.featureGlow, { backgroundColor: colors.amber + '22' }]} />
+              <View style={styles.featureRow}>
+                <View style={[styles.featureIcon, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '88' }]}>
+                  <Ionicons name="scan-circle" size={32} color={colors.amber} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.featureKickerRow}>
+                    <Text style={[styles.featureKicker, { color: colors.amber }]}>NEW · MOVE & SPOT</Text>
+                    <View style={styles.unlockedPill}>
+                      <Ionicons name="checkmark" size={10} color={colors.green} />
+                      <Text style={styles.unlockedText}>UNLOCKED</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.featureTitle}>Spot the Object</Text>
+                  <Text style={styles.featureDesc}>
+                    Take a photo of a leaf, a dog, anything pink — AI checks if you found it. Endless solo practice or surprise 2-minute challenges.
+                  </Text>
+                  <View style={styles.tagRow}>
+                    <View style={[styles.featTag, { backgroundColor: colors.amber + '15', borderColor: colors.amber + '33' }]}>
+                      <Ionicons name="walk" size={10} color={colors.amber} />
+                      <Text style={[styles.featTagText, { color: colors.amber }]}>Get moving</Text>
+                    </View>
+                    <View style={[styles.featTag, { backgroundColor: colors.amber + '15', borderColor: colors.amber + '33' }]}>
+                      <Ionicons name="trophy" size={10} color={colors.amber} />
+                      <Text style={[styles.featTagText, { color: colors.amber }]}>Spot Points</Text>
+                    </View>
+                    <View style={[styles.featTag, { backgroundColor: colors.amber + '15', borderColor: colors.amber + '33' }]}>
+                      <Ionicons name="people" size={10} color={colors.amber} />
+                      <Text style={[styles.featTagText, { color: colors.amber }]}>Solo + friends*</Text>
+                    </View>
+                  </View>
+                  <View style={[styles.featureCta, { backgroundColor: colors.amber }]}>
+                    <Text style={styles.featureCtaText}>Open mini-app</Text>
+                    <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+                  </View>
+                </View>
+              </View>
+            </TouchableOpacity>
             <Text style={styles.sectionLabel}>Coming soon</Text>
             <View style={styles.previewGrid}>
               {[
@@ -216,6 +260,23 @@ export default function Library() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.mineTitle}>Challenge Tasks</Text>
                 <Text style={styles.mineDesc}>Daily growth challenges · XP rewards</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+
+            {/* Spot the Object installed */}
+            <TouchableOpacity
+              testID="library-mine-spot"
+              activeOpacity={0.85}
+              onPress={() => router.push('/spot' as any)}
+              style={[styles.mineCard, { borderColor: colors.amber + '55' }]}
+            >
+              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: colors.amber + '22', borderColor: colors.amber + '88' }]}>
+                <Ionicons name="scan-circle" size={24} color={colors.amber} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.mineTitle}>Spot the Object</Text>
+                <Text style={styles.mineDesc}>Photo challenges · AI verified</Text>
               </View>
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </TouchableOpacity>

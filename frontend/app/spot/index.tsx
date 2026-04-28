@@ -1,0 +1,500 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Switch,
+  ActivityIndicator,
+  Image,
+  ScrollView,
+  RefreshControl,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { router, useFocusEffect } from 'expo-router';
+import { api, Profile, SpotEntry } from '../../src/api';
+import { showAlert, showConfirm } from '../../src/uiAlert';
+import { colors, spacing, radii } from '../../src/theme';
+
+export default function SpotHub() {
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [feed, setFeed] = useState<SpotEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [openEntry, setOpenEntry] = useState<SpotEntry | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [p, f] = await Promise.all([api.getProfile(), api.spotFeed(50)]);
+      setProfile(p);
+      setFeed(f.entries || []);
+    } catch (e: any) {
+      console.log('spot load', e?.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const onToggleRandom = async (next: boolean) => {
+    try {
+      const r = await api.spotRandomToggle(next);
+      setProfile(r.profile);
+      if (next) {
+        showAlert(
+          'Random mode ON',
+          "We'll surprise you with 3 challenges at random times each day. You'll get 2 minutes to find each object.",
+        );
+      }
+    } catch (e: any) {
+      showAlert('Could not toggle', String(e?.message || e));
+    }
+  };
+
+  const startSolo = () => {
+    if (profile?.spot_random_enabled) {
+      showAlert(
+        'Solo locked',
+        'Turn off "Random object at random time" first to play freestyle.',
+      );
+      return;
+    }
+    router.push('/spot/play?mode=solo_constant');
+  };
+
+  const points = profile?.spot_points || 0;
+  const randomEnabled = !!profile?.spot_random_enabled;
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.center}><ActivityIndicator size="large" color={colors.cyan} /></View>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      {/* Top bar */}
+      <View style={styles.topBar}>
+        <TouchableOpacity onPress={() => router.back()} hitSlop={10}>
+          <Ionicons name="chevron-back" size={26} color={colors.text} />
+        </TouchableOpacity>
+        <View style={styles.topTitleWrap}>
+          <View style={styles.miniIconBox}>
+            <Ionicons name="scan" size={14} color={colors.green} />
+          </View>
+          <Text style={styles.topTitle}>Spot the Object</Text>
+        </View>
+        <View style={styles.pointsPill}>
+          <Ionicons name="trophy" size={11} color={colors.amber} />
+          <Text style={styles.pointsText}>{points}</Text>
+        </View>
+      </View>
+
+      <ScrollView
+        contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xl }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.cyan} />}
+      >
+        {/* Mode 1: Play Solo */}
+        <TouchableOpacity
+          activeOpacity={randomEnabled ? 1 : 0.85}
+          onPress={startSolo}
+          testID="spot-mode-solo"
+          style={[styles.modeCard, randomEnabled && styles.modeCardLocked]}
+        >
+          <View style={[styles.modeIcon, { backgroundColor: colors.green + '22', borderColor: colors.green + '88' }]}>
+            <Ionicons name="play" size={26} color={randomEnabled ? colors.textMuted : colors.green} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={[styles.modeTitle, randomEnabled && { color: colors.textMuted }]}>
+                Play Challenge Solo
+              </Text>
+              {randomEnabled ? <Ionicons name="lock-closed" size={12} color={colors.textMuted} /> : null}
+            </View>
+            <Text style={styles.modeDesc}>
+              {randomEnabled
+                ? 'Locked while Random Mode is on.'
+                : 'Endless practice. New random object every round, no time limit.'}
+            </Text>
+          </View>
+          <Ionicons
+            name="chevron-forward"
+            size={20}
+            color={randomEnabled ? colors.textMuted : colors.green}
+          />
+        </TouchableOpacity>
+
+        {/* Mode 2: Random object at random time */}
+        <View style={styles.modeCard}>
+          <View style={[styles.modeIcon, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '88' }]}>
+            <Ionicons name="alarm" size={26} color={colors.amber} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.modeTitle}>Random object at random time</Text>
+            <Text style={styles.modeDesc}>
+              3 surprise challenges per day. 2-minute timer. Locks Solo mode while on.
+            </Text>
+          </View>
+          <Switch
+            value={randomEnabled}
+            onValueChange={onToggleRandom}
+            trackColor={{ false: colors.border, true: colors.amber + '88' }}
+            thumbColor={randomEnabled ? colors.amber : '#888'}
+            testID="spot-random-toggle"
+          />
+        </View>
+
+        {/* Spot Points stat */}
+        <View style={styles.statCard}>
+          <View>
+            <Text style={styles.statLabel}>YOUR SPOT POINTS</Text>
+            <Text style={styles.statValue}>{points}</Text>
+          </View>
+          <View style={styles.statTrophy}>
+            <Ionicons name="trophy" size={32} color={colors.amber} />
+          </View>
+        </View>
+
+        {/* Feed */}
+        <Text style={styles.sectionLabel}>RECENT SPOTS</Text>
+        {feed.length === 0 ? (
+          <View style={styles.emptyFeed}>
+            <Ionicons name="camera-outline" size={32} color={colors.textMuted} />
+            <Text style={styles.emptyTitle}>No spots yet</Text>
+            <Text style={styles.emptyDesc}>Tap "Play Challenge Solo" to get your first object!</Text>
+          </View>
+        ) : (
+          feed.map((e) => (
+            <FeedCard key={e.id} entry={e} onTap={() => setOpenEntry(e)} />
+          ))
+        )}
+      </ScrollView>
+
+      <SpotEntryModal entry={openEntry} onClose={() => setOpenEntry(null)} onChange={load} />
+    </SafeAreaView>
+  );
+}
+
+function FeedCard({ entry, onTap }: { entry: SpotEntry; onTap: () => void }) {
+  const success = entry.success;
+  return (
+    <TouchableOpacity activeOpacity={0.88} onPress={onTap} style={styles.feedCard} testID={`spot-card-${entry.id}`}>
+      <View style={styles.feedHead}>
+        <View style={styles.feedAvatarWrap}>
+          {entry.player_avatar_base64 ? (
+            <Image source={{ uri: `data:image/jpeg;base64,${entry.player_avatar_base64}` }} style={styles.feedAvatar} />
+          ) : (
+            <View style={[styles.feedAvatar, { backgroundColor: colors.cyan + '22', alignItems: 'center', justifyContent: 'center' }]}>
+              <Text style={{ color: colors.cyan, fontWeight: '900' }}>{(entry.player_name || '?').slice(0, 1).toUpperCase()}</Text>
+            </View>
+          )}
+        </View>
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Text style={styles.feedName} numberOfLines={1}>{entry.player_name}</Text>
+            <View style={styles.miniPointsPill}>
+              <Ionicons name="trophy" size={9} color={colors.amber} />
+              <Text style={styles.miniPointsTxt}>{entry.player_spot_points || 0}</Text>
+            </View>
+          </View>
+          <Text style={styles.feedSub}>spotted "{entry.target_object}"</Text>
+        </View>
+        <View style={[styles.statusBadge, { backgroundColor: success ? colors.green + '22' : colors.red + '22', borderColor: success ? colors.green : colors.red }]}>
+          <Ionicons name={success ? 'checkmark-circle' : 'close-circle'} size={11} color={success ? colors.green : colors.red} />
+          <Text style={[styles.statusText, { color: success ? colors.green : colors.red }]}>
+            {success ? 'FOUND' : 'MISSED'}
+          </Text>
+        </View>
+      </View>
+      <Image
+        source={{ uri: `data:image/jpeg;base64,${entry.photo_base64}` }}
+        style={styles.feedImage}
+        resizeMode="cover"
+      />
+      <View style={styles.feedFoot}>
+        <View style={styles.feedFootLeft}>
+          <Ionicons
+            name={entry.liked_by_you ? 'heart' : 'heart-outline'}
+            size={16}
+            color={entry.liked_by_you ? colors.red : colors.textMuted}
+          />
+          <Text style={styles.feedFootTxt}>{entry.like_count || 0}</Text>
+          <Ionicons name="chatbubble-outline" size={15} color={colors.textMuted} style={{ marginLeft: 12 }} />
+          <Text style={styles.feedFootTxt}>{entry.comment_count || 0}</Text>
+        </View>
+        <Text style={styles.feedTime}>
+          {new Date(entry.taken_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+        </Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+function SpotEntryModal({
+  entry, onClose, onChange,
+}: { entry: SpotEntry | null; onClose: () => void; onChange: () => void }) {
+  const [comment, setComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [liking, setLiking] = useState(false);
+  const [local, setLocal] = useState<SpotEntry | null>(null);
+
+  useEffect(() => {
+    setLocal(entry);
+    setComment('');
+  }, [entry?.id]);
+
+  if (!entry || !local) return null;
+
+  const onLike = async () => {
+    setLiking(true);
+    try {
+      const r = await api.spotLike(local.id);
+      setLocal({ ...local, liked_by_you: r.liked_by_you, like_count: r.like_count });
+      onChange();
+    } catch (e: any) {
+      showAlert('Could not like', String(e?.message || e));
+    } finally {
+      setLiking(false);
+    }
+  };
+
+  const onComment = async () => {
+    const txt = comment.trim();
+    if (!txt) return;
+    setSubmitting(true);
+    try {
+      const r = await api.spotComment(local.id, txt);
+      setLocal({ ...local, comments: r.comments });
+      setComment('');
+      onChange();
+    } catch (e: any) {
+      showAlert('Could not comment', String(e?.message || e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <View style={styles.detailBackdrop}>
+      <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1 }}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+          <View style={styles.detailHeader}>
+            <TouchableOpacity onPress={onClose} hitSlop={10}>
+              <Ionicons name="close" size={24} color={colors.text} />
+            </TouchableOpacity>
+            <Text style={styles.detailTitle}>{local.target_object}</Text>
+            <View style={{ width: 24 }} />
+          </View>
+          <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+            <View style={styles.detailHead}>
+              {local.player_avatar_base64 ? (
+                <Image source={{ uri: `data:image/jpeg;base64,${local.player_avatar_base64}` }} style={styles.detailAvatar} />
+              ) : (
+                <View style={[styles.detailAvatar, { backgroundColor: colors.cyan + '22', alignItems: 'center', justifyContent: 'center' }]}>
+                  <Text style={{ color: colors.cyan, fontWeight: '900', fontSize: 20 }}>
+                    {(local.player_name || '?').slice(0, 1).toUpperCase()}
+                  </Text>
+                </View>
+              )}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.detailName}>{local.player_name}</Text>
+                <Text style={styles.detailSub}>{local.player_spot_points || 0} Spot Points</Text>
+              </View>
+            </View>
+            <Image
+              source={{ uri: `data:image/jpeg;base64,${local.photo_base64}` }}
+              style={styles.detailImage}
+              resizeMode="cover"
+            />
+            <View style={styles.detailMeta}>
+              <Text style={styles.detailMetaText}>
+                {local.success ? '✅ Found the object' : "❌ Didn't find the object"} · {local.remaining_seconds}s left
+              </Text>
+              <Text style={styles.detailMetaSub}>{new Date(local.taken_at).toLocaleString()}</Text>
+            </View>
+
+            <TouchableOpacity onPress={onLike} disabled={liking} style={styles.likeBtn}>
+              <Ionicons
+                name={local.liked_by_you ? 'heart' : 'heart-outline'}
+                size={20}
+                color={local.liked_by_you ? colors.red : colors.text}
+              />
+              <Text style={styles.likeText}>
+                {local.like_count || 0} {(local.like_count || 0) === 1 ? 'like' : 'likes'}
+              </Text>
+            </TouchableOpacity>
+
+            <Text style={styles.sectionLabel}>COMMENTS</Text>
+            {(local.comments || []).length === 0 ? (
+              <Text style={styles.emptyDesc}>No comments yet — be the first.</Text>
+            ) : (
+              (local.comments || []).map((c) => (
+                <View key={c.id} style={styles.comment}>
+                  <View style={styles.commentAvatar}>
+                    {c.user_avatar_base64 ? (
+                      <Image source={{ uri: `data:image/jpeg;base64,${c.user_avatar_base64}` }} style={{ width: 28, height: 28, borderRadius: 14 }} />
+                    ) : (
+                      <Text style={{ color: colors.cyan, fontWeight: '900' }}>{(c.user_name || '?').slice(0, 1).toUpperCase()}</Text>
+                    )}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.commentName}>{c.user_name}</Text>
+                    <Text style={styles.commentText}>{c.text}</Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </ScrollView>
+          <View style={styles.commentBar}>
+            <TextInput
+              value={comment}
+              onChangeText={setComment}
+              placeholder="Write a comment…"
+              placeholderTextColor={colors.textMuted}
+              maxLength={280}
+              style={styles.commentInput}
+              onSubmitEditing={onComment}
+              returnKeyType="send"
+            />
+            <TouchableOpacity onPress={onComment} disabled={submitting || !comment.trim()} style={[styles.sendBtn, (submitting || !comment.trim()) && { opacity: 0.5 }]}>
+              {submitting ? <ActivityIndicator color={colors.bg} /> : <Ionicons name="send" size={16} color={colors.bg} />}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.bg },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
+  topBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  topTitleWrap: { flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1, justifyContent: 'center' },
+  miniIconBox: {
+    width: 22, height: 22, borderRadius: 6,
+    backgroundColor: colors.green + '22', borderWidth: 1, borderColor: colors.green + '55',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  topTitle: { color: colors.text, fontWeight: '900', fontSize: 15 },
+  pointsPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: radii.pill,
+    backgroundColor: colors.amber + '18', borderWidth: 1, borderColor: colors.amber + '88',
+  },
+  pointsText: { color: colors.amber, fontWeight: '900', fontSize: 13 },
+
+  modeCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border,
+    borderRadius: radii.lg, padding: spacing.md, marginBottom: spacing.md,
+  },
+  modeCardLocked: { opacity: 0.6 },
+  modeIcon: {
+    width: 56, height: 56, borderRadius: 14, borderWidth: 1,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  modeTitle: { color: colors.text, fontSize: 15, fontWeight: '900' },
+  modeDesc: { color: colors.textSecondary, fontSize: 12, marginTop: 2 },
+
+  statCard: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: colors.amber + '12', borderWidth: 1, borderColor: colors.amber + '88',
+    borderRadius: radii.lg, padding: spacing.md, marginBottom: spacing.lg,
+  },
+  statLabel: { color: colors.amber, fontSize: 11, fontWeight: '900', letterSpacing: 1.5 },
+  statValue: { color: colors.text, fontSize: 36, fontWeight: '900', marginTop: 4 },
+  statTrophy: { width: 56, height: 56, alignItems: 'center', justifyContent: 'center' },
+
+  sectionLabel: { color: colors.textMuted, fontSize: 11, fontWeight: '900', letterSpacing: 1.5, marginBottom: 8, marginTop: 4 },
+  emptyFeed: { alignItems: 'center', paddingVertical: spacing.xl, gap: 6 },
+  emptyTitle: { color: colors.text, fontWeight: '900', fontSize: 14, marginTop: 6 },
+  emptyDesc: { color: colors.textMuted, fontSize: 12, textAlign: 'center' },
+
+  feedCard: {
+    backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border,
+    borderRadius: radii.lg, marginBottom: spacing.md, overflow: 'hidden',
+  },
+  feedHead: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: spacing.md },
+  feedAvatarWrap: { width: 36, height: 36, borderRadius: 18, overflow: 'hidden' },
+  feedAvatar: { width: 36, height: 36, borderRadius: 18 },
+  feedName: { color: colors.text, fontWeight: '900', fontSize: 13 },
+  feedSub: { color: colors.textMuted, fontSize: 12, marginTop: 1 },
+  miniPointsPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 2,
+    paddingHorizontal: 5, paddingVertical: 1, borderRadius: radii.pill,
+    backgroundColor: colors.amber + '18', borderWidth: 1, borderColor: colors.amber + '55',
+  },
+  miniPointsTxt: { color: colors.amber, fontSize: 9, fontWeight: '900' },
+  statusBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 6, paddingVertical: 3, borderRadius: radii.pill, borderWidth: 1,
+  },
+  statusText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
+  feedImage: { width: '100%', aspectRatio: 1, backgroundColor: '#000' },
+  feedFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: spacing.md },
+  feedFootLeft: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  feedFootTxt: { color: colors.textMuted, fontSize: 12, marginLeft: 2 },
+  feedTime: { color: colors.textMuted, fontSize: 11 },
+
+  detailBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.bg },
+  detailHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  detailTitle: { color: colors.text, fontWeight: '900', fontSize: 15, textTransform: 'capitalize' },
+  detailHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: spacing.md },
+  detailAvatar: { width: 44, height: 44, borderRadius: 22 },
+  detailName: { color: colors.text, fontWeight: '900', fontSize: 15 },
+  detailSub: { color: colors.amber, fontSize: 12, marginTop: 2, fontWeight: '700' },
+  detailImage: { width: '100%', aspectRatio: 1, borderRadius: radii.md, backgroundColor: '#000' },
+  detailMeta: { marginTop: spacing.md, marginBottom: spacing.md },
+  detailMetaText: { color: colors.text, fontSize: 14, fontWeight: '700' },
+  detailMetaSub: { color: colors.textMuted, fontSize: 12, marginTop: 4 },
+  likeBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingVertical: 10, paddingHorizontal: 14,
+    borderRadius: radii.pill, borderWidth: 1, borderColor: colors.border,
+    alignSelf: 'flex-start', marginBottom: spacing.md,
+  },
+  likeText: { color: colors.text, fontWeight: '700', fontSize: 13 },
+  comment: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+    padding: 10, marginBottom: 6,
+    backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border, borderRadius: radii.md,
+  },
+  commentAvatar: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.cyan + '22' },
+  commentName: { color: colors.text, fontWeight: '900', fontSize: 12 },
+  commentText: { color: colors.textSecondary, fontSize: 13, marginTop: 2 },
+  commentBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  commentInput: {
+    flex: 1, color: colors.text, fontSize: 14,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: radii.pill, backgroundColor: colors.surfaceGlass,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  sendBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.cyan,
+  },
+});

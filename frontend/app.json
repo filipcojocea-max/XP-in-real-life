@@ -17,7 +17,7 @@
       "buildNumber": "1",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
-        "NSCameraUsageDescription": "Take a profile photo to personalize your account",
+        "NSCameraUsageDescription": "Take photos for profile and Spot the Object challenges",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -83,7 +83,15 @@
           }
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Take photos for profile and Spot the Object challenges",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

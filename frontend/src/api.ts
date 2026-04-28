@@ -89,6 +89,9 @@ export type Profile = {
   day_start_time?: string | null;
   timezone?: string | null;
   onboarding_tz_done?: boolean;
+  // Spot the Object mini-app
+  spot_points?: number;
+  spot_random_enabled?: boolean;
 };
 
 export type BoostInventoryItem = {
@@ -375,6 +378,43 @@ export const api = {
   unsupportReport: (reportId: string) =>
     req<{ supporters_count: number }>(`/leaderboard/report/${reportId}/support`, {
       method: 'DELETE',
+    }),
+
+  // ─── Spot the Object (mini-app) ──────────────────────────────────────
+  spotGetObject: () => req<{ object: string; challenge_id: string }>('/spot/object'),
+  spotCheck: (target_object: string, photo_base64: string) =>
+    req<{ detected: boolean; confidence: number; reason: string; can_capture: boolean }>(
+      '/spot/check',
+      { method: 'POST', body: JSON.stringify({ target_object, photo_base64 }) },
+    ),
+  spotComplete: (body: {
+    target_object: string;
+    photo_base64: string;
+    success: boolean;
+    remaining_seconds?: number;
+    mode?: 'solo_constant' | 'solo_random' | 'friends';
+  }) =>
+    req<{ entry: SpotEntry; points_delta: number; spot_points: number; profile: Profile }>(
+      '/spot/complete',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  spotFeed: (limit = 50) =>
+    req<{ entries: SpotEntry[]; count: number }>(`/spot/feed?limit=${limit}`),
+  spotEntry: (id: string) => req<SpotEntry>(`/spot/${id}`),
+  spotLike: (id: string) =>
+    req<{ like_count: number; liked_by_you: boolean }>(`/spot/${id}/like`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  spotComment: (id: string, text: string) =>
+    req<{ comments: SpotComment[] }>(`/spot/${id}/comment`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  spotRandomToggle: (enabled: boolean) =>
+    req<{ spot_random_enabled: boolean; profile: Profile }>('/spot/random-toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
     }),
   authMe: () => req<{ id: string; full_name: string; email: string; verified: boolean }>('/auth/me'),
   getProfile: () => req<Profile>('/profile'),
@@ -666,5 +706,37 @@ export type LeaderboardPlayerProfile = Player & {
   weekly_xp: number;
   medals: LeaderboardMedal[];
   is_flagged_cheater: boolean;
+};
+
+// ───────────────────────── Spot the Object ─────────────────────────
+export type SpotComment = {
+  id: string;
+  user_id: string;
+  user_name: string;
+  user_avatar_base64: string | null;
+  text: string;
+  created_at: string;
+};
+
+export type SpotEntry = {
+  id: string;
+  user_id: string;
+  target_object: string;
+  photo_base64: string;
+  success: boolean;
+  remaining_seconds: number;
+  mode: 'solo_constant' | 'solo_random' | 'friends' | string;
+  points_delta: number;
+  taken_at: string;
+  likes: string[];
+  comments: SpotComment[];
+  // enriched server-side in feed/detail responses:
+  player_name?: string;
+  player_avatar_base64?: string | null;
+  player_spot_points?: number;
+  liked_by_you?: boolean;
+  like_count?: number;
+  comment_count?: number;
+  is_self?: boolean;
 };
 
