@@ -1,5 +1,5 @@
 import type { FocusArea, TimeSlot } from './theme';
-import { getAuthToken, getAnonymousId, fireUnauthorized } from './AuthContext';
+import { getAuthToken, getAnonymousId, fireUnauthorized, fireAccountSuspended } from './AuthContext';
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -46,6 +46,16 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
       }
     } catch {
       // not JSON — keep raw text
+    }
+    // Account-suspension trap: 403 with detail.error='account_suspended'
+    // forces a global logout via fireAccountSuspended() which the root
+    // layout listens for to render the golden "you are suspended" alert.
+    if (
+      res.status === 403 &&
+      detail && typeof detail === 'object' &&
+      detail.error === 'account_suspended'
+    ) {
+      try { fireAccountSuspended(detail); } catch {}
     }
     const err: any = new Error(pretty);
     err.status = res.status;
@@ -317,6 +327,23 @@ export const api = {
     req<Player>(`/friends/profile/${userId}`),
   playerProfileDetails: (userId: string) =>
     req<FriendProfileDetails>(`/friends/profile/${userId}/details`),
+
+  // ── Admin: account suspension (Creator only) ─────────────────────
+  adminSuspendUser: (
+    userId: string,
+    opts: { duration_hours?: number; forever?: boolean; reason?: string }
+  ) =>
+    req<AdminSuspendResult>('/admin/suspend', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, ...opts }),
+    }),
+  adminUnsuspendUser: (userId: string) =>
+    req<{ ok: boolean; user_id: string; modified: number }>('/admin/unsuspend', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId }),
+    }),
+  adminSuspensionStatus: (userId: string) =>
+    req<AdminSuspensionStatus>(`/admin/suspension/${userId}`),
   sendFriendRequest: (userId: string) =>
     req<{ status: FriendStatus; message: string }>('/friends/request', {
       method: 'POST',
@@ -794,6 +821,27 @@ export type FriendProfileDetails = {
     goals_active: number;
     goals_completed: number;
   };
+};
+
+// ── Admin Account Suspension ─────────────────────────────────────
+export type AdminSuspendResult = {
+  ok: boolean;
+  user_id: string;
+  suspended_until: string | null;
+  forever: boolean;
+  duration_hours: number | null;
+  reason: string;
+};
+
+export type AdminSuspensionStatus = {
+  user_id: string;
+  suspended: boolean;
+  forever?: boolean;
+  until?: string | null;
+  remaining_seconds?: number | null;
+  suspended_at?: string;
+  suspended_by?: string;
+  reason?: string;
 };
 
 // ───────────────────────── Leaderboard ─────────────────────────

@@ -20,6 +20,7 @@ import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 import LeaderboardTab from '../../src/components/LeaderboardTab';
 import PremiumShield from '../../src/components/PremiumShield';
+import { SuspendUserModal } from '../../src/components/SuspendUserModal';
 
 type TopTab = 'players' | 'friends' | 'leaderboard';
 type FriendsSubTab = 'requests' | 'mine';
@@ -45,6 +46,17 @@ export default function FriendsScreen() {
 
   const [openProfile, setOpenProfile] = useState<Player | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
+  // Whether the CURRENT VIEWER is the Creator/Admin — drives the
+  // moderation toolkit (Suspend / Send Gift / DM-anyone) in the modal.
+  const [viewerIsAdmin, setViewerIsAdmin] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const p = await api.getProfile();
+        setViewerIsAdmin(!!(p as any).is_admin);
+      } catch {}
+    })();
+  }, []);
 
   // Debounce search input — 250ms feels good for fuzzy server search
   useEffect(() => {
@@ -197,6 +209,7 @@ export default function FriendsScreen() {
 
       <PlayerProfileModal
         player={openProfile}
+        viewerIsAdmin={viewerIsAdmin}
         onClose={() => setOpenProfile(null)}
         onAddFriend={onAddFriend}
         onAccept={onAccept}
@@ -572,9 +585,10 @@ function FriendActionButton({ player, onAddFriend, saving }: { player: Player; o
 }
 
 function PlayerProfileModal({
-  player, onClose, onAddFriend, onAccept, onDecline, savingId,
+  player, viewerIsAdmin, onClose, onAddFriend, onAccept, onDecline, savingId,
 }: {
   player: Player | null;
+  viewerIsAdmin: boolean;
   onClose: () => void;
   onAddFriend: (p: Player) => void;
   onAccept: (p: Player) => void;
@@ -657,6 +671,13 @@ function PlayerProfileModal({
             <FriendDetailsSection userId={player.user_id} />
           ) : null}
 
+          {/* Creator/Admin moderation toolkit — only the Creator account
+              sees this block. Non-self only. Lets the Creator suspend
+              the player straight from their profile modal. */}
+          {viewerIsAdmin && player.friend_status !== 'self' && !player.is_admin_view ? (
+            <AdminControlsBlock userId={player.user_id} userName={player.name} />
+          ) : null}
+
           {/* Action area */}
           <View style={{ marginTop: spacing.lg }}>
             {player.friend_status === 'self' ? null
@@ -733,6 +754,115 @@ function ModalStat({ icon, color, value, label }: { icon: string; color: string;
       <Ionicons name={icon as any} size={18} color={color} />
       <Text style={styles.modalStatValue}>{value}</Text>
       <Text style={styles.modalStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
+/**
+ * AdminControlsBlock — only renders inside the player profile modal when
+ * the viewer is the Creator/Admin AND the target is not the admin
+ * themselves. Shows current suspension status and exposes the
+ * Suspend/Lift Suspension buttons. Sending Gifts and admin-bypass DM
+ * will be added to this block in subsequent phases.
+ */
+function AdminControlsBlock({ userId, userName }: { userId: string; userName: string }) {
+  const [status, setStatus] = useState<{ suspended: boolean; forever?: boolean; remaining_seconds?: number | null; until?: string | null; reason?: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showSuspend, setShowSuspend] = useState(false);
+  const [working, setWorking] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const s = await api.adminSuspensionStatus(userId);
+      setStatus(s);
+    } catch {
+      setStatus(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  function formatRemaining(seconds: number | null | undefined, forever?: boolean): string {
+    if (forever) return 'Suspended indefinitely';
+    if (!seconds || seconds <= 0) return 'Expired';
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (days > 0) return `${days}d ${hours}h remaining`;
+    if (hours > 0) return `${hours}h ${minutes}m remaining`;
+    return `${minutes}m remaining`;
+  }
+
+  async function lift() {
+    setWorking(true);
+    try {
+      await api.adminUnsuspendUser(userId);
+      await refresh();
+    } catch (e: any) {
+      // surface error inline; admins are forgiving
+      console.error('unsuspend failed', e);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <View style={styles.adminBlock}>
+      <View style={styles.adminHeader}>
+        <Ionicons name="shield-checkmark" size={14} color="#FFD700" />
+        <Text style={styles.adminTitle}>CREATOR TOOLS</Text>
+      </View>
+
+      {loading ? (
+        <ActivityIndicator color="#FFD700" />
+      ) : status?.suspended ? (
+        <View style={styles.suspendActiveCard}>
+          <View style={styles.suspendActiveRow}>
+            <Ionicons name="ban" size={16} color={colors.red} />
+            <Text style={styles.suspendActiveText}>{formatRemaining(status.remaining_seconds, status.forever)}</Text>
+          </View>
+          {status.reason ? (
+            <Text style={styles.suspendReasonText} numberOfLines={3}>"{status.reason}"</Text>
+          ) : null}
+          <TouchableOpacity
+            testID="admin-lift-suspension"
+            onPress={lift}
+            disabled={working}
+            style={[styles.adminLiftBtn, working && { opacity: 0.6 }]}
+            activeOpacity={0.85}
+          >
+            {working ? (
+              <ActivityIndicator color="#FFD700" />
+            ) : (
+              <>
+                <Ionicons name="checkmark-circle" size={16} color="#FFD700" />
+                <Text style={styles.adminLiftText}>Lift Suspension</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <TouchableOpacity
+          testID="admin-suspend-btn"
+          onPress={() => setShowSuspend(true)}
+          style={styles.adminSuspendBtn}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="ban" size={16} color={colors.red} />
+          <Text style={styles.adminSuspendText}>Suspend This Account</Text>
+        </TouchableOpacity>
+      )}
+
+      <SuspendUserModal
+        visible={showSuspend}
+        targetUserId={userId}
+        targetName={userName}
+        onClose={() => setShowSuspend(false)}
+        onSuspended={refresh}
+      />
     </View>
   );
 }
@@ -1290,4 +1420,52 @@ const styles = StyleSheet.create({
     height: '100%',
     borderRadius: 3,
   },
+
+  // Admin / Creator moderation toolkit (gold accent)
+  adminBlock: {
+    marginTop: spacing.lg,
+    padding: spacing.md,
+    backgroundColor: 'rgba(255, 215, 0, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 215, 0, 0.45)',
+    borderRadius: radii.lg,
+    gap: 10,
+  },
+  adminHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  adminTitle: { color: '#FFD700', fontWeight: '900', fontSize: 11, letterSpacing: 1.2 },
+  adminSuspendBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    backgroundColor: colors.red + '22',
+    borderWidth: 1,
+    borderColor: colors.red,
+  },
+  adminSuspendText: { color: colors.red, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  suspendActiveCard: {
+    padding: 12,
+    backgroundColor: colors.red + '12',
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.red + '88',
+    gap: 8,
+  },
+  suspendActiveRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  suspendActiveText: { color: colors.red, fontWeight: '900', fontSize: 13 },
+  suspendReasonText: { color: colors.textSecondary, fontSize: 12, fontStyle: 'italic' },
+  adminLiftBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    borderRadius: radii.pill,
+    backgroundColor: 'rgba(255, 215, 0, 0.15)',
+    borderWidth: 1,
+    borderColor: '#FFD700',
+  },
+  adminLiftText: { color: '#FFD700', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
 });

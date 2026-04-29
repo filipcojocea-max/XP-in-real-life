@@ -112,6 +112,21 @@ backend:
     stuck_count: 0
     priority: "high"
     needs_retesting: false
+  - task: "Admin Account Suspension (POST /admin/suspend, /admin/unsuspend, GET /admin/suspension/{id})"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "New endpoints + auth-gate integration. (1) `_check_not_suspended(user_id)` is called inside `get_user_or_legacy` so EVERY authenticated request a suspended user makes returns HTTP 403 with detail={error:'account_suspended', message, until, forever, remaining_seconds, suspended_at, suspended_by, reason}. Admin/Creator emails (filip.cojocea122@gmail.com etc.) are exempt — admins can never be suspended. Anonymous + 'main' legacy IDs are no-ops. (2) `/auth/login` calls the same gate AFTER password verification so suspended users can't login. (3) POST /admin/suspend body={user_id, duration_hours?, forever?, reason?}. Creator-only (403 otherwise). 400 on self-suspend, 400 on attempting to suspend another admin, 400 on missing duration when forever=false, 400 on duration > 5 years, 404 on unknown user. Stores `suspended_until` (ISO timestamp or string 'forever'), `suspended_at`, `suspended_by_admin`, `suspension_reason` (≤280 chars). (4) POST /admin/unsuspend body={user_id} → unsets the four suspension fields; returns {ok, user_id, modified}. (5) GET /admin/suspension/{target_id} → admin-only — returns {user_id, suspended:bool, until?, forever?, remaining_seconds?, suspended_at?, suspended_by?, reason?}."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 54/54 assertions in /app/admin_suspension_test.py (run 2026-04-29 against https://xp-confidence.preview.emergentagent.com/api). (1) Admin login filip.cojocea122@gmail.com / XL98CZW5599 → 200 with token; user object exposes `id` (not `user_id`) — adapted accordingly. (2) Registered fresh user 'Sasha Morgan' @ gmail.com — JWT returned immediately + verified=true. (3) GET /admin/suspension/{U} as U → 403 'Creator-only action.'; as admin → 200 with {user_id, suspended:false}. (4) POST /admin/suspend {user_id:U, duration_hours:0.001, reason:'automated test'} as admin → 200 with body.suspended_until parseable ISO, body.forever=false, body.duration_hours=0.001. (5) Immediately as U: GET /profile → 403 with detail dict containing exactly: error='account_suspended', message non-empty ('This account has been suspended.'), until parseable ISO, forever=False, remaining_seconds=int in 0..5 (observed 3), reason='automated test'. (6) POST /auth/login {U.email, U.password} → 403 with detail dict, detail.error='account_suspended' (same shape, gate fires after password verification at server.py L974). (7) Slept 6s, GET /profile as U → 200 (auto-expired with no manual unsuspend). (8) POST /admin/suspend {user_id:U, forever:true, reason:'ban hammer'} as admin → 200 with body.forever=true and body.suspended_until=null. (9) GET /profile as U → 403 with detail.forever=True and detail.remaining_seconds=None (null). (10) POST /admin/unsuspend {user_id:U} as admin → 200 with body.modified=1; subsequent GET /profile as U → 200. (11) Negative cases all correct: non-admin /admin/suspend → 403 with 'Creator-only action.' (contains 'Creator'); self-suspend → 400; nonexistent uuid → 404; duration_hours=0 → 400; duration_hours=50000 (>5y) → 400; missing duration & forever=false → 400. (12) Regression — non-suspended U: /profile, /tasks, /goals, /levels, /friends/list all 200. (13) Suspend→unsuspend round-trip: GET /admin/suspension/{U} → 200 with suspended=false. The structured detail dict shape, ISO timestamp formatting, remaining_seconds countdown math, admin-only gating, login-boundary block, and auto-expiry are all working correctly. NOTE: the user object returned by /auth/login and /auth/register uses key `id` (not `user_id`) — anyone calling these endpoints should read either field; the suspension endpoints themselves correctly accept the same UUID under {user_id}. No bugs found."
+
     status_history:
         - working: "NA"
           agent: "main"
@@ -370,11 +385,14 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Friend Profile DETAILS endpoint (/api/friends/profile/{other_id}/details) — friend-gated mini-apps + tasks + goals"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+    - agent: "testing"
+      message: "Admin Account Suspension PASS — 54/54 assertions in /app/admin_suspension_test.py against https://xp-confidence.preview.emergentagent.com/api. Admin login (filip.cojocea122@gmail.com / XL98CZW5599) works (note: /auth/login returns user.id, not user.user_id — adapted in test). Fresh user U registered (Sasha Morgan @gmail.com, JWT immediate). All 12 plan steps green: GET /admin/suspension permissions (U→403, admin→200 suspended=false); POST /admin/suspend with duration_hours=0.001 → 200 with parseable ISO suspended_until + forever=false + duration echoed; immediately U/profile→403 with detail dict containing exact required keys (error='account_suspended', message non-empty, until ISO, forever=False, remaining_seconds int 0..5, reason='automated test'); /auth/login when suspended→403 same shape; auto-expiry after sleep 6s → /profile 200; forever suspension → 200 with body.forever=true and suspended_until=null, then /profile→403 with detail.forever=true and remaining_seconds=None; /admin/unsuspend → 200 modified=1, /profile→200; all negative cases correct (non-admin→403 'Creator-only', self→400, nonexistent→404, duration=0→400, duration=50000→400, no-duration-no-forever→400); regression on non-suspended U: /profile, /tasks, /goals, /levels, /friends/list all 200; final round-trip suspended=false. No bugs found — task can be marked working:true."
 
 agent_communication:
     - agent: "testing"

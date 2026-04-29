@@ -71,6 +71,73 @@ async def _is_admin_user(user_id: str) -> bool:
     return _is_admin_email((u or {}).get("email"))
 
 
+# ═══════════════ Account Suspension (Admin power) ═══════════════
+def _suspension_state(prof: Optional[dict]) -> Optional[dict]:
+    """Return {until, forever, remaining_seconds, suspended_at, suspended_by_admin,
+    reason} if a profile is currently suspended, else None.
+
+    "Forever" suspensions persist until the admin manually un-suspends — the
+    `suspended_until` field is the literal string 'forever'. Timed
+    suspensions store an ISO-8601 UTC timestamp; once `now > until` the
+    suspension is treated as expired and the function returns None.
+    """
+    if not prof:
+        return None
+    until = prof.get("suspended_until")
+    if not until:
+        return None
+    if until == "forever":
+        return {
+            "until": None,
+            "forever": True,
+            "remaining_seconds": None,
+            "suspended_at": prof.get("suspended_at"),
+            "suspended_by": prof.get("suspended_by_admin"),
+            "reason": prof.get("suspension_reason") or "",
+        }
+    try:
+        until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+        if until_dt.tzinfo is None:
+            until_dt = until_dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+    now = datetime.now(timezone.utc)
+    if now >= until_dt:
+        return None
+    return {
+        "until": until_dt.isoformat(),
+        "forever": False,
+        "remaining_seconds": int((until_dt - now).total_seconds()),
+        "suspended_at": prof.get("suspended_at"),
+        "suspended_by": prof.get("suspended_by_admin"),
+        "reason": prof.get("suspension_reason") or "",
+    }
+
+
+async def _check_not_suspended(user_id: str) -> None:
+    """Raise 403 with structured detail if the given user is currently suspended.
+    Admin/Creator accounts are exempt — they cannot be suspended out of the system.
+    Anonymous + 'main' legacy IDs are also exempt (no profile to suspend).
+    """
+    if not user_id or user_id == "main" or user_id.startswith("anon-"):
+        return
+    if await _is_admin_user(user_id):
+        return  # admins can never be suspended
+    prof = await db.profile.find_one({"_id": user_id}, {
+        "suspended_until": 1,
+        "suspended_at": 1,
+        "suspended_by_admin": 1,
+        "suspension_reason": 1,
+    })
+    state = _suspension_state(prof)
+    if state:
+        raise HTTPException(status_code=403, detail={
+            "error": "account_suspended",
+            "message": "This account has been suspended.",
+            **state,
+        })
+
+
 def verify_password(plain: str, hashed: str) -> bool:
     try:
         return pwd_ctx.verify(plain, hashed)
@@ -256,6 +323,9 @@ async def get_user_or_legacy(
         user_id = f"anon-{clean}"
     if not user_id:
         user_id = "main"
+    # Block suspended accounts on EVERY authed call. Admin-as-target is
+    # exempt inside _check_not_suspended; legacy/anon IDs are no-ops.
+    await _check_not_suspended(user_id)
     await _touch_last_seen(user_id)
     return user_id
 
@@ -898,6 +968,10 @@ async def auth_login(body: LoginPayload):
     user = await db.users.find_one({"email": email_norm})
     if not user or not verify_password(body.password, user.get("password_hash", "")):
         raise HTTPException(401, "Wrong email or password.")
+    # Block suspended accounts at the login boundary so they get the
+    # explicit reason instead of generic 401. Admin accounts are exempt
+    # (no profile.suspended_until is ever set on them).
+    await _check_not_suspended(user["_id"])
     # Email verification is no longer required — accounts are usable
     # immediately after registration. Log the user in unconditionally.
     if not user.get("verified"):
@@ -4659,6 +4733,104 @@ async def _backfill_onboarding_tz_done_flag():
             )
     except Exception as e:
         logger.warning(f"[migrate] backfill onboarding_tz_done failed: {e}")
+
+
+# ═══════════════ Admin Suspension Endpoints ═══════════════
+class AdminSuspendBody(BaseModel):
+    user_id: str
+    duration_hours: Optional[float] = None  # 12, 24, 48, 168, or custom; None+forever=true → indefinite
+    forever: Optional[bool] = False
+    reason: Optional[str] = ""
+
+
+@api_router.post("/admin/suspend")
+async def admin_suspend(body: AdminSuspendBody, user_id: str = Depends(get_user_or_legacy)):
+    """Admin/Creator suspends another user's account.
+
+    The suspended user's next API call (or login attempt) returns 403 with
+    detail.error='account_suspended' and a `remaining_seconds`/`forever`
+    flag, plus `until` ISO timestamp. Frontends listen for this and
+    force-logout + display the reason.
+
+    Suspending an admin is a no-op (admins are never suspended); attempting
+    to suspend yourself returns 400.
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    if body.user_id == user_id:
+        raise HTTPException(400, "You cannot suspend your own account.")
+    target = await db.users.find_one({"_id": body.user_id}, {"email": 1})
+    if not target:
+        raise HTTPException(404, "Target account not found.")
+    if _is_admin_email(target.get("email")):
+        raise HTTPException(400, "You can't suspend another Creator/Admin.")
+
+    now = datetime.now(timezone.utc)
+    if body.forever:
+        until_value = "forever"
+        until_iso = None
+    else:
+        if not body.duration_hours or body.duration_hours <= 0:
+            raise HTTPException(400, "Provide duration_hours > 0 or forever=true.")
+        if body.duration_hours > 24 * 365 * 5:  # cap at 5 years for safety
+            raise HTTPException(400, "Duration too long.")
+        until_dt = now + timedelta(hours=float(body.duration_hours))
+        until_value = until_dt.isoformat()
+        until_iso = until_value
+
+    await db.profile.update_one(
+        {"_id": body.user_id},
+        {"$set": {
+            "suspended_until": until_value,
+            "suspended_at": now.isoformat(),
+            "suspended_by_admin": user_id,
+            "suspension_reason": (body.reason or "").strip()[:280],
+        }},
+        upsert=True,
+    )
+    return {
+        "ok": True,
+        "user_id": body.user_id,
+        "suspended_until": until_iso,
+        "forever": bool(body.forever),
+        "duration_hours": body.duration_hours if not body.forever else None,
+        "reason": (body.reason or "").strip()[:280],
+    }
+
+
+class AdminUnsuspendBody(BaseModel):
+    user_id: str
+
+
+@api_router.post("/admin/unsuspend")
+async def admin_unsuspend(body: AdminUnsuspendBody, user_id: str = Depends(get_user_or_legacy)):
+    """Admin/Creator lifts a previously-applied suspension."""
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    res = await db.profile.update_one(
+        {"_id": body.user_id},
+        {"$unset": {
+            "suspended_until": "",
+            "suspended_at": "",
+            "suspended_by_admin": "",
+            "suspension_reason": "",
+        }},
+    )
+    return {"ok": True, "user_id": body.user_id, "modified": res.modified_count}
+
+
+@api_router.get("/admin/suspension/{target_id}")
+async def admin_suspension_status(target_id: str, user_id: str = Depends(get_user_or_legacy)):
+    """Admin reads current suspension status for a user (for the modal toggle)."""
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    prof = await db.profile.find_one({"_id": target_id})
+    state = _suspension_state(prof)
+    return {
+        "user_id": target_id,
+        "suspended": bool(state),
+        **(state or {}),
+    }
 
 
 # ═══════════════ Mini-app Catalog (Admin-only) ═══════════════

@@ -51,6 +51,16 @@ type AuthState = {
   signIn: (token: string, user: AuthUser) => Promise<void>;
   signOut: () => Promise<void>;
   continueAnonymously: () => Promise<void>;
+  // Set by the API client when a 403 account_suspended response arrives.
+  // The root layout listens for this and renders the golden alert.
+  suspension: {
+    message?: string;
+    forever?: boolean;
+    remaining_seconds?: number | null;
+    until?: string | null;
+    reason?: string;
+  } | null;
+  clearSuspension: () => void;
 };
 
 const AuthContext = createContext<AuthState>({
@@ -62,6 +72,8 @@ const AuthContext = createContext<AuthState>({
   signIn: async () => {},
   signOut: async () => {},
   continueAnonymously: async () => {},
+  suspension: null,
+  clearSuspension: () => {},
 });
 
 // Module-level cache so api.ts can read the token / anon-id synchronously
@@ -79,6 +91,25 @@ export function setOnUnauthorized(fn: () => void) {
 }
 export function fireUnauthorized() {
   onUnauthorizedCb();
+}
+
+// ── Account-suspension propagation ─────────────────────────────
+// Fired by the API client whenever the backend returns 403
+// detail.error === 'account_suspended'. The root layout subscribes,
+// force-logs-out the user and shows a golden alert with the time-remaining.
+type SuspensionPayload = {
+  message?: string;
+  forever?: boolean;
+  remaining_seconds?: number | null;
+  until?: string | null;
+  reason?: string;
+};
+let onSuspendedCb: (p: SuspensionPayload) => void = () => {};
+export function setOnAccountSuspended(fn: (p: SuspensionPayload) => void) {
+  onSuspendedCb = fn;
+}
+export function fireAccountSuspended(p: SuspensionPayload) {
+  onSuspendedCb(p);
 }
 
 function _genAnonId(): string {
@@ -159,10 +190,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  // Account-suspension: when ANY API call returns 403 account_suspended
+  // we wipe the JWT (logging the user out) and stash the payload so the
+  // root layout can render a golden modal explaining the suspension and
+  // its remaining time. The token is removed BEFORE setOnSuspended() the
+  // payload to setSuspension because the AuthGate will then send the
+  // user to /auth where the alert is mounted and visible.
+  const [suspension, setSuspension] = useState<any | null>(null);
+  useEffect(() => {
+    setOnAccountSuspended((payload) => {
+      currentToken = null;
+      storage.del(TOKEN_KEY).catch(() => {});
+      storage.del(USER_KEY).catch(() => {});
+      setToken(null);
+      setUser(null);
+      setSuspension(payload || { message: 'This account has been suspended.' });
+    });
+  }, []);
+  const clearSuspension = useCallback(() => setSuspension(null), []);
+
   const isAnonymous = !token && !!anonymousId;
 
   return (
-    <AuthContext.Provider value={{ loading, token, user, anonymousId, isAnonymous, signIn, signOut, continueAnonymously }}>
+    <AuthContext.Provider value={{ loading, token, user, anonymousId, isAnonymous, signIn, signOut, continueAnonymously, suspension, clearSuspension }}>
       {children}
     </AuthContext.Provider>
   );
