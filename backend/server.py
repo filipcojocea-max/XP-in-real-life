@@ -2763,6 +2763,139 @@ async def player_profile(other_id: str, user_id: str = Depends(get_user_or_legac
     return _serialize_player(prof, status)
 
 
+@api_router.get("/friends/profile/{other_id}/details")
+async def player_profile_details(other_id: str, user_id: str = Depends(get_user_or_legacy)):
+    """Detailed profile for a confirmed friend (or self): mini-apps usage,
+    tasks/quests with descriptions and goals.
+
+    Strict access control — anything other than `self` or `friends` returns
+    403 so non-friends NEVER see another user's quest list. This is the
+    contract that powers the in-app friend Profile detail modal.
+    """
+    prof = await db.profile.find_one({"_id": other_id})
+    if not prof:
+        raise HTTPException(404, "Player not found")
+    is_self = (other_id == user_id)
+    if not is_self:
+        rel = await _find_relationship(user_id, other_id)
+        status = _relationship_status(rel, user_id)
+        if status != "friends":
+            raise HTTPException(403, "Add this player as a friend to view their full profile.")
+
+    # Tasks & goals
+    raw_tasks = await db.tasks.find({"user_id": other_id}, {"_id": 0}).to_list(1000)
+    raw_goals = await db.goals.find({"user_id": other_id}, {"_id": 0}).to_list(1000)
+    raw_goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
+    tasks_out = [
+        {
+            "id": t.get("id"),
+            "title": t.get("title", ""),
+            "description": t.get("description", "") or "",
+            "focus_area": t.get("focus_area", "personal"),
+            "time_slot": t.get("time_slot", "morning"),
+            "xp_value": int(t.get("xp_value", 10) or 0),
+            "is_default": bool(t.get("is_default", False)),
+            "recurring": bool(t.get("recurring", True)),
+        }
+        for t in raw_tasks
+    ]
+    # group: defaults first by time_slot, then customs
+    slot_order = {"morning": 0, "afternoon": 1, "evening": 2}
+    tasks_out.sort(key=lambda t: (
+        0 if t["is_default"] else 1,
+        slot_order.get(t["time_slot"], 3),
+        t["title"].lower(),
+    ))
+    goals_out = [
+        {
+            "id": g.get("id"),
+            "title": g.get("title", ""),
+            "description": g.get("description", "") or "",
+            "focus_area": g.get("focus_area", "personal"),
+            "target_value": int(g.get("target_value", 0) or 0),
+            "current_value": int(g.get("current_value", 0) or 0),
+            "unit": (g.get("unit") or "days"),
+            "xp_reward": int(g.get("xp_reward", 0) or 0),
+            "completed": bool(g.get("completed", False)),
+        }
+        for g in raw_goals
+    ]
+
+    # Mini-app surface — every user has the same 3 mini-apps; we compute
+    # per-user usage stats so friends see what their friend has actually
+    # been engaging with.
+    sleep_prof = await db.sleep_profile.find_one({"user_id": other_id}, {"_id": 0}) or {}
+    sleep_onboarded = bool(sleep_prof.get("onboarded") or sleep_prof.get("answers"))
+    try:
+        sleep_checkin_count = await db.sleep_checkins.count_documents({"user_id": other_id})
+    except Exception:
+        sleep_checkin_count = 0
+    try:
+        challenges_completed = await db.challenge_completions.count_documents({"user_id": other_id})
+    except Exception:
+        challenges_completed = 0
+    try:
+        spot_completed = await db.spot_entries.count_documents({"user_id": other_id, "success": True})
+    except Exception:
+        spot_completed = 0
+
+    mini_apps = [
+        {
+            "id": "sleep",
+            "title": "Improve Sleeping",
+            "icon": "moon",
+            "color": "cyan",
+            "description": "AI sleep coach + nightly check-ins.",
+            "stat_label": (
+                "Onboarded · " + (f"{sleep_checkin_count} check-ins logged" if sleep_checkin_count else "no check-ins yet")
+                if sleep_onboarded else "Not onboarded yet"
+            ),
+            "active": sleep_onboarded,
+        },
+        {
+            "id": "challenges",
+            "title": "Challenge Tasks",
+            "icon": "flash",
+            "color": "green",
+            "description": "Daily mini-challenges that build confidence.",
+            "stat_label": (
+                f"{challenges_completed} challenge{'s' if challenges_completed != 1 else ''} completed"
+                if challenges_completed else "No challenges completed yet"
+            ),
+            "active": challenges_completed > 0,
+        },
+        {
+            "id": "spot",
+            "title": "Spot the Object",
+            "icon": "camera",
+            "color": "amber",
+            "description": "Mindful camera challenges with your friends.",
+            "stat_label": (
+                f"{int(prof.get('spot_points', 0) or 0)} Spot Points · {spot_completed} captures"
+                if (spot_completed or int(prof.get('spot_points', 0) or 0))
+                else "No captures yet"
+            ),
+            "active": spot_completed > 0 or int(prof.get("spot_points", 0) or 0) > 0,
+        },
+    ]
+
+    return {
+        "user_id": other_id,
+        "is_self": is_self,
+        "mini_apps": mini_apps,
+        "tasks": tasks_out,
+        "goals": goals_out,
+        "counts": {
+            "tasks_total": len(tasks_out),
+            "tasks_default": sum(1 for t in tasks_out if t["is_default"]),
+            "tasks_custom": sum(1 for t in tasks_out if not t["is_default"]),
+            "goals_total": len(goals_out),
+            "goals_active": sum(1 for g in goals_out if not g["completed"]),
+            "goals_completed": sum(1 for g in goals_out if g["completed"]),
+        },
+    }
+
+
 @api_router.post("/friends/request")
 async def friends_request(body: FriendActionPayload, user_id: str = Depends(get_user_or_legacy)):
     target = body.user_id

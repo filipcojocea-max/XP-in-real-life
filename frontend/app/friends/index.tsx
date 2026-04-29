@@ -15,7 +15,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { api, Player, FriendStatus, FriendRequestEntry } from '../../src/api';
+import { api, Player, FriendStatus, FriendRequestEntry, FriendProfileDetails, FriendMiniApp, FriendTaskSummary, FriendGoalSummary } from '../../src/api';
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 import LeaderboardTab from '../../src/components/LeaderboardTab';
@@ -650,6 +650,13 @@ function PlayerProfileModal({
             </View>
           ) : null}
 
+          {/* Friend-only deep-detail panels: mini-apps, tasks, goals.
+              Backend gates this with a 403 if the viewer isn't a friend (or
+              self) so this UI is the strictly correct surface to render. */}
+          {(player.friend_status === 'friends' || player.friend_status === 'self') ? (
+            <FriendDetailsSection userId={player.user_id} />
+          ) : null}
+
           {/* Action area */}
           <View style={{ marginTop: spacing.lg }}>
             {player.friend_status === 'self' ? null
@@ -726,6 +733,246 @@ function ModalStat({ icon, color, value, label }: { icon: string; color: string;
       <Ionicons name={icon as any} size={18} color={color} />
       <Text style={styles.modalStatValue}>{value}</Text>
       <Text style={styles.modalStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
+/**
+ * FriendDetailsSection — collapsible deep-detail panels for the friend
+ * profile modal: Mini-Apps · Quests · Goals.
+ *
+ * Backend gates this behind a friend/self check (403 otherwise) so we can
+ * trust whatever comes back. We render three discoverable accordions that
+ * the viewer can independently expand to keep the modal scannable.
+ */
+function FriendDetailsSection({ userId }: { userId: string }) {
+  const [data, setData] = useState<FriendProfileDetails | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [openSection, setOpenSection] = useState<'apps' | 'tasks' | 'goals' | null>('apps');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setData(null);
+    api.playerProfileDetails(userId)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch((e: any) => { if (!cancelled) setError(String(e?.message || e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [userId]);
+
+  if (loading) {
+    return (
+      <View style={[styles.detailsLoading]}>
+        <ActivityIndicator color={colors.cyan} />
+        <Text style={styles.detailsLoadingText}>Loading details…</Text>
+      </View>
+    );
+  }
+  if (error || !data) {
+    return (
+      <View style={styles.detailsError}>
+        <Ionicons name="lock-closed" size={16} color={colors.textMuted} />
+        <Text style={styles.detailsErrorText}>{error || 'Could not load details'}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ marginTop: spacing.lg }}>
+      {/* Mini-Apps */}
+      <DetailAccordion
+        icon="apps"
+        iconColor={colors.cyan}
+        title="Mini-Apps"
+        subtitle={`${data.mini_apps.filter((m) => m.active).length}/${data.mini_apps.length} active`}
+        open={openSection === 'apps'}
+        onToggle={() => setOpenSection(openSection === 'apps' ? null : 'apps')}
+        testID="friend-details-apps"
+      >
+        <View style={{ gap: 8 }}>
+          {data.mini_apps.map((app) => (
+            <MiniAppRow key={app.id} app={app} />
+          ))}
+        </View>
+      </DetailAccordion>
+
+      {/* Tasks / Quests */}
+      <DetailAccordion
+        icon="checkmark-done"
+        iconColor={colors.green}
+        title="Quests"
+        subtitle={
+          data.counts.tasks_total === 0
+            ? 'No quests yet'
+            : `${data.counts.tasks_total} total · ${data.counts.tasks_default} default · ${data.counts.tasks_custom} custom`
+        }
+        open={openSection === 'tasks'}
+        onToggle={() => setOpenSection(openSection === 'tasks' ? null : 'tasks')}
+        testID="friend-details-tasks"
+      >
+        {data.tasks.length === 0 ? (
+          <Text style={styles.detailsEmpty}>No quests created yet.</Text>
+        ) : (
+          <View style={{ gap: 8 }}>
+            {data.tasks.map((t) => (
+              <TaskRow key={t.id} task={t} />
+            ))}
+          </View>
+        )}
+      </DetailAccordion>
+
+      {/* Goals */}
+      <DetailAccordion
+        icon="flag"
+        iconColor={colors.amber}
+        title="Goals"
+        subtitle={
+          data.counts.goals_total === 0
+            ? 'No goals yet'
+            : `${data.counts.goals_active} active · ${data.counts.goals_completed} completed`
+        }
+        open={openSection === 'goals'}
+        onToggle={() => setOpenSection(openSection === 'goals' ? null : 'goals')}
+        testID="friend-details-goals"
+      >
+        {data.goals.length === 0 ? (
+          <Text style={styles.detailsEmpty}>No goals set yet.</Text>
+        ) : (
+          <View style={{ gap: 8 }}>
+            {data.goals.map((g) => (
+              <GoalRow key={g.id} goal={g} />
+            ))}
+          </View>
+        )}
+      </DetailAccordion>
+    </View>
+  );
+}
+
+function DetailAccordion({
+  icon, iconColor, title, subtitle, open, onToggle, children, testID,
+}: {
+  icon: string;
+  iconColor: string;
+  title: string;
+  subtitle: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+  testID?: string;
+}) {
+  return (
+    <View style={[styles.detailCard, open && { borderColor: iconColor + '99' }]}>
+      <TouchableOpacity
+        testID={testID}
+        onPress={onToggle}
+        activeOpacity={0.85}
+        style={styles.detailHeader}
+      >
+        <View style={[styles.detailIcon, { backgroundColor: iconColor + '22', borderColor: iconColor + '66' }]}>
+          <Ionicons name={icon as any} size={16} color={iconColor} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.detailTitle}>{title}</Text>
+          <Text style={styles.detailSubtitle}>{subtitle}</Text>
+        </View>
+        <Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={18} color={colors.textMuted} />
+      </TouchableOpacity>
+      {open ? <View style={styles.detailBody}>{children}</View> : null}
+    </View>
+  );
+}
+
+function MiniAppRow({ app }: { app: FriendMiniApp }) {
+  const tone = app.color === 'green' ? colors.green
+    : app.color === 'amber' ? colors.amber
+    : app.color === 'red' ? colors.red
+    : colors.cyan;
+  return (
+    <View style={[styles.miniAppRow, { borderColor: app.active ? tone + '88' : colors.border }]}>
+      <View style={[styles.detailIcon, { backgroundColor: tone + '22', borderColor: tone + '66' }]}>
+        <Ionicons name={app.icon as any} size={16} color={tone} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <View style={styles.miniAppTitleRow}>
+          <Text style={styles.miniAppTitle}>{app.title}</Text>
+          {app.active ? (
+            <View style={[styles.miniAppPill, { backgroundColor: tone + '22', borderColor: tone + '88' }]}>
+              <Text style={[styles.miniAppPillText, { color: tone }]}>ACTIVE</Text>
+            </View>
+          ) : (
+            <View style={[styles.miniAppPill, { borderColor: colors.border }]}>
+              <Text style={[styles.miniAppPillText, { color: colors.textMuted }]}>NOT YET</Text>
+            </View>
+          )}
+        </View>
+        <Text style={styles.miniAppDesc}>{app.description}</Text>
+        <Text style={[styles.miniAppStat, { color: tone }]}>{app.stat_label}</Text>
+      </View>
+    </View>
+  );
+}
+
+function TaskRow({ task }: { task: FriendTaskSummary }) {
+  const slotColor = task.time_slot === 'morning' ? colors.amber
+    : task.time_slot === 'afternoon' ? colors.cyan
+    : colors.red;
+  return (
+    <View style={styles.taskRow}>
+      <View style={styles.taskHeader}>
+        <View style={[styles.taskSlotPill, { backgroundColor: slotColor + '22', borderColor: slotColor + '66' }]}>
+          <Text style={[styles.taskSlotText, { color: slotColor }]}>{(task.time_slot || 'morning').toUpperCase()}</Text>
+        </View>
+        <Text style={styles.taskTitle} numberOfLines={2}>{task.title}</Text>
+        <View style={styles.taskXpPill}>
+          <Ionicons name="flash" size={10} color={colors.amber} />
+          <Text style={styles.taskXpText}>{task.xp_value}</Text>
+        </View>
+      </View>
+      {task.description ? (
+        <Text style={styles.taskDesc}>{task.description}</Text>
+      ) : null}
+      <View style={styles.taskMetaRow}>
+        <Text style={styles.taskMeta}>{task.is_default ? 'Default quest' : 'Custom quest'}</Text>
+        <Text style={[styles.taskMeta, { textTransform: 'capitalize' }]}>· {task.focus_area}</Text>
+      </View>
+    </View>
+  );
+}
+
+function GoalRow({ goal }: { goal: FriendGoalSummary }) {
+  const pct = goal.target_value > 0 ? Math.min(100, Math.round((goal.current_value / goal.target_value) * 100)) : 0;
+  return (
+    <View style={styles.goalRow}>
+      <View style={styles.taskHeader}>
+        <Text style={styles.taskTitle} numberOfLines={2}>{goal.title}</Text>
+        {goal.completed ? (
+          <View style={[styles.miniAppPill, { backgroundColor: colors.green + '22', borderColor: colors.green + '88' }]}>
+            <Text style={[styles.miniAppPillText, { color: colors.green }]}>DONE</Text>
+          </View>
+        ) : (
+          <View style={styles.taskXpPill}>
+            <Ionicons name="flash" size={10} color={colors.amber} />
+            <Text style={styles.taskXpText}>+{goal.xp_reward}</Text>
+          </View>
+        )}
+      </View>
+      {goal.description ? (
+        <Text style={styles.taskDesc}>{goal.description}</Text>
+      ) : null}
+      <View style={styles.goalProgressBar}>
+        <View style={[styles.goalProgressFill, {
+          width: `${pct}%`,
+          backgroundColor: goal.completed ? colors.green : colors.cyan,
+        }]} />
+      </View>
+      <View style={styles.taskMetaRow}>
+        <Text style={styles.taskMeta}>{goal.current_value}/{goal.target_value} {goal.unit}</Text>
+        <Text style={[styles.taskMeta, { textTransform: 'capitalize' }]}>· {goal.focus_area}</Text>
+      </View>
     </View>
   );
 }
@@ -936,4 +1183,111 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   modalCtaText: { fontWeight: '900', fontSize: 15, letterSpacing: 0.4 },
+
+  // Friend-detail accordion + sub-rows
+  detailsLoading: { marginTop: spacing.lg, alignItems: 'center', gap: 8 },
+  detailsLoadingText: { color: colors.textMuted, fontSize: 12 },
+  detailsError: { marginTop: spacing.lg, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  detailsErrorText: { color: colors.textMuted, fontSize: 12 },
+  detailsEmpty: { color: colors.textMuted, fontSize: 13, fontStyle: 'italic', paddingVertical: 8 },
+  detailCard: {
+    backgroundColor: colors.surfaceGlass,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.lg,
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 12,
+    paddingHorizontal: spacing.md,
+  },
+  detailIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  detailTitle: { color: colors.text, fontWeight: '900', fontSize: 14, letterSpacing: 0.3 },
+  detailSubtitle: { color: colors.textMuted, fontSize: 11, marginTop: 1 },
+  detailBody: {
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.md,
+    paddingTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  miniAppRow: {
+    flexDirection: 'row',
+    gap: 10,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: 10,
+  },
+  miniAppTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  miniAppTitle: { color: colors.text, fontWeight: '900', fontSize: 13, flex: 1 },
+  miniAppPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+  },
+  miniAppPillText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
+  miniAppDesc: { color: colors.textMuted, fontSize: 11, marginTop: 3, lineHeight: 15 },
+  miniAppStat: { fontSize: 11, fontWeight: '700', marginTop: 4 },
+  taskRow: {
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    padding: 10,
+  },
+  taskHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  taskSlotPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+  },
+  taskSlotText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
+  taskTitle: { color: colors.text, fontWeight: '800', fontSize: 13, flex: 1 },
+  taskXpPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+    backgroundColor: colors.amber + '22',
+    borderWidth: 1,
+    borderColor: colors.amber + '66',
+  },
+  taskXpText: { color: colors.amber, fontSize: 11, fontWeight: '900' },
+  taskDesc: { color: colors.textMuted, fontSize: 12, marginTop: 4, lineHeight: 16 },
+  taskMetaRow: { flexDirection: 'row', gap: 4, marginTop: 4 },
+  taskMeta: { color: colors.textMuted, fontSize: 10, fontWeight: '600' },
+  goalRow: {
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    padding: 10,
+  },
+  goalProgressBar: {
+    height: 6,
+    backgroundColor: colors.border,
+    borderRadius: 3,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  goalProgressFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
 });

@@ -315,6 +315,8 @@ export const api = {
     req<{ players: Player[] }>(`/friends/players?q=${encodeURIComponent(q)}`),
   playerProfile: (userId: string) =>
     req<Player>(`/friends/profile/${userId}`),
+  playerProfileDetails: (userId: string) =>
+    req<FriendProfileDetails>(`/friends/profile/${userId}/details`),
   sendFriendRequest: (userId: string) =>
     req<{ status: FriendStatus; message: string }>('/friends/request', {
       method: 'POST',
@@ -742,6 +744,56 @@ export type FriendRequestEntry = {
   request_id: string;
   created_at: string;
   player: Player;
+};
+
+// ── Friend Profile Detail (only accessible if friend or self) ─────────────
+export type FriendMiniApp = {
+  id: string;
+  title: string;
+  icon: string;
+  color: 'cyan' | 'green' | 'amber' | 'red' | string;
+  description: string;
+  stat_label: string;
+  active: boolean;
+};
+
+export type FriendTaskSummary = {
+  id: string;
+  title: string;
+  description: string;
+  focus_area: string;
+  time_slot: 'morning' | 'afternoon' | 'evening' | string;
+  xp_value: number;
+  is_default: boolean;
+  recurring: boolean;
+};
+
+export type FriendGoalSummary = {
+  id: string;
+  title: string;
+  description: string;
+  focus_area: string;
+  target_value: number;
+  current_value: number;
+  unit: string;
+  xp_reward: number;
+  completed: boolean;
+};
+
+export type FriendProfileDetails = {
+  user_id: string;
+  is_self: boolean;
+  mini_apps: FriendMiniApp[];
+  tasks: FriendTaskSummary[];
+  goals: FriendGoalSummary[];
+  counts: {
+    tasks_total: number;
+    tasks_default: number;
+    tasks_custom: number;
+    goals_total: number;
+    goals_active: number;
+    goals_completed: number;
+  };
 };
 
 // ───────────────────────── Leaderboard ─────────────────────────
