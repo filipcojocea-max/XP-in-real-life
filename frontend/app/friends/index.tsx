@@ -182,6 +182,7 @@ export default function FriendsScreen() {
           setSubTab={setSubTab}
           requests={requests}
           friends={friends}
+          unreadByFriend={unreadByFriend}
           loading={loadingFriends}
           refreshing={refreshing}
           onRefresh={onRefresh}
@@ -284,13 +285,14 @@ function PlayersTab({
 }
 
 function FriendsTab({
-  subTab, setSubTab, requests, friends, loading, refreshing, onRefresh,
+  subTab, setSubTab, requests, friends, unreadByFriend, loading, refreshing, onRefresh,
   onAccept, onDecline, onPress, savingId,
 }: {
   subTab: FriendsSubTab;
   setSubTab: (t: FriendsSubTab) => void;
   requests: { incoming: FriendRequestEntry[]; outgoing: FriendRequestEntry[] };
   friends: Player[];
+  unreadByFriend: Record<string, number>;
   loading: boolean;
   refreshing: boolean;
   onRefresh: () => void;
