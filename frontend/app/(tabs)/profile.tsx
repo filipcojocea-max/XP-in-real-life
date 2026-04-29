@@ -124,8 +124,13 @@ export default function ProfileScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <Text style={styles.kicker}>{profile.is_admin ? 'CREATOR · PREMIUM+' : 'Character'}</Text>
-        <Text style={styles.title}>Profile</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.kicker}>{profile.is_admin ? 'CREATOR · PREMIUM+' : 'Character'}</Text>
+            <Text style={styles.title}>Profile</Text>
+          </View>
+          {profile.is_admin && <AdminNotificationBell />}
+        </View>
 
         <View style={styles.avatarWrap}>
           <Ring size={150} stroke={8} progress={profile.xp_progress} color={profile.is_admin ? '#FFD700' : colors.amber}>
@@ -547,3 +552,74 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
   },
 });
+
+
+/**
+ * AdminNotificationBell — top-right bell icon shown ONLY on the Creator
+ * account. Polls /api/admin/reports every 8s while focused; when there
+ * are unviewed reports we render a red badge with the count. Tapping the
+ * bell pushes /admin/reports.
+ */
+function AdminNotificationBell() {
+  const router = useRouter();
+  const [count, setCount] = useState(0);
+  const load = useCallback(async () => {
+    try {
+      const r = await api.adminReportsList();
+      setCount(r.new_count || 0);
+    } catch {}
+  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      load();
+      const id = setInterval(load, 8000);
+      return () => clearInterval(id);
+    }, [load]),
+  );
+  return (
+    <TouchableOpacity
+      onPress={() => router.push('/admin/reports')}
+      style={bellStyles.btn}
+      hitSlop={8}
+      testID="admin-bell"
+      activeOpacity={0.7}
+    >
+      <Ionicons name="notifications" size={22} color="#FFD700" />
+      {count > 0 && (
+        <View style={bellStyles.badge} testID="admin-bell-badge">
+          <Text style={bellStyles.badgeText}>{count > 9 ? '9+' : count}</Text>
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+}
+
+const bellStyles = StyleSheet.create({
+  btn: {
+    position: 'relative',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#FFD70022',
+    borderWidth: 1,
+    borderColor: '#FFD70066',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 5,
+    backgroundColor: colors.red,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: colors.bg,
+  },
+  badgeText: { color: '#fff', fontSize: 10, fontWeight: '900' },
+});
+

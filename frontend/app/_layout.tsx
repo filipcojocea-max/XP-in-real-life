@@ -130,6 +130,8 @@ export default function RootLayout() {
               <Stack.Screen name="friends" />
               <Stack.Screen name="spot" />
               <Stack.Screen name="library-catalog" />
+              <Stack.Screen name="messages" />
+              <Stack.Screen name="admin" />
             </Stack>
             {/* Bottom 40-px swipe-up reveal target for Immersive Mode. */}
             <RevealZone />

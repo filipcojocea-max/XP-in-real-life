@@ -96,6 +96,21 @@ export function NotificationPermissionPrompt() {
         // Background scheduling: arm the daily motivational push at all
         // four scheduled windows (morning/afternoon/evening/night).
         await scheduleMotivationalNotifications();
+        // Register this device's Expo push token with our backend so
+        // friends' DM sends can wake the user even when the app is
+        // closed. Failure here is non-fatal — local notifications still
+        // work; we just won't get push for new messages.
+        try {
+          const tokenRes = await Notifications.getExpoPushTokenAsync();
+          const token = tokenRes?.data;
+          if (token) {
+            const platform = Platform.OS;
+            const { api } = await import('./api');
+            await api.pushRegisterToken(token, platform).catch(() => {});
+          }
+        } catch {
+          // ignore
+        }
       }
     } catch {
       // ignore — keep the app alive

@@ -38,6 +38,8 @@ export default function FriendsScreen() {
     outgoing: [],
   });
   const [friends, setFriends] = useState<Player[]>([]);
+  // Per-friend unread DM counts → drives the red dot on each friend card.
+  const [unreadByFriend, setUnreadByFriend] = useState<Record<string, number>>({});
   const [loadingFriends, setLoadingFriends] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -65,9 +67,14 @@ export default function FriendsScreen() {
   const loadFriendsData = useCallback(async () => {
     setLoadingFriends(true);
     try {
-      const [reqs, fr] = await Promise.all([api.listFriendRequests(), api.listFriends()]);
+      const [reqs, fr, unread] = await Promise.all([
+        api.listFriendRequests(),
+        api.listFriends(),
+        api.messagesUnreadSummary().catch(() => ({ unread_by_friend: {}, total_unread: 0 })),
+      ]);
       setRequests(reqs);
       setFriends(fr.friends);
+      setUnreadByFriend(unread.unread_by_friend || {});
     } catch (e: any) {
       console.log('friends', e);
     } finally {
@@ -384,6 +391,7 @@ function FriendsTab({
               player={item}
               onPress={() => onPress(item)}
               saving={savingId === item.user_id}
+              unreadCount={unreadByFriend[item.user_id] || 0}
             />
           )}
         />
@@ -400,13 +408,15 @@ function SubTab({ label, active, onPress, testID }: { label: string; active: boo
   );
 }
 
-function PlayerCard({ player, onPress, onAddFriend, saving }: {
+function PlayerCard({ player, onPress, onAddFriend, saving, unreadCount }: {
   player: Player;
   onPress: () => void;
   onAddFriend?: () => void;
   saving?: boolean;
+  unreadCount?: number;
 }) {
   const adminView = !!player.is_admin_view;
+  const hasUnread = (unreadCount || 0) > 0;
   // "Active 1.5 hrs ago" label — only meaningful (and only shown) when
   // they're already on our friends list. Anyone else's last_seen is
   // hidden for privacy.
@@ -423,7 +433,16 @@ function PlayerCard({ player, onPress, onAddFriend, saving }: {
     >
       <PlayerAvatar player={player} />
       <View style={{ flex: 1 }}>
-        <Text style={[styles.playerName, adminView && { color: '#FFD700' }]} numberOfLines={1}>{player.name}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <Text style={[styles.playerName, adminView && { color: '#FFD700' }]} numberOfLines={1}>{player.name}</Text>
+          {hasUnread && (
+            <View style={styles.unreadBadge} testID={`friend-unread-${player.user_id}`}>
+              <Text style={styles.unreadBadgeText}>
+                {(unreadCount || 0) > 9 ? '9+' : unreadCount}
+              </Text>
+            </View>
+          )}
+        </View>
         <View style={styles.playerStatsRow}>
           <View style={[styles.statChip, adminView && { borderColor: '#FFD70088', backgroundColor: '#FFD70015' }]}>
             <Ionicons name="ribbon" size={11} color={adminView ? '#FFD700' : colors.cyan} />
@@ -628,9 +647,22 @@ function PlayerProfileModal({
           <View style={{ marginTop: spacing.lg }}>
             {player.friend_status === 'self' ? null
               : player.friend_status === 'friends' ? (
-                <View style={[styles.modalCta, { backgroundColor: colors.green + '22', borderColor: colors.green + '99' }]}>
-                  <Ionicons name="checkmark-circle" size={18} color={colors.green} />
-                  <Text style={[styles.modalCtaText, { color: colors.green }]}>Already Friends</Text>
+                <View style={{ gap: 10 }}>
+                  <TouchableOpacity
+                    style={[styles.modalCta, { backgroundColor: colors.cyan, borderColor: colors.cyan }]}
+                    onPress={() => {
+                      onClose();
+                      router.push(`/messages/${player.user_id}`);
+                    }}
+                    testID="modal-message"
+                  >
+                    <Ionicons name="chatbubble" size={18} color={colors.bg} />
+                    <Text style={[styles.modalCtaText, { color: colors.bg }]}>Message</Text>
+                  </TouchableOpacity>
+                  <View style={[styles.modalCta, { backgroundColor: colors.green + '22', borderColor: colors.green + '99' }]}>
+                    <Ionicons name="checkmark-circle" size={18} color={colors.green} />
+                    <Text style={[styles.modalCtaText, { color: colors.green }]}>Already Friends</Text>
+                  </View>
                 </View>
               ) : player.friend_status === 'pending_outgoing' ? (
                 <View style={[styles.modalCta, { backgroundColor: colors.surfaceGlass, borderColor: colors.border }]}>
@@ -789,6 +821,16 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '500',
   },
+  unreadBadge: {
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.red,
+    paddingHorizontal: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unreadBadgeText: { color: '#fff', fontSize: 10, fontWeight: '900' },
 
   actionBtn: {
     flexDirection: 'row',

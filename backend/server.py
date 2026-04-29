@@ -4053,6 +4053,378 @@ logger = logging.getLogger(__name__)
 async def shutdown_db_client():
     client.close()
 
+# ════════════════════════════════════════════════════════════════════
+# DIRECT MESSAGES — friend-to-friend chat with AI safety guard
+# ════════════════════════════════════════════════════════════════════
+PUSH_API_URL = "https://exp.host/--/api/v2/push/send"
+MAX_MESSAGE_TEXT_LEN = 500
+
+
+class MessageRefinePayload(BaseModel):
+    text: str
+
+
+class MessageImageCheckPayload(BaseModel):
+    image_base64: str
+
+
+class MessageSendPayload(BaseModel):
+    to_user_id: str
+    refined_text: str
+    original_text: Optional[str] = None
+    image_base64: Optional[str] = None
+
+
+class MessageReadPayload(BaseModel):
+    friend_id: str
+
+
+class PushTokenRegisterPayload(BaseModel):
+    token: str
+    platform: Optional[str] = None
+
+
+def _thread_key(a: str, b: str) -> str:
+    return ":".join(sorted([a, b]))
+
+
+async def _are_friends(a: str, b: str) -> bool:
+    if not a or not b or a == b:
+        return False
+    rel = await db.friend_requests.find_one({
+        "$or": [
+            {"from_user_id": a, "to_user_id": b, "status": "accepted"},
+            {"from_user_id": b, "to_user_id": a, "status": "accepted"},
+        ]
+    })
+    return rel is not None
+
+
+async def _refine_message_text(text: str) -> dict:
+    """GPT-4o-mini grammar fix + safety scrubbing.
+    Returns {refined, flagged, severity, reason}.
+    severity: 'none'|'mild'|'severe'. severe → refined='' and admin reported."""
+    if not text or not text.strip():
+        return {"refined": "", "flagged": False, "severity": "none", "reason": ""}
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        if not api_key:
+            return {"refined": text.strip()[:MAX_MESSAGE_TEXT_LEN], "flagged": False, "severity": "none", "reason": "no-llm-key"}
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"msg-refine-{uuid.uuid4().hex[:8]}",
+            system_message=(
+                "You are a strict but FRIENDLY message-safety + grammar editor for "
+                "private chat between friends inside a self-improvement app.\n"
+                "INPUT: a single draft message the user is about to send.\n"
+                "TASKS:\n"
+                " 1. PRESERVE the original meaning and tone — refine, don't rewrite.\n"
+                " 2. Fix obvious typos and grammar.\n"
+                " 3. Replace profanity / swear words with PG-rated equivalents.\n"
+                " 4. Soften or remove direct threats, insults, or hate speech.\n"
+                " 5. If the draft contains anything sexual/explicit/predatory, threats of "
+                "violence, or self-harm encouragement → refined='' and severity='severe'.\n"
+                "    Otherwise: severity='mild' if you had to censor, else 'none'.\n"
+                "    flagged=true ONLY if severity='severe'.\n"
+                "OUTPUT — return EXACTLY this JSON, no markdown:\n"
+                '{"refined": "<cleaned message>", "flagged": true|false, "severity": "none"|"mild"|"severe", "reason": "<short>"}'
+            ),
+        ).with_model("openai", "gpt-4o-mini")
+        msg = UserMessage(text=text[:MAX_MESSAGE_TEXT_LEN])
+        response = await chat.send_message(msg)
+        raw = (response or "").strip()
+        import re, json as _json
+        m = re.search(r"\{.*\}", raw, re.S)
+        data = _json.loads(m.group(0)) if m else {}
+        refined = str(data.get("refined", text)).strip()[:MAX_MESSAGE_TEXT_LEN]
+        severity = str(data.get("severity", "none")).lower()
+        if severity not in ("none", "mild", "severe"):
+            severity = "none"
+        flagged = bool(data.get("flagged", False)) or severity == "severe"
+        if severity == "severe":
+            refined = ""
+        return {"refined": refined, "flagged": flagged, "severity": severity, "reason": str(data.get("reason", ""))[:200]}
+    except Exception as e:
+        return {"refined": text.strip()[:MAX_MESSAGE_TEXT_LEN], "flagged": False, "severity": "none", "reason": f"refine-fallback: {e}"}
+
+
+async def _check_image_safety(image_base64: str) -> dict:
+    if not image_base64:
+        return {"safe": False, "severity": "severe", "reason": "no image"}
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        if not api_key:
+            return {"safe": False, "severity": "severe", "reason": "no-llm-key"}
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"msg-img-{uuid.uuid4().hex[:8]}",
+            system_message=(
+                "You review images for a friend-to-friend DM in a self-improvement app. "
+                "Reject anything sexual/explicit/nude, violent/gore, hate-speech, or "
+                "minors. Reply ONLY with this JSON: "
+                '{"safe": true|false, "severity": "none"|"mild"|"severe", "reason": "<short>"}'
+            ),
+        ).with_model("openai", "gpt-4o-mini")
+        msg = UserMessage(text="Is this image safe to send?", file_contents=[ImageContent(image_base64=image_base64)])
+        response = await chat.send_message(msg)
+        raw = (response or "").strip()
+        import re, json as _json
+        m = re.search(r"\{.*\}", raw, re.S)
+        data = _json.loads(m.group(0)) if m else {}
+        sev = str(data.get("severity", "severe")).lower()
+        if sev not in ("none", "mild", "severe"):
+            sev = "severe"
+        return {"safe": bool(data.get("safe", False)), "severity": sev, "reason": str(data.get("reason", ""))[:200]}
+    except Exception as e:
+        return {"safe": False, "severity": "severe", "reason": f"check failed: {e}"}
+
+
+async def _file_admin_report(reported_user_id: str, kind: str, severity: str, excerpt: str, reason: str):
+    if severity != "severe":
+        return
+    try:
+        prof = await db.profile.find_one({"_id": reported_user_id}) or {}
+        user = await db.users.find_one({"_id": reported_user_id}) or {}
+        await db.admin_reports.insert_one({
+            "id": str(uuid.uuid4()),
+            "reported_user_id": reported_user_id,
+            "reported_name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "reported_email": user.get("email", ""),
+            "kind": kind,
+            "severity": severity,
+            "excerpt": (excerpt or "")[:200],
+            "reason": (reason or "")[:200],
+            "created_at": now_iso(),
+            "viewed_at": None,
+            "dismissed_at": None,
+        })
+    except Exception as e:
+        logger.warning(f"[admin-report] failed: {e}")
+
+
+async def _send_expo_push(token: str, title: str, body: str, data: dict | None = None):
+    if not token:
+        return
+    try:
+        import httpx
+        payload = {
+            "to": token,
+            "title": title[:80],
+            "body": body[:200],
+            "sound": "default",
+            "priority": "high",
+            "data": data or {},
+        }
+        async with httpx.AsyncClient(timeout=8.0) as cl:
+            await cl.post(PUSH_API_URL, json=payload)
+    except Exception as e:
+        logger.warning(f"[push] send failed: {e}")
+
+
+def _serialize_message(m: dict) -> dict:
+    return {
+        "id": m["id"],
+        "from_user_id": m["from_user_id"],
+        "to_user_id": m["to_user_id"],
+        "text": m.get("refined_text") or "",
+        "image_base64": m.get("image_base64"),
+        "created_at": m.get("created_at"),
+        "read_at": m.get("read_at"),
+        "severity": m.get("severity", "none"),
+    }
+
+
+@api_router.post("/messages/refine")
+async def messages_refine(body: MessageRefinePayload, user_id: str = Depends(get_user_or_legacy)):
+    if not body.text:
+        return {"refined": "", "flagged": False, "severity": "none", "reason": ""}
+    return await _refine_message_text(body.text)
+
+
+@api_router.post("/messages/check-image")
+async def messages_check_image(body: MessageImageCheckPayload, user_id: str = Depends(get_user_or_legacy)):
+    if not body.image_base64:
+        raise HTTPException(400, "image_base64 required")
+    if len(body.image_base64) > 8_000_000:
+        raise HTTPException(400, "Image too large (8MB limit).")
+    result = await _check_image_safety(body.image_base64)
+    if not result.get("safe"):
+        await _file_admin_report(user_id, "message_image", result.get("severity", "severe"), "<image>", result.get("reason", ""))
+    return result
+
+
+@api_router.post("/messages/send")
+async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_user_or_legacy)):
+    if not body.to_user_id or body.to_user_id == user_id:
+        raise HTTPException(400, "Invalid recipient.")
+    if not await _are_friends(user_id, body.to_user_id):
+        raise HTTPException(403, "You can only message friends.")
+    refined = (body.refined_text or "").strip()
+    image_b64 = body.image_base64 or None
+    if not refined and not image_b64:
+        raise HTTPException(400, "Message is empty.")
+    if len(refined) > MAX_MESSAGE_TEXT_LEN:
+        refined = refined[:MAX_MESSAGE_TEXT_LEN]
+    severity = "none"
+    if refined:
+        check = await _refine_message_text(refined)
+        refined = (check.get("refined") or refined).strip()[:MAX_MESSAGE_TEXT_LEN]
+        severity = check.get("severity", "none")
+        if check.get("severity") == "severe":
+            await _file_admin_report(user_id, "message_text", "severe", body.original_text or refined, check.get("reason", ""))
+            raise HTTPException(400, detail={"error": "blocked", "reason": "Message contains content that can't be sent. The incident has been logged."})
+    if image_b64:
+        ic = await _check_image_safety(image_b64)
+        if not ic.get("safe"):
+            await _file_admin_report(user_id, "message_image", ic.get("severity", "severe"), "<image>", ic.get("reason", ""))
+            raise HTTPException(400, detail={"error": "image_blocked", "reason": ic.get("reason", "Image rejected.")})
+    msg = {
+        "id": str(uuid.uuid4()),
+        "thread_id": _thread_key(user_id, body.to_user_id),
+        "from_user_id": user_id,
+        "to_user_id": body.to_user_id,
+        "original_text": (body.original_text or "")[:1000],
+        "refined_text": refined,
+        "image_base64": image_b64,
+        "created_at": now_iso(),
+        "read_at": None,
+        "severity": severity,
+    }
+    await db.messages.insert_one(msg)
+    sender_prof = await db.profile.find_one({"_id": user_id}) or {}
+    sender_name = sender_prof.get("full_name") or sender_prof.get("name") or "A friend"
+    recipient_tokens = await db.push_tokens.find({"user_id": body.to_user_id}).to_list(10)
+    for tok_doc in recipient_tokens:
+        await _send_expo_push(
+            tok_doc.get("token", ""),
+            f"💬 {sender_name}",
+            (refined or "📷 Sent you a photo")[:200],
+            {"type": "message", "from_user_id": user_id, "message_id": msg["id"]},
+        )
+    return {"message": _serialize_message(msg)}
+
+
+@api_router.get("/messages/threads")
+async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
+    cur = db.friend_requests.find({
+        "$or": [
+            {"from_user_id": user_id, "status": "accepted"},
+            {"to_user_id": user_id, "status": "accepted"},
+        ]
+    })
+    friend_ids: set[str] = set()
+    async for r in cur:
+        friend_ids.add(r["from_user_id"] if r["to_user_id"] == user_id else r["to_user_id"])
+    rows = []
+    for fid in friend_ids:
+        thread_id = _thread_key(user_id, fid)
+        last = await db.messages.find_one({"thread_id": thread_id}, sort=[("created_at", -1)])
+        unread = await db.messages.count_documents({"thread_id": thread_id, "to_user_id": user_id, "read_at": None})
+        prof = await db.profile.find_one({"_id": fid}) or {}
+        rows.append({
+            "friend_id": fid,
+            "friend_name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "friend_avatar_base64": prof.get("avatar_base64"),
+            "last_message": _serialize_message(last) if last else None,
+            "unread_count": int(unread),
+        })
+    rows.sort(key=lambda r: (r["last_message"] or {}).get("created_at") or "", reverse=True)
+    return {"threads": rows}
+
+
+@api_router.get("/messages/thread/{friend_id}")
+async def messages_thread(friend_id: str, user_id: str = Depends(get_user_or_legacy)):
+    if not await _are_friends(user_id, friend_id):
+        raise HTTPException(403, "Not friends.")
+    thread_id = _thread_key(user_id, friend_id)
+    cur = db.messages.find({"thread_id": thread_id}).sort("created_at", 1).limit(500)
+    items = []
+    async for m in cur:
+        m.pop("_id", None)
+        items.append(_serialize_message(m))
+    return {"messages": items}
+
+
+@api_router.post("/messages/read")
+async def messages_read(body: MessageReadPayload, user_id: str = Depends(get_user_or_legacy)):
+    if not await _are_friends(user_id, body.friend_id):
+        raise HTTPException(403, "Not friends.")
+    thread_id = _thread_key(user_id, body.friend_id)
+    res = await db.messages.update_many(
+        {"thread_id": thread_id, "to_user_id": user_id, "read_at": None},
+        {"$set": {"read_at": now_iso()}},
+    )
+    return {"updated": int(res.modified_count)}
+
+
+@api_router.get("/messages/unread-summary")
+async def messages_unread_summary(user_id: str = Depends(get_user_or_legacy)):
+    pipeline = [
+        {"$match": {"to_user_id": user_id, "read_at": None}},
+        {"$group": {"_id": "$from_user_id", "unread": {"$sum": 1}}},
+    ]
+    summary = {}
+    async for row in db.messages.aggregate(pipeline):
+        summary[row["_id"]] = int(row["unread"])
+    return {"unread_by_friend": summary, "total_unread": sum(summary.values())}
+
+
+@api_router.post("/push/register-token")
+async def push_register_token(body: PushTokenRegisterPayload, user_id: str = Depends(get_user_or_legacy)):
+    if not body.token:
+        raise HTTPException(400, "token required")
+    await db.push_tokens.update_one(
+        {"user_id": user_id, "token": body.token},
+        {"$set": {
+            "user_id": user_id,
+            "token": body.token,
+            "platform": body.platform or "unknown",
+            "updated_at": now_iso(),
+        }},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+# ───────────────── Admin reports (Creator only) ─────────────────
+@api_router.get("/admin/reports")
+async def admin_reports_list(user_id: str = Depends(get_user_or_legacy)):
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only.")
+    cur = db.admin_reports.find({"dismissed_at": None}).sort("created_at", -1).limit(200)
+    items = []
+    new_count = 0
+    async for r in cur:
+        r.pop("_id", None)
+        if not r.get("viewed_at"):
+            new_count += 1
+        items.append(r)
+    return {"reports": items, "new_count": new_count}
+
+
+@api_router.post("/admin/reports/{report_id}/view")
+async def admin_reports_view(report_id: str, user_id: str = Depends(get_user_or_legacy)):
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only.")
+    await db.admin_reports.update_one(
+        {"id": report_id}, {"$set": {"viewed_at": now_iso()}}
+    )
+    return {"ok": True}
+
+
+@api_router.post("/admin/reports/{report_id}/dismiss")
+async def admin_reports_dismiss(report_id: str, user_id: str = Depends(get_user_or_legacy)):
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only.")
+    await db.admin_reports.update_one(
+        {"id": report_id}, {"$set": {"dismissed_at": now_iso()}}
+    )
+    return {"ok": True}
+# ════════════════════════════════════════════════════════════════════
+
+
 
 @app.on_event("startup")
 async def _seed_admin_account():

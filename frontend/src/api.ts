@@ -447,6 +447,53 @@ export const api = {
       body: JSON.stringify({ photo_base64 }),
     }),
 
+  // ─── Direct Messages (with AI safety guard) ───────────────────
+  messagesRefine: (text: string) =>
+    req<{ refined: string; flagged: boolean; severity: 'none' | 'mild' | 'severe'; reason: string }>(
+      '/messages/refine',
+      { method: 'POST', body: JSON.stringify({ text }) },
+    ),
+  messagesCheckImage: (image_base64: string) =>
+    req<{ safe: boolean; severity: string; reason: string }>('/messages/check-image', {
+      method: 'POST',
+      body: JSON.stringify({ image_base64 }),
+    }),
+  messagesSend: (
+    to_user_id: string,
+    refined_text: string,
+    original_text?: string,
+    image_base64?: string,
+  ) =>
+    req<{ message: DMMessage }>('/messages/send', {
+      method: 'POST',
+      body: JSON.stringify({ to_user_id, refined_text, original_text, image_base64 }),
+    }),
+  messagesThreads: () => req<{ threads: DMThread[] }>('/messages/threads'),
+  messagesThread: (friend_id: string) =>
+    req<{ messages: DMMessage[] }>(`/messages/thread/${friend_id}`),
+  messagesRead: (friend_id: string) =>
+    req<{ updated: number }>('/messages/read', {
+      method: 'POST',
+      body: JSON.stringify({ friend_id }),
+    }),
+  messagesUnreadSummary: () =>
+    req<{ unread_by_friend: Record<string, number>; total_unread: number }>(
+      '/messages/unread-summary',
+    ),
+  pushRegisterToken: (token: string, platform: string) =>
+    req<{ ok: boolean }>('/push/register-token', {
+      method: 'POST',
+      body: JSON.stringify({ token, platform }),
+    }),
+
+  // ─── Admin reports (Creator only) ─────────────────────────────
+  adminReportsList: () =>
+    req<{ reports: AdminReport[]; new_count: number }>('/admin/reports'),
+  adminReportView: (id: string) =>
+    req<{ ok: boolean }>(`/admin/reports/${id}/view`, { method: 'POST' }),
+  adminReportDismiss: (id: string) =>
+    req<{ ok: boolean }>(`/admin/reports/${id}/dismiss`, { method: 'POST' }),
+
   // ─── Admin / Creator catalog ──────────────────────────────────────
   libraryCatalog: () => req<LibraryCatalogResponse>('/library/catalog'),
 
@@ -839,5 +886,38 @@ export type SpotMatch = {
   viewer_captures: number;
   viewer_reward: number;
   created_at: string;
+};
+
+// ───────────────────────── Direct Messages ───────────────────────
+export type DMSeverity = 'none' | 'mild' | 'severe';
+export type DMMessage = {
+  id: string;
+  from_user_id: string;
+  to_user_id: string;
+  text: string;
+  image_base64: string | null;
+  created_at: string;
+  read_at: string | null;
+  severity: DMSeverity;
+};
+export type DMThread = {
+  friend_id: string;
+  friend_name: string;
+  friend_avatar_base64: string | null;
+  last_message: DMMessage | null;
+  unread_count: number;
+};
+export type AdminReport = {
+  id: string;
+  reported_user_id: string;
+  reported_name: string;
+  reported_email: string;
+  kind: string;
+  severity: string;
+  excerpt: string;
+  reason: string;
+  created_at: string;
+  viewed_at: string | null;
+  dismissed_at: string | null;
 };
 
