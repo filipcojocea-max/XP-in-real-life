@@ -21,6 +21,7 @@ import { colors, spacing, radii } from '../../src/theme';
 import LeaderboardTab from '../../src/components/LeaderboardTab';
 import PremiumShield from '../../src/components/PremiumShield';
 import { SuspendUserModal } from '../../src/components/SuspendUserModal';
+import { GiftComposerModal } from '../../src/components/GiftComposerModal';
 
 type TopTab = 'players' | 'friends' | 'leaderboard';
 type FriendsSubTab = 'requests' | 'mine';
@@ -769,6 +770,7 @@ function AdminControlsBlock({ userId, userName }: { userId: string; userName: st
   const [status, setStatus] = useState<{ suspended: boolean; forever?: boolean; remaining_seconds?: number | null; until?: string | null; reason?: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showSuspend, setShowSuspend] = useState(false);
+  const [showGift, setShowGift] = useState(false);
   const [working, setWorking] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -862,6 +864,35 @@ function AdminControlsBlock({ userId, userName }: { userId: string; userName: st
         targetName={userName}
         onClose={() => setShowSuspend(false)}
         onSuspended={refresh}
+      />
+
+      {/* Send Gift — gold action */}
+      <TouchableOpacity
+        testID="admin-gift-btn"
+        onPress={() => setShowGift(true)}
+        style={styles.adminGiftBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="gift" size={16} color="#FFD700" />
+        <Text style={styles.adminGiftText}>Send Gift</Text>
+      </TouchableOpacity>
+
+      {/* Direct message — admin can DM anyone, no friendship needed */}
+      <TouchableOpacity
+        testID="admin-dm-btn"
+        onPress={() => router.push(`/messages/${userId}`)}
+        style={styles.adminDMBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="chatbubbles" size={16} color={colors.cyan} />
+        <Text style={styles.adminDMText}>Direct Message</Text>
+      </TouchableOpacity>
+
+      <GiftComposerModal
+        visible={showGift}
+        targetUserId={userId}
+        targetName={userName}
+        onClose={() => setShowGift(false)}
       />
     </View>
   );
@@ -1468,4 +1499,28 @@ const styles = StyleSheet.create({
     borderColor: '#FFD700',
   },
   adminLiftText: { color: '#FFD700', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  adminGiftBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    backgroundColor: 'rgba(255, 215, 0, 0.18)',
+    borderWidth: 1,
+    borderColor: '#FFD700',
+  },
+  adminGiftText: { color: '#FFD700', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  adminDMBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    backgroundColor: colors.cyan + '22',
+    borderWidth: 1,
+    borderColor: colors.cyan,
+  },
+  adminDMText: { color: colors.cyan, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
 });

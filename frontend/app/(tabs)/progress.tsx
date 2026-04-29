@@ -70,7 +70,7 @@ export default function Progress() {
     );
   }
 
-  const maxXp = Math.max(1, ...weekly.days.map((d) => d.xp));
+  const maxXp = Math.max(1, ...weekly.days.map((d) => d.xp + (d.gifted_xp || 0)));
   const chartW = 320;
   const chartH = 160;
   const pad = 24;
@@ -148,41 +148,64 @@ export default function Progress() {
               strokeWidth={1}
             />
             {weekly.days.map((d, i) => {
-              const h = ((chartH - pad * 2) * d.xp) / maxXp;
+              const earnedXp = d.xp;
+              const giftedXp = d.gifted_xp || 0;
+              const totalXp = earnedXp + giftedXp;
+              const totalH = ((chartH - pad * 2) * totalXp) / maxXp;
+              const earnedH = ((chartH - pad * 2) * earnedXp) / maxXp;
+              const giftedH = ((chartH - pad * 2) * giftedXp) / maxXp;
               const x = pad + i * segmentW + 3;
-              const y = chartH - pad - h;
+              const yEarnedTop = chartH - pad - earnedH;
+              const yGiftedTop = chartH - pad - earnedH - giftedH;
               const isToday = i === todayIdx;
               return (
                 <React.Fragment key={d.date}>
-                  <Rect
-                    x={x}
-                    y={y}
-                    width={barW}
-                    height={Math.max(2, h)}
-                    rx={4}
-                    // Today's bar uses the brighter cyan accent so users
-                    // can see it rise in real time as they earn XP.
-                    fill={
-                      d.xp > 0
-                        ? isToday
-                          ? colors.cyan
-                          : colors.green
-                        : 'rgba(255,255,255,0.1)'
-                    }
-                  />
-                  {/* XP value above each bar — only shown if there's
-                      actually XP earned that day, otherwise it'd just
-                      clutter every bar with "0". */}
-                  {d.xp > 0 ? (
+                  {earnedXp > 0 ? (
+                    <Rect
+                      x={x}
+                      y={yEarnedTop}
+                      width={barW}
+                      height={Math.max(2, earnedH)}
+                      rx={4}
+                      // Today's bar uses the brighter cyan accent so users
+                      // can see it rise in real time as they earn XP.
+                      fill={isToday ? colors.cyan : colors.green}
+                    />
+                  ) : null}
+                  {/* YELLOW gifted-XP segment stacked on top of the
+                      earned-XP bar. Same x/width for visual continuity;
+                      different fill so it's clearly distinguishable. */}
+                  {giftedXp > 0 ? (
+                    <Rect
+                      x={x}
+                      y={yGiftedTop}
+                      width={barW}
+                      height={Math.max(2, giftedH)}
+                      rx={4}
+                      fill="#FFD700"
+                    />
+                  ) : null}
+                  {totalXp === 0 ? (
+                    <Rect
+                      x={x}
+                      y={chartH - pad - 2}
+                      width={barW}
+                      height={2}
+                      rx={1}
+                      fill="rgba(255,255,255,0.1)"
+                    />
+                  ) : null}
+                  {/* Total XP value above each bar (earned + gifted) */}
+                  {totalXp > 0 ? (
                     <SvgText
                       x={x + barW / 2}
-                      y={y - 4}
+                      y={Math.max(yGiftedTop, yEarnedTop) - 4}
                       fontSize="10"
                       fontWeight="800"
-                      fill={isToday ? colors.cyan : colors.text}
+                      fill={giftedXp > 0 ? '#FFD700' : isToday ? colors.cyan : colors.text}
                       textAnchor="middle"
                     >
-                      {d.xp}
+                      {totalXp}
                     </SvgText>
                   ) : null}
                   <SvgText

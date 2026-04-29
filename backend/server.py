@@ -1848,15 +1848,34 @@ async def stats_daily(date: Optional[str] = None, user_id: str = Depends(get_use
 
 
 @api_router.get("/stats/weekly")
+@api_router.get("/stats/weekly")
 async def stats_weekly(user_id: str = Depends(get_user_or_legacy)):
     today_d = datetime.now(timezone.utc).date()
     days = []
+    # Pre-aggregate gifted XP per day-string for fast lookup. Only XP-kind
+    # gifts contribute; boost gifts don't add to the chart.
+    gift_cur = db.gifts.find(
+        {"to_user_id": user_id, "kind": "xp"},
+        {"_id": 0, "created_at": 1, "amount": 1},
+    )
+    gifted_by_day: dict[str, int] = {}
+    async for g in gift_cur:
+        dt = (g.get("created_at") or "")[:10]
+        if dt:
+            gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
     for i in range(6, -1, -1):
         d = today_d - timedelta(days=i)
         d_str = d.isoformat()
         logs = await db.task_logs.find({"user_id": user_id, "date": d_str}, {"_id": 0}).to_list(1000)
         xp = sum(entry["xp_awarded"] for entry in logs)
-        days.append({"date": d_str, "day": d.strftime("%a"), "xp": xp, "tasks": len(logs)})
+        gifted_xp = int(gifted_by_day.get(d_str, 0))
+        days.append({
+            "date": d_str,
+            "day": d.strftime("%a"),
+            "xp": xp,
+            "gifted_xp": gifted_xp,
+            "tasks": len(logs),
+        })
     return {"days": days}
 
 
@@ -4466,8 +4485,14 @@ async def messages_check_image(body: MessageImageCheckPayload, user_id: str = De
 async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_user_or_legacy)):
     if not body.to_user_id or body.to_user_id == user_id:
         raise HTTPException(400, "Invalid recipient.")
-    if not await _are_friends(user_id, body.to_user_id):
-        raise HTTPException(403, "You can only message friends.")
+    # Admin/Creator can DM anyone, and any user can reply to an admin
+    # thread even without friendship — this is the only exception to the
+    # "friends only" gate. Everyone else must be friends.
+    sender_is_admin = await _is_admin_user(user_id)
+    recipient_is_admin = await _is_admin_user(body.to_user_id)
+    if not (sender_is_admin or recipient_is_admin):
+        if not await _are_friends(user_id, body.to_user_id):
+            raise HTTPException(403, "You can only message friends.")
     refined = (body.refined_text or "").strip()
     image_b64 = body.image_base64 or None
     if not refined and not image_b64:
@@ -4475,14 +4500,17 @@ async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_use
     if len(refined) > MAX_MESSAGE_TEXT_LEN:
         refined = refined[:MAX_MESSAGE_TEXT_LEN]
     severity = "none"
-    if refined:
+    if refined and not sender_is_admin:
+        # Admin/Creator messages bypass the safety/refinement filter —
+        # the Creator's text is trusted. /messages/refine is still
+        # available so the Creator can opt-in to grammar polishing.
         check = await _refine_message_text(refined)
         refined = (check.get("refined") or refined).strip()[:MAX_MESSAGE_TEXT_LEN]
         severity = check.get("severity", "none")
         if check.get("severity") == "severe":
             await _file_admin_report(user_id, "message_text", "severe", body.original_text or refined, check.get("reason", ""))
             raise HTTPException(400, detail={"error": "blocked", "reason": "Message contains content that can't be sent. The incident has been logged."})
-    if image_b64:
+    if image_b64 and not sender_is_admin:
         ic = await _check_image_safety(image_b64)
         if not ic.get("safe"):
             await _file_admin_report(user_id, "message_image", ic.get("severity", "severe"), "<image>", ic.get("reason", ""))
@@ -4498,10 +4526,13 @@ async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_use
         "created_at": now_iso(),
         "read_at": None,
         "severity": severity,
+        "is_admin_thread": bool(sender_is_admin or recipient_is_admin),
     }
     await db.messages.insert_one(msg)
     sender_prof = await db.profile.find_one({"_id": user_id}) or {}
     sender_name = sender_prof.get("full_name") or sender_prof.get("name") or "A friend"
+    if sender_is_admin:
+        sender_name = "👑 Creator"
     recipient_tokens = await db.push_tokens.find({"user_id": body.to_user_id}).to_list(10)
     for tok_doc in recipient_tokens:
         await _send_expo_push(
@@ -4524,18 +4555,32 @@ async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
     friend_ids: set[str] = set()
     async for r in cur:
         friend_ids.add(r["from_user_id"] if r["to_user_id"] == user_id else r["to_user_id"])
+    # Admin DM bypass: include any user we have an existing message
+    # thread with — even if no friendship exists. This surfaces threads
+    # initiated by the Creator/Admin to the recipient (and vice-versa).
+    msg_partner_cur = db.messages.find(
+        {"$or": [{"from_user_id": user_id}, {"to_user_id": user_id}]},
+        {"from_user_id": 1, "to_user_id": 1},
+    )
+    async for m in msg_partner_cur:
+        other = m.get("from_user_id") if m.get("to_user_id") == user_id else m.get("to_user_id")
+        if other and other != user_id:
+            friend_ids.add(other)
     rows = []
     for fid in friend_ids:
         thread_id = _thread_key(user_id, fid)
         last = await db.messages.find_one({"thread_id": thread_id}, sort=[("created_at", -1)])
         unread = await db.messages.count_documents({"thread_id": thread_id, "to_user_id": user_id, "read_at": None})
         prof = await db.profile.find_one({"_id": fid}) or {}
+        u = await db.users.find_one({"_id": fid}, {"email": 1}) or {}
+        is_admin = _is_admin_email(u.get("email"))
         rows.append({
             "friend_id": fid,
-            "friend_name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "friend_name": ("👑 Creator" if is_admin else (prof.get("full_name") or prof.get("name") or "Anonymous")),
             "friend_avatar_base64": prof.get("avatar_base64"),
             "last_message": _serialize_message(last) if last else None,
             "unread_count": int(unread),
+            "is_admin_thread": bool(is_admin),
         })
     rows.sort(key=lambda r: (r["last_message"] or {}).get("created_at") or "", reverse=True)
     return {"threads": rows}
@@ -4543,7 +4588,10 @@ async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.get("/messages/thread/{friend_id}")
 async def messages_thread(friend_id: str, user_id: str = Depends(get_user_or_legacy)):
-    if not await _are_friends(user_id, friend_id):
+    # Admin DM bypass: friendship not required if either party is admin
+    sender_is_admin = await _is_admin_user(user_id)
+    recipient_is_admin = await _is_admin_user(friend_id)
+    if not (sender_is_admin or recipient_is_admin) and not await _are_friends(user_id, friend_id):
         raise HTTPException(403, "Not friends.")
     thread_id = _thread_key(user_id, friend_id)
     cur = db.messages.find({"thread_id": thread_id}).sort("created_at", 1).limit(500)
@@ -4556,7 +4604,10 @@ async def messages_thread(friend_id: str, user_id: str = Depends(get_user_or_leg
 
 @api_router.post("/messages/read")
 async def messages_read(body: MessageReadPayload, user_id: str = Depends(get_user_or_legacy)):
-    if not await _are_friends(user_id, body.friend_id):
+    # Admin DM bypass for marking-read on admin threads
+    sender_is_admin = await _is_admin_user(user_id)
+    recipient_is_admin = await _is_admin_user(body.friend_id)
+    if not (sender_is_admin or recipient_is_admin) and not await _are_friends(user_id, body.friend_id):
         raise HTTPException(403, "Not friends.")
     thread_id = _thread_key(user_id, body.friend_id)
     res = await db.messages.update_many(
@@ -4831,6 +4882,213 @@ async def admin_suspension_status(target_id: str, user_id: str = Depends(get_use
         "suspended": bool(state),
         **(state or {}),
     }
+
+
+# ═══════════════ Admin Gifts (XP / Bonus Top-Up) ═══════════════
+class AdminGiftXPBody(BaseModel):
+    user_id: str
+    amount: int                     # 1..100_000
+    message: Optional[str] = ""
+
+
+class AdminGiftBoostBody(BaseModel):
+    user_id: str
+    boost_type: Optional[str] = None   # triple_day | double_week | double_month | None for custom
+    custom_label: Optional[str] = None
+    custom_multiplier: Optional[int] = None     # 2..10
+    custom_duration_days: Optional[int] = None  # 1..365
+    message: Optional[str] = ""
+
+
+GIFT_MAX_XP = 100_000
+
+
+def _serialize_gift(g: dict) -> dict:
+    return {
+        "id": g.get("id"),
+        "kind": g.get("kind"),
+        "amount": int(g.get("amount", 0) or 0),
+        "boost_id": g.get("boost_id"),
+        "boost_label": g.get("boost_label"),
+        "boost_multiplier": g.get("boost_multiplier"),
+        "boost_duration_days": g.get("boost_duration_days"),
+        "message": g.get("message", ""),
+        "from_user_id": g.get("from_user_id"),
+        "from_name": g.get("from_name", "Creator"),
+        "created_at": g.get("created_at"),
+        "acknowledged_at": g.get("acknowledged_at"),
+    }
+
+
+@api_router.post("/admin/gift/xp")
+async def admin_gift_xp(body: AdminGiftXPBody, user_id: str = Depends(get_user_or_legacy)):
+    """Creator gifts custom XP points to a player. Adds to total_xp
+    immediately AND records the amount as `gifted_xp` on the per-day
+    chart so the recipient sees a yellow stacked segment in their
+    Progress chart on top of regular cyan earned-XP bars.
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    if body.user_id == user_id:
+        raise HTTPException(400, "You can't gift yourself.")
+    target = await db.users.find_one({"_id": body.user_id})
+    if not target:
+        raise HTTPException(404, "Recipient not found.")
+    amount = int(body.amount)
+    if amount <= 0 or amount > GIFT_MAX_XP:
+        raise HTTPException(400, f"Amount must be 1..{GIFT_MAX_XP}.")
+
+    # Increment user's total_xp; stash gifted_xp_total too.
+    await db.profile.update_one(
+        {"_id": body.user_id},
+        {"$inc": {"total_xp": amount, "gifted_xp_total": amount}},
+        upsert=True,
+    )
+    sender_prof = await db.profile.find_one({"_id": user_id}) or {}
+    sender_name = sender_prof.get("full_name") or "Creator"
+    gift = {
+        "id": str(uuid.uuid4()),
+        "kind": "xp",
+        "amount": amount,
+        "to_user_id": body.user_id,
+        "from_user_id": user_id,
+        "from_name": sender_name,
+        "message": (body.message or "").strip()[:500],
+        "created_at": now_iso(),
+        "acknowledged_at": None,
+    }
+    await db.gifts.insert_one(gift)
+    # Push notification (non-blocking — push delivery is best-effort)
+    tokens = await db.push_tokens.find({"user_id": body.user_id}).to_list(10)
+    for tok_doc in tokens:
+        try:
+            await _send_expo_push(
+                tok_doc.get("token", ""),
+                "🎁 Gift from the Creator!",
+                f"You received {amount} XP! {body.message or ''}".strip()[:200],
+                {"type": "gift_xp", "amount": amount, "gift_id": gift["id"]},
+            )
+        except Exception:
+            pass
+    return {"ok": True, "gift": _serialize_gift(gift)}
+
+
+@api_router.post("/admin/gift/boost")
+async def admin_gift_boost(body: AdminGiftBoostBody, user_id: str = Depends(get_user_or_legacy)):
+    """Creator gifts a Bonus Top-Up to a player. Adds the boost entry to
+    the recipient's `boost_inventory` (un-activated) and records the
+    gift so the recipient's golden welcome modal can announce it.
+
+    Either pass `boost_type` for a preset (triple_day, double_week,
+    double_month — each defaulted to 1 day duration as agreed) OR pass
+    a fully custom triplet (custom_label, custom_multiplier 2..10,
+    custom_duration_days 1..365).
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    if body.user_id == user_id:
+        raise HTTPException(400, "You can't gift yourself.")
+    target = await db.users.find_one({"_id": body.user_id})
+    if not target:
+        raise HTTPException(404, "Recipient not found.")
+
+    if body.boost_type and body.boost_type in BOOST_DEFS:
+        # Use the preset definition but override duration to 1 day so
+        # gifts always behave like "today's bonus" by default.
+        cfg = BOOST_DEFS[body.boost_type]
+        entry = {
+            "id": str(uuid.uuid4()),
+            "type": body.boost_type,
+            "multiplier": int(cfg.get("multiplier", 2)),
+            "duration_days": 1,
+            "label": cfg.get("label", body.boost_type) + " (Gift)",
+            "source": "gift",
+            "acquired_at": now_iso(),
+            "activated": False,
+        }
+    else:
+        mult = int(body.custom_multiplier or 0)
+        dur = int(body.custom_duration_days or 0)
+        if not (2 <= mult <= 10) or not (1 <= dur <= 365):
+            raise HTTPException(400, "Provide custom_multiplier 2..10 and custom_duration_days 1..365 (or a known boost_type).")
+        entry = {
+            "id": str(uuid.uuid4()),
+            "type": "custom_gift",
+            "multiplier": mult,
+            "duration_days": dur,
+            "label": (body.custom_label or f"{mult}x for {dur} day{'s' if dur != 1 else ''}").strip()[:80],
+            "source": "gift",
+            "acquired_at": now_iso(),
+            "activated": False,
+        }
+
+    # Make sure boosts feature is unlocked for the recipient so they can
+    # actually activate the gifted boost without entering an unlock code.
+    await db.profile.update_one(
+        {"_id": body.user_id},
+        {
+            "$set": {"boosts_unlocked": True, "boosts_unlocked_at": now_iso()},
+            "$push": {"boost_inventory": entry},
+        },
+        upsert=True,
+    )
+    sender_prof = await db.profile.find_one({"_id": user_id}) or {}
+    sender_name = sender_prof.get("full_name") or "Creator"
+    gift = {
+        "id": str(uuid.uuid4()),
+        "kind": "boost",
+        "amount": 0,
+        "boost_id": entry["id"],
+        "boost_label": entry["label"],
+        "boost_multiplier": entry["multiplier"],
+        "boost_duration_days": entry["duration_days"],
+        "to_user_id": body.user_id,
+        "from_user_id": user_id,
+        "from_name": sender_name,
+        "message": (body.message or "").strip()[:500],
+        "created_at": now_iso(),
+        "acknowledged_at": None,
+    }
+    await db.gifts.insert_one(gift)
+    tokens = await db.push_tokens.find({"user_id": body.user_id}).to_list(10)
+    for tok_doc in tokens:
+        try:
+            await _send_expo_push(
+                tok_doc.get("token", ""),
+                "🎁 Gift from the Creator!",
+                f"Bonus Top-Up: {entry['label']}".strip()[:200],
+                {"type": "gift_boost", "gift_id": gift["id"]},
+            )
+        except Exception:
+            pass
+    return {"ok": True, "gift": _serialize_gift(gift), "inventory_entry": entry}
+
+
+# ── Recipient endpoints ───────────────────────────────────────────
+@api_router.get("/gifts/pending")
+async def gifts_pending(user_id: str = Depends(get_user_or_legacy)):
+    """All gifts that haven't been acknowledged yet by this user.
+    Drives the golden 'Congratulations!' modal that appears the first
+    time the recipient opens the app after receiving a gift.
+    """
+    cur = db.gifts.find({"to_user_id": user_id, "acknowledged_at": None}, {"_id": 0}).sort("created_at", 1)
+    items = []
+    async for g in cur:
+        items.append(_serialize_gift(g))
+    return {"gifts": items}
+
+
+class GiftAckBody(BaseModel):
+    gift_id: str
+
+
+@api_router.post("/gifts/ack")
+async def gifts_ack(body: GiftAckBody, user_id: str = Depends(get_user_or_legacy)):
+    res = await db.gifts.update_one(
+        {"id": body.gift_id, "to_user_id": user_id, "acknowledged_at": None},
+        {"$set": {"acknowledged_at": now_iso()}},
+    )
+    return {"ok": True, "updated": res.modified_count}
 
 
 # ═══════════════ Mini-app Catalog (Admin-only) ═══════════════

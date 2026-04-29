@@ -229,7 +229,7 @@ export type DailyStats = {
   xp_today: number;
 };
 
-export type WeeklyStats = { days: { date: string; day: string; xp: number; tasks: number }[] };
+export type WeeklyStats = { days: { date: string; day: string; xp: number; gifted_xp?: number; tasks: number }[] };
 
 export type OnboardingPayload = {
   name?: string;
@@ -344,6 +344,33 @@ export const api = {
     }),
   adminSuspensionStatus: (userId: string) =>
     req<AdminSuspensionStatus>(`/admin/suspension/${userId}`),
+
+  // ── Admin: Gifts (XP / Bonus Top-Up) ────────────────────────────
+  adminGiftXP: (userId: string, amount: number, message?: string) =>
+    req<{ ok: boolean; gift: GiftEntry }>('/admin/gift/xp', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, amount, message: message || '' }),
+    }),
+  adminGiftBoost: (
+    userId: string,
+    opts: {
+      boost_type?: string;
+      custom_label?: string;
+      custom_multiplier?: number;
+      custom_duration_days?: number;
+      message?: string;
+    }
+  ) =>
+    req<{ ok: boolean; gift: GiftEntry; inventory_entry: any }>('/admin/gift/boost', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, ...opts }),
+    }),
+  giftsPending: () => req<{ gifts: GiftEntry[] }>('/gifts/pending'),
+  giftsAck: (giftId: string) =>
+    req<{ ok: boolean; updated: number }>('/gifts/ack', {
+      method: 'POST',
+      body: JSON.stringify({ gift_id: giftId }),
+    }),
   sendFriendRequest: (userId: string) =>
     req<{ status: FriendStatus; message: string }>('/friends/request', {
       method: 'POST',
@@ -842,6 +869,22 @@ export type AdminSuspensionStatus = {
   suspended_at?: string;
   suspended_by?: string;
   reason?: string;
+};
+
+// ── Admin Gifts (XP / Bonus Top-Up) ───────────────────────────────
+export type GiftEntry = {
+  id: string;
+  kind: 'xp' | 'boost';
+  amount: number;                    // for kind=xp
+  boost_id?: string | null;          // for kind=boost
+  boost_label?: string | null;
+  boost_multiplier?: number | null;
+  boost_duration_days?: number | null;
+  message: string;
+  from_user_id: string;
+  from_name: string;
+  created_at: string;
+  acknowledged_at?: string | null;
 };
 
 // ───────────────────────── Leaderboard ─────────────────────────

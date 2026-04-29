@@ -11,6 +11,7 @@ import { RevealZone } from '../src/components/RevealZone';
 import { NotificationPermissionPrompt } from '../src/NotificationPermissionPrompt';
 import { enableAndroidImmersive, reassertAndroidImmersive } from '../src/androidImmersive';
 import { SuspensionAlertModal } from '../src/components/SuspensionAlertModal';
+import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { loading, token, anonymousId } = useAuth();
@@ -157,6 +158,7 @@ export default function RootLayout() {
                 already signed-out by AuthProvider; this just shows
                 them the golden reason + time-remaining. */}
             <SuspensionAlertModal />
+            <GiftReceivedAlert />
           </AuthGate>
         </View>
       </ImmersiveProvider>
