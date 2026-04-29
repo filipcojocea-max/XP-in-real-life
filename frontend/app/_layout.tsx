@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, AppState } from 'react-native';
 import { colors, applyAdminTheme, clearAdminTheme } from '../src/theme';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
@@ -9,6 +9,7 @@ import { enableAdminTextOverride, disableAdminTextOverride } from '../src/adminT
 import { ImmersiveProvider } from '../src/immersive';
 import { RevealZone } from '../src/components/RevealZone';
 import { NotificationPermissionPrompt } from '../src/NotificationPermissionPrompt';
+import { enableAndroidImmersive, reassertAndroidImmersive } from '../src/androidImmersive';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { loading, token, anonymousId } = useAuth();
@@ -106,6 +107,17 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 }
 
 export default function RootLayout() {
+  // Hide the Samsung 3-button (or pill) navigation bar on Android the
+  // moment the app boots, and re-assert hidden state when the OS gives
+  // it back to us (e.g. after a permission dialog or returning from
+  // background). Web/iOS no-ops cleanly.
+  useEffect(() => {
+    enableAndroidImmersive();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') reassertAndroidImmersive();
+    });
+    return () => sub.remove();
+  }, []);
   return (
     <AuthProvider>
       <ImmersiveProvider>

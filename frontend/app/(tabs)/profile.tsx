@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Image,
   Platform,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,6 +22,7 @@ import { colors, spacing, radii } from '../../src/theme';
 import { getMotivationSchedule } from '../../src/notifications';
 import { useAuth } from '../../src/AuthContext';
 import { formatZoneDisplay, findAuZone } from '../../src/auTimezones';
+import { useImmersive } from '../../src/immersive';
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -281,6 +283,10 @@ export default function ProfileScreen() {
           </View>
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
+
+        {/* Immersive Mode toggle — when OFF the bottom tab bar stays
+            visible all the time instead of auto-hiding after 5 s. */}
+        <ImmersiveToggleRow />
 
         <TouchableOpacity
           testID="profile-focus-btn"
@@ -553,6 +559,68 @@ const styles = StyleSheet.create({
   },
 });
 
+
+/**
+ * ImmersiveToggleRow — settings row that lets the user pin the bottom
+ * tab bar permanently. When OFF (auto-hide enabled), the bar disappears
+ * after 5 s; when ON (toggle below shows green), the bar stays put.
+ *
+ * Wording: the toggle's "ON" state means "always show tab bar", which
+ * matches user expectations (toggle ON = bar visible).
+ */
+function ImmersiveToggleRow() {
+  const { immersiveEnabled, setImmersiveEnabled } = useImmersive();
+  // immersiveEnabled === true means auto-hide is ON; the user's setting
+  // ("Always show navigation bar") is the LOGICAL NEGATION of that.
+  const alwaysShow = !immersiveEnabled;
+  return (
+    <View style={[settingsStyles.row]} testID="profile-immersive-toggle-row">
+      <View style={[settingsStyles.icon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
+        <Ionicons name="layers" size={18} color={colors.cyan} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={settingsStyles.title}>Always show navigation bar</Text>
+        <Text style={settingsStyles.desc}>
+          {alwaysShow
+            ? 'Bottom tab bar is pinned and never auto-hides.'
+            : 'Auto-hides after 5s. Swipe up from the bottom to bring it back.'}
+        </Text>
+      </View>
+      <Switch
+        testID="profile-immersive-toggle"
+        value={alwaysShow}
+        onValueChange={(v) => setImmersiveEnabled(!v)}
+        trackColor={{ false: colors.border, true: colors.cyan + '88' }}
+        thumbColor={alwaysShow ? colors.cyan : '#888'}
+      />
+    </View>
+  );
+}
+
+const settingsStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    minHeight: 60,
+  },
+  icon: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  title: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  desc: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+});
 
 /**
  * AdminNotificationBell — top-right bell icon shown ONLY on the Creator

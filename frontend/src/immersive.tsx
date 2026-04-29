@@ -1,30 +1,33 @@
 /**
  * Immersive Mode — global tab-bar auto-hide controller.
  *
- * Rules (per spec):
- *  - The bottom tab bar is HIDDEN by default so the app content can use
- *    the full screen height.
- *  - It becomes visible when revealTabBar() is called (e.g. via the
- *    bottom 40-px swipe-up reveal zone, or when the user actively taps
- *    a tab).
- *  - After 5 seconds of inactivity, it auto-hides again.
- *  - Instant show/hide — no slide animation (matches user pick #4=B).
+ * Rules:
+ *  - When the user has Immersive Mode ENABLED (default), the bottom tab
+ *    bar is hidden and revealed via swipe-up + 5s auto-hide.
+ *  - When the user toggles it OFF (Profile → Settings), the tab bar
+ *    stays pinned at the bottom forever — no auto-hide, no swipe gate.
+ *  - Setting is persisted in AsyncStorage under `immersive_enabled_v1`.
  */
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const HIDE_DELAY_MS = 5000;
+const PREF_KEY = 'immersive_enabled_v1';
 
 type Ctx = {
   tabBarVisible: boolean;
+  /** User-visible toggle: when false, the tab bar stays pinned. */
+  immersiveEnabled: boolean;
+  setImmersiveEnabled: (v: boolean) => Promise<void>;
   revealTabBar: () => void;
   hideTabBar: () => void;
-  /** Reset the auto-hide timer without changing visibility — call this
-   *  whenever the user is actively interacting with the tab bar. */
   pingTabBar: () => void;
 };
 
 const ImmersiveContext = createContext<Ctx>({
-  tabBarVisible: false,
+  tabBarVisible: true,
+  immersiveEnabled: true,
+  setImmersiveEnabled: async () => {},
   revealTabBar: () => {},
   hideTabBar: () => {},
   pingTabBar: () => {},
@@ -35,11 +38,20 @@ export function useImmersive() {
 }
 
 export function ImmersiveProvider({ children }: { children: React.ReactNode }) {
-  // Default = hidden. The tabs layout calls revealTabBar() on first mount
-  // so the user gets a 5-second peek as soon as the navigation is on
-  // screen (post-auth), and pre-auth screens never need the bar.
-  const [tabBarVisible, setTabBarVisible] = useState(false);
+  const [immersiveEnabled, setImmersiveEnabledState] = useState<boolean>(true);
+  // When immersive is OFF, force the bar visible at all times.
+  const [tabBarVisible, setTabBarVisible] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Hydrate the persisted preference once on mount.
+  useEffect(() => {
+    (async () => {
+      try {
+        const v = await AsyncStorage.getItem(PREF_KEY);
+        if (v === '0') setImmersiveEnabledState(false);
+      } catch {}
+    })();
+  }, []);
 
   const clearTimer = () => {
     if (timerRef.current) {
@@ -50,11 +62,12 @@ export function ImmersiveProvider({ children }: { children: React.ReactNode }) {
 
   const armTimer = useCallback(() => {
     clearTimer();
+    if (!immersiveEnabled) return; // never hide when user disabled it
     timerRef.current = setTimeout(() => {
       setTabBarVisible(false);
       timerRef.current = null;
     }, HIDE_DELAY_MS);
-  }, []);
+  }, [immersiveEnabled]);
 
   const revealTabBar = useCallback(() => {
     setTabBarVisible(true);
@@ -62,9 +75,10 @@ export function ImmersiveProvider({ children }: { children: React.ReactNode }) {
   }, [armTimer]);
 
   const hideTabBar = useCallback(() => {
+    if (!immersiveEnabled) return; // ignore hide requests when disabled
     clearTimer();
     setTabBarVisible(false);
-  }, []);
+  }, [immersiveEnabled]);
 
   const pingTabBar = useCallback(() => {
     if (timerRef.current || tabBarVisible) {
@@ -72,10 +86,35 @@ export function ImmersiveProvider({ children }: { children: React.ReactNode }) {
     }
   }, [armTimer, tabBarVisible]);
 
+  // Whenever the user toggles immersive OFF, immediately pin the bar
+  // and kill any pending hide timer.
+  useEffect(() => {
+    if (!immersiveEnabled) {
+      clearTimer();
+      setTabBarVisible(true);
+    }
+  }, [immersiveEnabled]);
+
+  const setImmersiveEnabled = useCallback(async (v: boolean) => {
+    setImmersiveEnabledState(v);
+    try {
+      await AsyncStorage.setItem(PREF_KEY, v ? '1' : '0');
+    } catch {}
+  }, []);
+
   useEffect(() => () => clearTimer(), []);
 
   return (
-    <ImmersiveContext.Provider value={{ tabBarVisible, revealTabBar, hideTabBar, pingTabBar }}>
+    <ImmersiveContext.Provider
+      value={{
+        tabBarVisible,
+        immersiveEnabled,
+        setImmersiveEnabled,
+        revealTabBar,
+        hideTabBar,
+        pingTabBar,
+      }}
+    >
       {children}
     </ImmersiveContext.Provider>
   );

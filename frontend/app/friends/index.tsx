@@ -507,6 +507,10 @@ function formatLastSeen(iso: string): string {
 function PlayerAvatar({ player }: { player: Player }) {
   const adminView = !!player.is_admin_view;
   const wrapStyle = adminView ? { borderWidth: 2, borderColor: '#FFD700', borderRadius: 26, padding: 1 } : undefined;
+  // In list views we show a Level Shield as the fallback "avatar" so the
+  // player's progression shines through at a glance — much more
+  // expressive than a single letter. The actual user-uploaded photo is
+  // still revealed when they tap into the profile detail modal.
   if (player.avatar_base64) {
     return (
       <View style={wrapStyle as any}>
@@ -514,12 +518,13 @@ function PlayerAvatar({ player }: { player: Player }) {
       </View>
     );
   }
+  // Admin profiles always render as a golden Lv999 shield even if no
+  // photo is set — keeps the Creator's visual identity consistent.
+  const shieldLevel = adminView ? 999 : Math.max(1, Number(player.level || 1));
   return (
     <View style={wrapStyle as any}>
-      <View style={[styles.avatar, styles.avatarFallback, adminView && { backgroundColor: '#FFD70022', borderColor: '#FFD700' }]}>
-        <Text style={[styles.avatarLetter, adminView && { color: '#FFD700' }]}>
-          {(player.name || '?').slice(0, 1).toUpperCase()}
-        </Text>
+      <View style={[styles.avatar, styles.avatarShieldWrap, adminView && { backgroundColor: '#FFD70015', borderColor: '#FFD700' }]}>
+        <PremiumShield level={shieldLevel} size={36} />
       </View>
     </View>
   );
@@ -794,6 +799,14 @@ const styles = StyleSheet.create({
   },
   avatar: { width: 44, height: 44, borderRadius: 22 },
   avatarFallback: { backgroundColor: colors.cyan + '22', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.cyan + '55' },
+  avatarShieldWrap: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
   avatarLetter: { color: colors.cyan, fontWeight: '900', fontSize: 18 },
   playerName: { color: colors.text, fontWeight: '900', fontSize: 14 },
   playerMeta: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
