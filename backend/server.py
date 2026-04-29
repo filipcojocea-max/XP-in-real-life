@@ -2725,12 +2725,20 @@ async def _enrich_emails(profs: list) -> list:
     return profs
 
 
-def _serialize_player(prof: dict, status: str = "none") -> dict:
+def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = False) -> dict:
     """Public-facing trimmed profile for player cards / detail views.
 
     Special-case for the Creator/Admin: when OTHERS view this player,
     stats are replaced with infinity, the bio is hidden, and an `is_admin_view`
     flag is set so the frontend can render a golden treatment.
+
+    `viewer_is_admin` adds two ADMIN-ONLY moderation flags to the payload:
+      - is_currently_suspended → true while the suspension window is active
+      - was_suspended_ever → true if the user has EVER been suspended (even
+        if it has been lifted or expired). Used to render a permanent red
+        dot next to their name in the admin's view of every list.
+    These fields are omitted entirely for non-admin viewers so a regular
+    user CANNOT discover that a player was previously suspended.
     """
     total_xp = int(prof.get("total_xp", 0) or 0)
     user_id = prof.get("_id") or prof.get("user_id")
@@ -2767,6 +2775,14 @@ def _serialize_player(prof: dict, status: str = "none") -> dict:
             "tasks_completed": -1,
             "bio": "",            # cleared as requested
         })
+    if viewer_is_admin and not is_admin:
+        # Only the Creator sees these moderation badges. We compute
+        # `is_currently_suspended` from the live suspended_until field via
+        # _suspension_state so an expired suspension correctly renders as
+        # "ever-suspended only" (red dot, no red border).
+        state = _suspension_state(prof)
+        base["is_currently_suspended"] = bool(state)
+        base["was_suspended_ever"] = bool(prof.get("was_suspended_ever") or state)
     return base
 
 
@@ -2836,11 +2852,12 @@ async def list_players(q: str = "", user_id: str = Depends(get_user_or_legacy)):
     out = []
     profs_to_enrich = [p for _, p in scored[:200]]
     await _enrich_emails(profs_to_enrich)
+    viewer_is_admin = await _is_admin_user(user_id)
     for _, p in scored[:200]:
         other_id = p.get("_id")
         rel = rels.get((user_id, other_id))
         status = _relationship_status(rel, user_id)
-        out.append(_serialize_player(p, status))
+        out.append(_serialize_player(p, status, viewer_is_admin=viewer_is_admin))
     return {"players": out}
 
 
@@ -2853,7 +2870,8 @@ async def player_profile(other_id: str, user_id: str = Depends(get_user_or_legac
     await _enrich_emails([prof])
     rel = await _find_relationship(user_id, other_id)
     status = "self" if other_id == user_id else _relationship_status(rel, user_id)
-    return _serialize_player(prof, status)
+    viewer_is_admin = await _is_admin_user(user_id)
+    return _serialize_player(prof, status, viewer_is_admin=viewer_is_admin)
 
 
 @api_router.get("/friends/profile/{other_id}/details")
@@ -3064,6 +3082,7 @@ async def friends_remove(body: FriendActionPayload, user_id: str = Depends(get_u
 async def list_friend_requests(user_id: str = Depends(get_user_or_legacy)):
     """Pending requests *received* by me (incoming) — shown in the
     'Friend Requests' tab."""
+    viewer_is_admin = await _is_admin_user(user_id)
     out_incoming: list = []
     async for r in db.friend_requests.find({"to_user_id": user_id, "status": "pending"}).sort("created_at", -1):
         from_id = r["from_user_id"]
@@ -3073,7 +3092,7 @@ async def list_friend_requests(user_id: str = Depends(get_user_or_legacy)):
         out_incoming.append({
             "request_id": r["id"],
             "created_at": r.get("created_at"),
-            "player": _serialize_player(prof, "pending_incoming"),
+            "player": _serialize_player(prof, "pending_incoming", viewer_is_admin=viewer_is_admin),
         })
     out_outgoing: list = []
     async for r in db.friend_requests.find({"from_user_id": user_id, "status": "pending"}).sort("created_at", -1):
@@ -3084,7 +3103,7 @@ async def list_friend_requests(user_id: str = Depends(get_user_or_legacy)):
         out_outgoing.append({
             "request_id": r["id"],
             "created_at": r.get("created_at"),
-            "player": _serialize_player(prof, "pending_outgoing"),
+            "player": _serialize_player(prof, "pending_outgoing", viewer_is_admin=viewer_is_admin),
         })
     return {"incoming": out_incoming, "outgoing": out_outgoing}
 
@@ -3092,6 +3111,7 @@ async def list_friend_requests(user_id: str = Depends(get_user_or_legacy)):
 @api_router.get("/friends/list")
 async def list_friends(user_id: str = Depends(get_user_or_legacy)):
     out: list = []
+    viewer_is_admin = await _is_admin_user(user_id)
     async for r in db.friend_requests.find({
         "status": "accepted",
         "$or": [{"from_user_id": user_id}, {"to_user_id": user_id}],
@@ -3100,7 +3120,7 @@ async def list_friends(user_id: str = Depends(get_user_or_legacy)):
         prof = await db.profile.find_one({"_id": other_id})
         if not prof:
             continue
-        out.append(_serialize_player(prof, "friends"))
+        out.append(_serialize_player(prof, "friends", viewer_is_admin=viewer_is_admin))
     return {"friends": out}
 
 
@@ -3484,7 +3504,8 @@ async def leaderboard_profile(
     medals = await _compute_medals(other_id)
     rel = await _find_relationship(user_id, other_id)
     status = "self" if other_id == user_id else _relationship_status(rel, user_id)
-    base = _serialize_player(prof, status)
+    viewer_is_admin = await _is_admin_user(user_id)
+    base = _serialize_player(prof, status, viewer_is_admin=viewer_is_admin)
     base.update({
         "weekly_xp": int(weekly_xp),
         "medals": medals,
@@ -4836,6 +4857,9 @@ async def admin_suspend(body: AdminSuspendBody, user_id: str = Depends(get_user_
             "suspended_at": now.isoformat(),
             "suspended_by_admin": user_id,
             "suspension_reason": (body.reason or "").strip()[:280],
+            # Permanent flag — once true, never gets unset. Drives the
+            # red dot the Creator sees forever next to that user's name.
+            "was_suspended_ever": True,
         }},
         upsert=True,
     )

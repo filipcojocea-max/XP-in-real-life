@@ -789,6 +789,14 @@ export type Player = {
   // arrive as -1 sentinels and the frontend should render them as ∞ + golden.
   is_admin?: boolean;
   is_admin_view?: boolean;
+  // ADMIN-ONLY moderation flags. Backend only includes these when the
+  // viewer is the Creator/Admin. is_currently_suspended drives the red
+  // border around the player's card while their suspension is active;
+  // was_suspended_ever drives the permanent red dot that the Creator
+  // can see next to that user's name forever (even after the
+  // suspension is lifted).
+  is_currently_suspended?: boolean;
+  was_suspended_ever?: boolean;
   // ISO-8601 UTC timestamp of the last time this player opened the app.
   // Used by Friends → My Friends to render "Active 1.5 hrs ago" labels.
   last_seen_at?: string | null;

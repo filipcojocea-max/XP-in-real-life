@@ -433,6 +433,13 @@ function PlayerCard({ player, onPress, onAddFriend, saving, unreadCount }: {
 }) {
   const adminView = !!player.is_admin_view;
   const hasUnread = (unreadCount || 0) > 0;
+  // ── Admin moderation visuals (only the Creator sees these flags) ──
+  // - Red border around the entire card while the player is currently
+  //   suspended (transient — auto-clears when suspension expires/lifts)
+  // - Permanent red dot next to the name once they've EVER been
+  //   suspended (never removed, even after lifting)
+  const isCurrentlySuspended = !!player.is_currently_suspended;
+  const wasSuspendedEver = !!player.was_suspended_ever;
   // "Active 1.5 hrs ago" label — only meaningful (and only shown) when
   // they're already on our friends list. Anyone else's last_seen is
   // hidden for privacy.
@@ -444,12 +451,30 @@ function PlayerCard({ player, onPress, onAddFriend, saving, unreadCount }: {
     <TouchableOpacity
       activeOpacity={0.85}
       onPress={onPress}
-      style={[styles.playerCard, adminView && { borderColor: '#FFD700', backgroundColor: '#FFD70010' }]}
+      style={[
+        styles.playerCard,
+        adminView && { borderColor: '#FFD700', backgroundColor: '#FFD70010' },
+        // Red outline takes precedence over the gold admin-view border:
+        // a suspended player is the most important state to surface.
+        isCurrentlySuspended && {
+          borderColor: colors.red,
+          borderWidth: 2,
+          backgroundColor: colors.red + '0F',
+        },
+      ]}
       testID={`player-${player.user_id}`}
     >
       <PlayerAvatar player={player} />
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {/* Permanent red dot — visible to admin only because backend
+              omits these fields entirely for non-admin viewers. */}
+          {wasSuspendedEver ? (
+            <View
+              testID={`suspended-dot-${player.user_id}`}
+              style={styles.suspendedDot}
+            />
+          ) : null}
           <Text style={[styles.playerName, adminView && { color: '#FFD700' }]} numberOfLines={1}>{player.name}</Text>
           {hasUnread && (
             <View style={styles.unreadBadge} testID={`friend-unread-${player.user_id}`}>
@@ -458,6 +483,12 @@ function PlayerCard({ player, onPress, onAddFriend, saving, unreadCount }: {
               </Text>
             </View>
           )}
+          {isCurrentlySuspended ? (
+            <View style={styles.suspendedPill} testID={`suspended-pill-${player.user_id}`}>
+              <Ionicons name="ban" size={9} color={colors.red} />
+              <Text style={styles.suspendedPillText}>SUSPENDED</Text>
+            </View>
+          ) : null}
         </View>
         <View style={styles.playerStatsRow}>
           <View style={[styles.statChip, adminView && { borderColor: '#FFD70088', backgroundColor: '#FFD70015' }]}>
@@ -1523,4 +1554,31 @@ const styles = StyleSheet.create({
     borderColor: colors.cyan,
   },
   adminDMText: { color: colors.cyan, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+
+  // Admin moderation badges on player cards
+  suspendedDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.red,
+    borderWidth: 1,
+    borderColor: '#fff3',
+  },
+  suspendedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+    backgroundColor: colors.red + '22',
+    borderWidth: 1,
+    borderColor: colors.red,
+  },
+  suspendedPillText: {
+    color: colors.red,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
 });
