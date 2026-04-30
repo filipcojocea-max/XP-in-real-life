@@ -177,10 +177,17 @@ export default function SpotPlay() {
     setCanCapture(false);
     setReason('');
     if (mode === 'solo_constant') {
+      // Solo constant mode pulls a NEW random object on every retry —
+      // show the briefing screen so the user knows what to chase.
       const r = await api.spotGetObject();
       setTarget(r.object);
+      setPhase('briefing');
+      return;
     }
-    setPhase('briefing');
+    // Same target → skip briefing and jump STRAIGHT back into the
+    // live camera for an instant second attempt. No loading screen,
+    // no extra tap.
+    setPhase('scanning');
   };
 
   // ───────── Briefing screen ─────────

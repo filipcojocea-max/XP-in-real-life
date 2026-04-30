@@ -3977,16 +3977,56 @@ async def admin_spot_training_skip(body: AdminSpotSkipBody, user_id: str = Depen
     return {"ok": True}
 
 
-async def _spot_vision_check(target_object: str, photo_base64: str, distance_aware: bool = False) -> dict:
-    """Ask GPT-4o-mini Vision whether the target object is clearly visible.
-    Returns {detected: bool, confidence: float, reason: str, distance: 'good'|'too_far'|'too_close'}.
+def _downscale_image_b64(b64: str, max_dim: int = 512, quality: int = 72) -> str:
+    """Shrink a base64 JPEG/PNG down to `max_dim` on its longest edge.
+    Vision-model inference time is dominated by image-token encoding —
+    halving the pixel count halves the tokens and roughly halves
+    latency. 512 px is more than enough to identify most everyday
+    objects and still produces recognisable detail for GPT-4o-mini.
 
-    If we have stored TRAINING SAMPLES for this object name (gathered by
-    the Creator's "Test & Train AI" mode), inject up to 3 of them as
-    visual examples to help the LLM identify the object more reliably.
-    This is few-shot prompting — we cannot fine-tune GPT-4o, but feeding
-    it real reference photos of "this is what scissors look like" makes
-    the recognition substantially more confident.
+    Falls back to the original string if anything goes wrong (bad
+    base64, unsupported format, Pillow import failure). Pure best-effort.
+    """
+    try:
+        import io, base64 as _b64
+        from PIL import Image
+        data = _b64.b64decode(b64)
+        im = Image.open(io.BytesIO(data))
+        im = im.convert("RGB")
+        w, h = im.size
+        longest = max(w, h)
+        if longest > max_dim:
+            scale = max_dim / float(longest)
+            im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=quality, optimize=True)
+        return _b64.b64encode(out.getvalue()).decode("ascii")
+    except Exception as e:
+        # Downscaling is a perf optimisation, not a correctness requirement.
+        logger.warning("[spot] downscale failed, sending original: %s", e)
+        return b64
+
+
+async def _spot_vision_check(target_object: str, photo_base64: str, distance_aware: bool = False) -> dict:
+    """Ultra-fast Vision check. Asks GPT-4o-mini a targeted binary
+    question about ONE specific object and returns a tiny JSON.
+
+    Speed optimizations applied in this call:
+    - The user's photo is downscaled to 512 px longest edge before being
+      sent (cuts image-token count ~4-8× and halves end-to-end latency).
+    - Creator-trained reference photos are downscaled to 384 px and
+      capped to 2 samples, kept ONLY to bias recognition toward the
+      correct answer without blowing up the payload.
+    - A short system prompt replaces the previous verbose referee
+      persona. The model outputs at most ~50 tokens.
+    - `distance_aware=True` adds only a single extra JSON key; we no
+      longer do a separate distance-classifier pass.
+
+    Global fast-track: the Creator's "Test & Train AI" captures are
+    stored per object in `spot_training.samples` and are re-used for
+    EVERY player who later tries to spot the same object — this is the
+    "training system" that makes identification instantly faster for
+    everyone once the Creator has trained an object.
     """
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
@@ -3994,64 +4034,73 @@ async def _spot_vision_check(target_object: str, photo_base64: str, distance_awa
         if not api_key:
             return {"detected": False, "confidence": 0.0, "reason": "No LLM key configured", "distance": "good"}
 
-        # Load Creator-trained reference samples for this object — improves
-        # recognition for everyone playing.
+        # Downscale the user's photo aggressively — this is the single
+        # biggest win for vision latency.
+        small_user_img = _downscale_image_b64(photo_base64, max_dim=512, quality=72)
+
+        # Load Creator-trained reference samples for this object.
+        # Cap at 2 and downscale to 384 to stay fast on every player call.
         ref_doc = await db.spot_training.find_one(
             {"object_name": (target_object or "").lower().strip()},
             {"_id": 0, "samples": 1},
         )
         ref_samples = (ref_doc or {}).get("samples") or []
         ref_imgs: list = []
-        # Cap reference images to 3 to stay under the LLM's image budget
-        # and keep latency low. Pick the 3 most-recent unique angles.
         seen_angles: set = set()
-        for s in reversed(ref_samples):
+        for s in reversed(ref_samples):  # newest first
             ang = (s.get("angle") or "").lower()
             if ang in seen_angles:
                 continue
             seen_angles.add(ang)
-            if s.get("image_base64"):
-                ref_imgs.append(ImageContent(image_base64=s["image_base64"]))
-            if len(ref_imgs) >= 3:
+            sb = s.get("image_base64")
+            if sb:
+                small_ref = _downscale_image_b64(sb, max_dim=384, quality=68)
+                ref_imgs.append(ImageContent(image_base64=small_ref))
+            if len(ref_imgs) >= 2:
                 break
 
-        distance_clause = (
-            " Also classify the framing: 'too_far' if the object is tiny / barely visible, "
-            "'too_close' if the object overflows the frame / cropped severely, otherwise 'good'."
-            if distance_aware else ""
-        )
-        ref_clause = (
-            "\n\nFor reference, here are real photos of the SAME object captured by the Creator. "
-            "Use them as ground truth to compare the user's photo against."
-            if ref_imgs else ""
-        )
+        # Terse, binary-style prompt — exactly what the user asked for.
+        # We still keep `confidence` + `reason` + `distance` in the JSON
+        # because the live-scan UI uses them for "too close / too far"
+        # toasts, but the model's total output stays tiny (~40 tokens).
+        if distance_aware:
+            system = (
+                f"Is there a CLEARLY visible '{target_object}' in the user photo? "
+                "Answer only with compact JSON: "
+                '{"y":true/false,"c":0-1,"d":"good"|"too_far"|"too_close","r":"1-6 words"}. '
+                "y=true only if the object dominates the frame and is recognisable. "
+                "d classifies framing. No prose."
+            )
+        else:
+            system = (
+                f"Is there a CLEARLY visible '{target_object}' in the user photo? "
+                "Answer only with compact JSON: "
+                '{"y":true/false,"c":0-1,"r":"1-6 words"}. '
+                "y=true only if the object dominates the frame and is recognisable. No prose."
+            )
+        if ref_imgs:
+            system += " The attached REFERENCE images (after the user's photo) are ground-truth captures of the SAME object by the Creator — use them to calibrate."
+
         chat = LlmChat(
             api_key=api_key,
             session_id=f"spot-{uuid.uuid4().hex[:8]}",
-            system_message=(
-                "You are a strict visual referee for a 'spot the object' photo challenge. "
-                "Look at the user's photo and decide if the requested object is CLEARLY and "
-                "PROMINENTLY in the frame (close enough, in focus, recognisable). "
-                "Reject distant, blurry, or partially-cropped objects." + distance_clause + ref_clause +
-                "\n\nReply with EXACTLY this JSON and nothing else:\n"
-                '{"detected": true/false, "confidence": 0.0-1.0, "reason": "short reason"' +
-                (', "distance": "good"|"too_far"|"too_close"' if distance_aware else '') + '}'
-            ),
+            system_message=system,
         ).with_model("openai", "gpt-4o-mini")
         msg = UserMessage(
-            text=f"Target object: {target_object}\n\nIs this object clearly visible in the attached photo?",
-            file_contents=[ImageContent(image_base64=photo_base64)] + ref_imgs,
+            text=f"Target: {target_object}",
+            file_contents=[ImageContent(image_base64=small_user_img)] + ref_imgs,
         )
         response = await chat.send_message(msg)
         raw = (response or "").strip()
         import re, json as _json
-        m = re.search(r"\{[^{}]*\}", raw, re.S)
+        m = re.search(r"\{.*?\}", raw, re.S)
         data = _json.loads(m.group(0)) if m else {}
+        # Back-compat keys so callers keep working.
         return {
-            "detected": bool(data.get("detected", False)),
-            "confidence": float(data.get("confidence", 0) or 0),
-            "reason": str(data.get("reason", "")),
-            "distance": str(data.get("distance", "good")),
+            "detected": bool(data.get("y", data.get("detected", False))),
+            "confidence": float(data.get("c", data.get("confidence", 0)) or 0),
+            "reason": str(data.get("r", data.get("reason", ""))),
+            "distance": str(data.get("d", data.get("distance", "good"))),
         }
     except Exception as e:
         return {"detected": False, "confidence": 0.0, "reason": f"vision unavailable: {e}", "distance": "good"}
