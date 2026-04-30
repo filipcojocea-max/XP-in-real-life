@@ -326,35 +326,47 @@ function diffMinutes(a: string, b: string): number {
 export async function readLastNDaysOfSleep(days = 7): Promise<RawSleepSession[]> {
   const hc = tryLoadHC();
   if (!hc) return [];
-  await hc.initialize();
-  const end = new Date();
-  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
-  const result = await hc.readRecords('SleepSession', {
-    timeRangeFilter: {
-      operator: 'between',
-      startTime: start.toISOString(),
-      endTime: end.toISOString(),
-    },
-    ascendingOrder: true,
-  });
-  // The lib returns either { records } or a raw array depending on version
-  const records: any[] = Array.isArray(result) ? result : result?.records || [];
-  return records.map((r: any) => {
-    const stages = (r.stages || []).map((s: any): RawSleepStage => ({
-      startTime: s.startTime,
-      endTime: s.endTime,
-      stage: decodeStage(s.stage),
-      duration_minutes: diffMinutes(s.startTime, s.endTime),
-    }));
-    return {
-      id: String(r.metadata?.id ?? r.id ?? `${r.startTime}-${r.endTime}`),
-      startTime: r.startTime,
-      endTime: r.endTime,
-      total_minutes: diffMinutes(r.startTime, r.endTime),
-      source: r.metadata?.dataOrigin?.packageName ?? r.metadata?.dataOriginAppName ?? 'Health Connect',
-      stages,
-    };
-  });
+  // Every native call is wrapped so that a null / empty response — or
+  // a revoked permission mid-session — results in an empty array
+  // instead of a hard crash that closes the app. The UI then shows "0"
+  // for every stat, which is the intended graceful-degradation UX.
+  try {
+    try { await hc.initialize(); } catch (e) { console.warn('[HC/readSleep] init:', e); }
+    const end = new Date();
+    const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+    const result = await hc.readRecords('SleepSession', {
+      timeRangeFilter: {
+        operator: 'between',
+        startTime: start.toISOString(),
+        endTime: end.toISOString(),
+      },
+      ascendingOrder: true,
+    });
+    // The lib returns either { records } or a raw array depending on version
+    const records: any[] = Array.isArray(result) ? result : result?.records || [];
+    if (!records.length) return [];
+    return records.map((r: any) => {
+      const stages = (r?.stages || []).map((s: any): RawSleepStage => ({
+        startTime: s?.startTime ?? '',
+        endTime: s?.endTime ?? '',
+        stage: decodeStage(s?.stage),
+        duration_minutes: diffMinutes(s?.startTime, s?.endTime),
+      }));
+      return {
+        id: String(r?.metadata?.id ?? r?.id ?? `${r?.startTime}-${r?.endTime}`),
+        startTime: r?.startTime ?? '',
+        endTime: r?.endTime ?? '',
+        total_minutes: diffMinutes(r?.startTime, r?.endTime),
+        source: r?.metadata?.dataOrigin?.packageName ?? r?.metadata?.dataOriginAppName ?? 'Health Connect',
+        stages,
+      };
+    });
+  } catch (e) {
+    // Ship to the server so we can diagnose which read failed on the
+    // user's device, then degrade gracefully to "no data".
+    reportHcError('readLastNDaysOfSleep', e).catch(() => {});
+    return [];
+  }
 }
 
 /** Aggregate raw sessions into a 7-day summary for the dashboard. */
@@ -419,18 +431,23 @@ export async function readHeartRateBetween(start: string, end: string): Promise<
   const hc = tryLoadHC();
   if (!hc) return [];
   try {
-    await hc.initialize();
+    try { await hc.initialize(); } catch (e) { console.warn('[HC/readHR] init:', e); }
     const r = await hc.readRecords('HeartRate', {
       timeRangeFilter: { operator: 'between', startTime: start, endTime: end },
     });
     const records: any[] = Array.isArray(r) ? r : r?.records || [];
     const out: HRSample[] = [];
     for (const rec of records) {
-      const samples = rec.samples || [];
-      for (const s of samples) out.push({ time: s.time, bpm: s.beatsPerMinute });
+      const samples = rec?.samples || [];
+      for (const s of samples) {
+        if (s?.time && typeof s?.beatsPerMinute === 'number') {
+          out.push({ time: s.time, bpm: s.beatsPerMinute });
+        }
+      }
     }
     return out;
-  } catch {
+  } catch (e) {
+    reportHcError('readHeartRateBetween', e).catch(() => {});
     return [];
   }
 }
@@ -439,16 +456,19 @@ export async function readSpO2Between(start: string, end: string): Promise<SpO2S
   const hc = tryLoadHC();
   if (!hc) return [];
   try {
-    await hc.initialize();
+    try { await hc.initialize(); } catch (e) { console.warn('[HC/readSpO2] init:', e); }
     const r = await hc.readRecords('OxygenSaturation', {
       timeRangeFilter: { operator: 'between', startTime: start, endTime: end },
     });
     const records: any[] = Array.isArray(r) ? r : r?.records || [];
-    return records.map((rec: any) => ({
-      time: rec.time || rec.startTime,
-      pct: rec.percentage?.value ?? rec.percentage ?? 0,
-    }));
-  } catch {
+    return records
+      .map((rec: any) => ({
+        time: rec?.time || rec?.startTime || '',
+        pct: rec?.percentage?.value ?? rec?.percentage ?? 0,
+      }))
+      .filter((s) => !!s.time);
+  } catch (e) {
+    reportHcError('readSpO2Between', e).catch(() => {});
     return [];
   }
 }
