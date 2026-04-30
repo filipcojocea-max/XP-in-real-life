@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { View, ActivityIndicator, AppState } from 'react-native';
@@ -19,41 +19,27 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const segments = useSegments();
   const hasAccess = !!token || !!anonymousId;
-  const [anchorChecked, setAnchorChecked] = useState(false);
-  const [anchorMissing, setAnchorMissing] = useState(false);
 
-  // Poll profile once we have access; force day-anchor setup if missing.
-  // Re-runs on segment change so that after /day-anchor-setup navigates away
-  // (via setDayAnchor → router.replace('/')), we re-check against fresh data
-  // instead of bouncing the user back into the setup flow on stale state.
+  // Fetch profile on auth + segment change and, ONCE the fresh result is
+  // in, decide whether the user still needs to answer the two day-anchor
+  // onboarding questions. The redirect fires INSIDE the async block so
+  // we never redirect based on stale state from the previous render —
+  // this is what fixes the "onboarding repeats twice" bug.
+  //
+  // Previous implementation used a separate routing `useEffect` that
+  // read `anchorMissing` / `anchorChecked` state. Because React batches
+  // state updates across effects in the same render pass, the routing
+  // effect saw the PREVIOUS render's `anchorMissing=true` value the
+  // moment the user navigated away from `/day-anchor-setup`, and
+  // bounced them right back to step 1 before the fresh fetch could
+  // update the flag. Ripping that second effect out kills the race.
   useEffect(() => {
     let cancelled = false;
-    // CRITICAL: clear `anchorChecked` BEFORE the new fetch resolves so
-    // the routing-decision effect below waits for fresh data and never
-    // routes on stale `anchorMissing=true` from the previous render.
-    // Without this, guest-mode users who answer the two day-anchor
-    // questions get bounced back to the setup screen and have to answer
-    // them again (the routing effect fires on segment change while the
-    // GET /profile is still in flight).
-    setAnchorChecked(false);
-    if (loading || !hasAccess) {
-      setAnchorMissing(false);
-      return;
-    }
+    if (loading || !hasAccess) return;
     (async () => {
       try {
         const p = await api.getProfile();
         if (cancelled) return;
-        // The day-anchor onboarding is considered DONE the moment a user
-        // has BOTH a timezone and a day_start_time on their profile. We
-        // intentionally don't gate on `onboarding_tz_done` alone — that
-        // flag was added later and may be missing/false on legacy
-        // profiles from before the field existed. Without this guard,
-        // an app update would re-prompt those users to choose timezone
-        // & morning time even though they already have. Once both
-        // values are present, the prompt is gone for good.
-        const missing = !p.timezone || !p.day_start_time;
-        setAnchorMissing(!!missing);
         // Apply Premium+ golden text theme for the Creator/Admin globally.
         if (p.is_admin) {
           applyAdminTheme();
@@ -62,10 +48,21 @@ function AuthGate({ children }: { children: React.ReactNode }) {
           clearAdminTheme();
           disableAdminTextOverride();
         }
+        // Day-anchor gate. Considered DONE the moment the user has BOTH
+        // `timezone` and `day_start_time` — we intentionally don't gate
+        // on the `onboarding_tz_done` flag alone because legacy profiles
+        // pre-date that field.
+        const missing = !p.timezone || !p.day_start_time;
+        if (!missing) return;
+        const seg0 = segments[0];
+        const onAnchorSetup = seg0 === 'day-anchor-setup';
+        const inAuthGroup = seg0 === 'auth';
+        const onOnboarding = seg0 === 'onboarding';
+        if (!onAnchorSetup && !inAuthGroup && !onOnboarding) {
+          router.replace('/day-anchor-setup');
+        }
       } catch {
         // swallow — profile call may fail if user hasn't finished onboarding yet
-      } finally {
-        if (!cancelled) setAnchorChecked(true);
       }
     })();
     return () => { cancelled = true; };
@@ -75,8 +72,6 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     if (loading) return;
     const inAuthGroup = segments[0] === 'auth';
     const isResetPage = inAuthGroup && segments[1] === 'reset-password';
-    const onAnchorSetup = segments[0] === 'day-anchor-setup';
-    const onOnboarding = segments[0] === 'onboarding';
 
     if (!hasAccess && !inAuthGroup) {
       router.replace('/auth/login');
@@ -86,18 +81,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       router.replace('/');
       return;
     }
-    // Force day-anchor questions when they haven't been answered.
-    if (
-      hasAccess &&
-      anchorChecked &&
-      anchorMissing &&
-      !onAnchorSetup &&
-      !inAuthGroup &&
-      !onOnboarding
-    ) {
-      router.replace('/day-anchor-setup');
-    }
-  }, [loading, hasAccess, token, segments, router, anchorChecked, anchorMissing]);
+  }, [loading, hasAccess, token, segments, router]);
 
   if (loading) {
     return (
