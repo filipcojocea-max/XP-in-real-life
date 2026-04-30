@@ -5824,7 +5824,60 @@ async def confidence_dress_advice(
         ))
     except Exception as e:
         raise HTTPException(502, f"AI error: {e}")
-    return {"reply": (response or "").strip()}
+    reply = (response or "").strip()
+
+    # Persist to history — store a small thumbnail (max 320px) so
+    # the user can scroll back through past outfits without blowing
+    # up DB size. We only save when there's a photo attached since
+    # pure-text chats aren't that useful to replay.
+    entry_id = str(uuid.uuid4())
+    try:
+        thumb = None
+        if body.photo_base64:
+            thumb = _downscale_image_b64(body.photo_base64, max_dim=320, quality=70)
+        await db.confidence_dress_history.insert_one({
+            "id": entry_id,
+            "user_id": user_id,
+            "message": (body.message or "")[:500],
+            "reply": reply[:2000],
+            "event_context": (body.event_context or "")[:80],
+            "weather_hint": (body.weather_hint or "")[:80],
+            "thumbnail_base64": thumb,
+            "has_photo": bool(body.photo_base64),
+            "created_at": now_iso(),
+        })
+    except Exception as e:
+        logger.warning("[dress] history save failed: %s", e)
+
+    return {"reply": reply, "entry_id": entry_id}
+
+
+@api_router.get("/confidence/dress-history")
+async def confidence_dress_history(
+    limit: int = 30,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Return the user's recent 'Dress with confidence' conversations,
+    newest first. Each entry carries a thumbnail + the original message
+    + the AI's reply so the UI can render a gallery/scroll view.
+    """
+    limit = max(1, min(100, int(limit)))
+    rows = await db.confidence_dress_history.find(
+        {"user_id": user_id},
+        {"_id": 0, "user_id": 0},
+    ).sort("created_at", -1).to_list(limit)
+    return {"items": rows}
+
+
+@api_router.delete("/confidence/dress-history/{entry_id}")
+async def confidence_dress_history_delete(
+    entry_id: str,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Delete a single outfit-advice history entry. Users appreciate being
+    able to remove selfies they no longer want stored."""
+    res = await db.confidence_dress_history.delete_one({"id": entry_id, "user_id": user_id})
+    return {"deleted": res.deleted_count}
 
 
 @api_router.get("/confidence/weather")

@@ -526,9 +526,26 @@ export const api = {
     weather_hint?: string;
     history?: { role: 'user' | 'assistant'; content: string }[];
   }) =>
-    req<{ reply: string }>('/confidence/dress-advice', {
+    req<{ reply: string; entry_id: string }>('/confidence/dress-advice', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+  confidenceDressHistory: (limit: number = 30) =>
+    req<{
+      items: {
+        id: string;
+        message: string;
+        reply: string;
+        event_context?: string;
+        weather_hint?: string;
+        thumbnail_base64?: string | null;
+        has_photo: boolean;
+        created_at: string;
+      }[];
+    }>(`/confidence/dress-history?limit=${limit}`),
+  confidenceDressHistoryDelete: (entry_id: string) =>
+    req<{ deleted: number }>(`/confidence/dress-history/${entry_id}`, {
+      method: 'DELETE',
     }),
   confidenceWeather: (lat: number, lon: number) =>
     req<{

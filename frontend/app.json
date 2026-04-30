@@ -18,6 +18,7 @@
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
         "NSCameraUsageDescription": "Take photos for profile and Spot the Object challenges",
+        "NSLocationWhenInUseUsageDescription": "Check local weather for outfit advice",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -35,6 +36,8 @@
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.ACTIVITY_RECOGNITION",
         "android.permission.BODY_SENSORS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.health.READ_SLEEP",
         "android.permission.health.READ_STEPS",
         "android.permission.health.READ_HEART_RATE",
@@ -85,6 +88,15 @@
         }
       ],
       "expo-web-browser",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Check local weather for outfit advice",
+          "locationWhenInUsePermission": "Check local weather for outfit advice",
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false
+        }
+      ],
       [
         "expo-camera",
         {
