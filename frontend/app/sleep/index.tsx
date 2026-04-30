@@ -5,6 +5,10 @@ import {
   Pressable, FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+// Used to remember the last day we auto-opened the morning check-in
+// modal so we only pop it up ONCE per sleep-cycle day (not every
+// time the user navigates back to the Sleep hub).
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
@@ -51,7 +55,26 @@ export default function SleepHub() {
       // Only shown when backend says the check-in window is active AND the
       // user hasn't logged their sleep for the current sleep-cycle day.
       setShowCheckinBanner(!!r.show_checkin_prompt);
-      setShowCheckin(false);
+      // AUTO-POPUP the modal once per sleep-cycle day so the user doesn't
+      // have to remember to tap the banner. We persist the last-shown day
+      // in AsyncStorage keyed to today's date; if it matches, we skip the
+      // auto-popup but keep the banner visible until they actually rate.
+      if (r.show_checkin_prompt) {
+        try {
+          const today = new Date().toISOString().slice(0, 10);
+          const lastAuto = await AsyncStorage.getItem('sleep_checkin_auto_v1');
+          if (lastAuto !== today) {
+            await AsyncStorage.setItem('sleep_checkin_auto_v1', today);
+            setShowCheckin(true);
+          } else {
+            setShowCheckin(false);
+          }
+        } catch {
+          setShowCheckin(false);
+        }
+      } else {
+        setShowCheckin(false);
+      }
     } catch (e) {
       console.log('sleep load', e);
     } finally {

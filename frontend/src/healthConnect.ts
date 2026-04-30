@@ -86,14 +86,26 @@ export async function getAvailability(): Promise<HealthConnectAvailability> {
   const hc = tryLoadHC();
   if (!hc) return 'expo_go_unsupported';
   try {
-    // initialize() returns true if Health Connect is installed and reachable.
-    const ok = await hc.initialize();
-    if (!ok) return 'not_installed';
-    // Some versions expose getSdkStatus — surface "update required" cases.
+    // Newer versions of the SDK return `undefined` from initialize() on
+    // success. Treat a non-thrown result as "reachable" and use
+    // getSdkStatus (when available) as the authoritative check.
+    try {
+      await hc.initialize();
+    } catch (e) {
+      // If initialize throws, fall back to getSdkStatus — some devices
+      // require the explicit status call before initialize can succeed.
+      console.log('[HC] initialize threw:', e);
+    }
     if (typeof hc.getSdkStatus === 'function') {
-      const status = await hc.getSdkStatus();
-      if (status === 1 /* SDK_UNAVAILABLE */) return 'not_installed';
-      if (status === 2 /* PROVIDER_UPDATE_REQUIRED */) return 'update_required';
+      try {
+        const status = await hc.getSdkStatus();
+        // 1 = SDK_UNAVAILABLE, 2 = PROVIDER_UPDATE_REQUIRED, 3 = AVAILABLE
+        if (status === 1) return 'not_installed';
+        if (status === 2) return 'update_required';
+        if (status === 3) return 'available';
+      } catch (e) {
+        console.log('[HC] getSdkStatus threw:', e);
+      }
     }
     return 'available';
   } catch {
@@ -181,21 +193,24 @@ export async function requestPermissions(): Promise<boolean> {
     );
   }
 
-  // STEP 3 — Request the read permissions one-by-one. Some manufacturers
-  // (Samsung One UI) still throw a native SecurityException if any
-  // single record-type in the request list isn't declared in
-  // AndroidManifest.xml, which can crash the app. Asking one at a time
-  // and swallowing per-permission failures keeps the app alive even if
-  // one of the permissions is rolled out late by Health Connect — the
-  // user will still be granted the ones that succeeded.
+  // STEP 3 — Request read permissions. Try BULK first (single native
+  // sheet, best UX); if that native call throws for any reason (e.g. a
+  // manifest mismatch), fall back to asking one-by-one so we still
+  // collect whatever the user will grant. Either path ends with a
+  // getGrantedPermissions() re-check as the source of truth.
   let anyGranted = false;
-  for (const perm of REQUIRED_PERMISSIONS) {
-    try {
-      const out = await hc.requestPermission([perm]);
-      if (Array.isArray(out) && out.length > 0) anyGranted = true;
-    } catch (e) {
-      // Swallow — we'll re-check via getGrantedPermissions below.
-      console.log('[HC] requestPermission failed for', perm, e);
+  try {
+    const out = await hc.requestPermission(REQUIRED_PERMISSIONS);
+    if (Array.isArray(out) && out.length > 0) anyGranted = true;
+  } catch (e) {
+    console.log('[HC] bulk requestPermission failed, falling back:', e);
+    for (const perm of REQUIRED_PERMISSIONS) {
+      try {
+        const out = await hc.requestPermission([perm]);
+        if (Array.isArray(out) && out.length > 0) anyGranted = true;
+      } catch (e2) {
+        console.log('[HC] requestPermission failed for', perm, e2);
+      }
     }
   }
   if (anyGranted) return true;

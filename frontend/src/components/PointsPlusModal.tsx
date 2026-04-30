@@ -485,7 +485,11 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   sheet: {
-    maxHeight: '90%',
+    // Use explicit height (not maxHeight) so the flex chain has a
+    // concrete size to divide. `maxHeight` alone left the sheet
+    // effectively zero-height on RN Web, rendering the modal blank
+    // even though the backdrop was visible.
+    height: '85%',
     backgroundColor: colors.bg,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,

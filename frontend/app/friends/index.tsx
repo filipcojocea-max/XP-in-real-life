@@ -216,6 +216,7 @@ export default function FriendsScreen() {
         onAccept={onAccept}
         onDecline={onDecline}
         savingId={savingId}
+        onFriendChanged={loadFriendsData}
       />
     </SafeAreaView>
   );
@@ -617,7 +618,7 @@ function FriendActionButton({ player, onAddFriend, saving }: { player: Player; o
 }
 
 function PlayerProfileModal({
-  player, viewerIsAdmin, onClose, onAddFriend, onAccept, onDecline, savingId,
+  player, viewerIsAdmin, onClose, onAddFriend, onAccept, onDecline, savingId, onFriendChanged,
 }: {
   player: Player | null;
   viewerIsAdmin: boolean;
@@ -626,9 +627,38 @@ function PlayerProfileModal({
   onAccept: (p: Player) => void;
   onDecline: (p: Player) => void;
   savingId: string | null;
+  onFriendChanged?: () => void;
 }) {
   if (!player) return null;
   const saving = savingId === player.user_id;
+  const [showUnfriendConfirm, setShowUnfriendConfirm] = useState(false);
+  const [unfriending, setUnfriending] = useState(false);
+
+  // Days since the friendship was accepted — drives the unfriend
+  // confirmation dialog subtitle. Null when the server didn't send
+  // `friended_at` (e.g. viewing from Players search rather than My
+  // Friends list).
+  const daysFriends = (() => {
+    if (!player.friended_at) return null;
+    const then = new Date(player.friended_at).getTime();
+    if (!Number.isFinite(then)) return null;
+    const diffMs = Date.now() - then;
+    return Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
+  })();
+
+  async function confirmUnfriend() {
+    setUnfriending(true);
+    try {
+      await api.removeFriend(player!.user_id);
+      setShowUnfriendConfirm(false);
+      onFriendChanged?.();
+      onClose();
+    } catch (e: any) {
+      showAlert('Could not unfriend', String(e?.message || e));
+    } finally {
+      setUnfriending(false);
+    }
+  }
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.safe}>
@@ -726,10 +756,15 @@ function PlayerProfileModal({
                     <Ionicons name="chatbubble" size={18} color={colors.bg} />
                     <Text style={[styles.modalCtaText, { color: colors.bg }]}>Message</Text>
                   </TouchableOpacity>
-                  <View style={[styles.modalCta, { backgroundColor: colors.green + '22', borderColor: colors.green + '99' }]}>
+                  <TouchableOpacity
+                    style={[styles.modalCta, { backgroundColor: colors.green + '22', borderColor: colors.green + '99' }]}
+                    onPress={() => setShowUnfriendConfirm(true)}
+                    testID="modal-unfriend-open"
+                    activeOpacity={0.85}
+                  >
                     <Ionicons name="checkmark-circle" size={18} color={colors.green} />
-                    <Text style={[styles.modalCtaText, { color: colors.green }]}>Already Friends</Text>
-                  </View>
+                    <Text style={[styles.modalCtaText, { color: colors.green }]}>Currently Friends</Text>
+                  </TouchableOpacity>
                 </View>
               ) : player.friend_status === 'pending_outgoing' ? (
                 <View style={[styles.modalCta, { backgroundColor: colors.surfaceGlass, borderColor: colors.border }]}>
@@ -758,24 +793,96 @@ function PlayerProfileModal({
                   </TouchableOpacity>
                 </View>
               ) : (
-                <TouchableOpacity
-                  style={[styles.modalCta, { backgroundColor: colors.cyan, borderColor: colors.cyan }, saving && { opacity: 0.6 }]}
-                  onPress={() => onAddFriend(player)}
-                  disabled={saving}
-                  testID="modal-add-friend"
-                >
-                  {saving ? <ActivityIndicator color={colors.bg} /> : (
-                    <>
-                      <Ionicons name="person-add" size={18} color={colors.bg} />
-                      <Text style={[styles.modalCtaText, { color: colors.bg }]}>Add Friend</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
+                <View style={{ gap: 10 }}>
+                  {/* Any user can message the Creator even without
+                      being friends — admin DM bypass. Rendered above
+                      "Add Friend" so it's the primary CTA on the
+                      Creator's public profile. */}
+                  {player.is_admin_view ? (
+                    <TouchableOpacity
+                      testID="modal-message-creator"
+                      style={[styles.modalCta, { backgroundColor: '#FFD700', borderColor: '#FFD700' }]}
+                      onPress={() => {
+                        onClose();
+                        router.push(`/messages/${player.user_id}`);
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <Ionicons name="send" size={16} color={colors.bg} />
+                      <Text style={[styles.modalCtaText, { color: colors.bg }]}>Send Message to Creator</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                  <TouchableOpacity
+                    style={[styles.modalCta, { backgroundColor: colors.cyan, borderColor: colors.cyan }, saving && { opacity: 0.6 }]}
+                    onPress={() => onAddFriend(player)}
+                    disabled={saving}
+                    testID="modal-add-friend"
+                  >
+                    {saving ? <ActivityIndicator color={colors.bg} /> : (
+                      <>
+                        <Ionicons name="person-add" size={18} color={colors.bg} />
+                        <Text style={[styles.modalCtaText, { color: colors.bg }]}>Add Friend</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
               )
             }
           </View>
         </ScrollView>
       </SafeAreaView>
+
+      {/* Unfriend confirmation — inline modal so it stays within the
+          same visibility context as the profile sheet. */}
+      <Modal
+        visible={showUnfriendConfirm}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowUnfriendConfirm(false)}
+      >
+        <View style={styles.confirmBackdrop}>
+          <View style={styles.confirmCard}>
+            <View style={styles.confirmIconRing}>
+              <Ionicons name="person-remove" size={30} color={colors.red} />
+            </View>
+            <Text style={styles.confirmTitle}>
+              Are you sure you want to unfriend this player?
+            </Text>
+            {daysFriends !== null ? (
+              <Text style={styles.confirmSubtitle}>
+                You've been friends for {daysFriends} day{daysFriends === 1 ? '' : 's'}.
+              </Text>
+            ) : null}
+            <View style={styles.confirmRow}>
+              <TouchableOpacity
+                style={[styles.confirmBtn, styles.confirmBtnSecondary]}
+                onPress={() => setShowUnfriendConfirm(false)}
+                disabled={unfriending}
+                testID="unfriend-nevermind"
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.confirmBtnText, { color: colors.textSecondary }]}>Never mind</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.confirmBtn, styles.confirmBtnDanger, unfriending && { opacity: 0.6 }]}
+                onPress={confirmUnfriend}
+                disabled={unfriending}
+                testID="unfriend-confirm"
+                activeOpacity={0.85}
+              >
+                {unfriending ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="person-remove" size={14} color="#fff" />
+                    <Text style={[styles.confirmBtnText, { color: '#fff' }]}>Unfriend Player</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </Modal>
   );
 }
@@ -1581,4 +1688,50 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.6,
   },
+  // Unfriend confirmation modal
+  confirmBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
+  confirmCard: {
+    width: '100%', maxWidth: 420,
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
+    alignItems: 'center',
+  },
+  confirmIconRing: {
+    width: 70, height: 70, borderRadius: 35,
+    borderWidth: 2, borderColor: colors.red,
+    backgroundColor: colors.red + '22',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: spacing.md,
+  },
+  confirmTitle: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  confirmSubtitle: {
+    color: colors.textMuted,
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 8,
+    fontStyle: 'italic',
+  },
+  confirmRow: { flexDirection: 'row', gap: 10, marginTop: spacing.lg, width: '100%' },
+  confirmBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+  },
+  confirmBtnSecondary: { backgroundColor: colors.surfaceGlass, borderColor: colors.border },
+  confirmBtnDanger: { backgroundColor: colors.red, borderColor: colors.red },
+  confirmBtnText: { fontWeight: '900', fontSize: 13 },
 });

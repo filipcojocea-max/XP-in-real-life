@@ -36,7 +36,8 @@ import {
   scheduleMotivationalNotifications,
 } from './notifications';
 
-const PROMPT_FLAG_KEY = 'notif_prompt_v1';
+const PROMPT_FLAG_KEY = 'notif_prompt_v1';        // set only after GRANTED
+const LAST_DISMISSED_KEY = 'notif_prompt_last';    // ISO date of last dismiss — throttles to once per day
 
 export function NotificationPermissionPrompt() {
   const [visible, setVisible] = useState(false);
@@ -47,32 +48,32 @@ export function NotificationPermissionPrompt() {
     let cancelled = false;
     (async () => {
       try {
-        // Already shown once on this install? Don't bother the user again.
+        // Already accepted (permission granted) once on this install?
+        // Then we never need to prompt again — respect that.
         const seen = await AsyncStorage.getItem(PROMPT_FLAG_KEY);
         if (seen === '1') return;
 
-        // OS-level status — only prompt while it's still undetermined,
-        // i.e. the user has neither granted nor explicitly denied yet.
-        // If they've already granted we silently make sure the daily
-        // motivational notifications are scheduled; if they've denied
-        // we don't nag.
+        // OS-level status — short-circuit if already granted by the user
+        // outside of this prompt (e.g. they granted in system settings).
         const { status, canAskAgain } = await Notifications.getPermissionsAsync();
         if (cancelled) return;
         if (status === 'granted') {
-          // Already granted — kick off the schedule and mark seen.
+          // Already granted — kick off the schedule and mark seen forever.
           scheduleMotivationalNotifications().catch(() => {});
           await AsyncStorage.setItem(PROMPT_FLAG_KEY, '1');
           return;
         }
         if (status === 'denied' && !canAskAgain) {
-          // The OS will refuse a fresh request; respect that and stop.
-          await AsyncStorage.setItem(PROMPT_FLAG_KEY, '1');
+          // Hard-deny: OS won't let us ask again. Don't set PROMPT_FLAG
+          // so if the user later re-enables via system settings we can
+          // re-detect and mark seen on next launch.
           return;
         }
-        // Show our context-explaining modal first so the user knows
-        // WHY we'd like to send notifications before iOS/Android shows
-        // its own permission dialog.
-        // Slight delay so it doesn't fight the splash screen.
+        // Throttle the prompt to ONCE PER DAY. User explicitly asked
+        // for it to keep reminding them every day until they accept.
+        const lastDismiss = await AsyncStorage.getItem(LAST_DISMISSED_KEY);
+        const today = new Date().toISOString().slice(0, 10);
+        if (lastDismiss === today) return;
         setTimeout(() => {
           if (!cancelled) setVisible(true);
         }, 800);
@@ -88,18 +89,11 @@ export function NotificationPermissionPrompt() {
   const handleAllow = async () => {
     if (busy) return;
     setBusy(true);
+    let granted = false;
     try {
-      // ensureNotificationPermission triggers the OS-level prompt and
-      // also creates the Android notification channel on first grant.
-      const granted = await ensureNotificationPermission();
+      granted = await ensureNotificationPermission();
       if (granted) {
-        // Background scheduling: arm the daily motivational push at all
-        // four scheduled windows (morning/afternoon/evening/night).
         await scheduleMotivationalNotifications();
-        // Register this device's Expo push token with our backend so
-        // friends' DM sends can wake the user even when the app is
-        // closed. Failure here is non-fatal — local notifications still
-        // work; we just won't get push for new messages.
         try {
           const tokenRes = await Notifications.getExpoPushTokenAsync();
           const token = tokenRes?.data;
@@ -108,15 +102,24 @@ export function NotificationPermissionPrompt() {
             const { api } = await import('./api');
             await api.pushRegisterToken(token, platform).catch(() => {});
           }
-        } catch {
-          // ignore
-        }
+        } catch { /* ignore */ }
       }
     } catch {
       // ignore — keep the app alive
     } finally {
       try {
-        await AsyncStorage.setItem(PROMPT_FLAG_KEY, '1');
+        if (granted) {
+          // ONLY persist the "seen forever" flag when the user actually
+          // accepted. If they hit Allow but the OS dialog was dismissed
+          // or they denied inside it, we fall back to the once-per-day
+          // throttle below so the user gets prompted again tomorrow.
+          await AsyncStorage.setItem(PROMPT_FLAG_KEY, '1');
+        } else {
+          await AsyncStorage.setItem(
+            LAST_DISMISSED_KEY,
+            new Date().toISOString().slice(0, 10)
+          );
+        }
       } catch {}
       setBusy(false);
       setVisible(false);
@@ -126,7 +129,11 @@ export function NotificationPermissionPrompt() {
   const handleDismiss = async () => {
     if (busy) return;
     try {
-      await AsyncStorage.setItem(PROMPT_FLAG_KEY, '1');
+      // Throttle to once-per-day instead of silencing forever.
+      await AsyncStorage.setItem(
+        LAST_DISMISSED_KEY,
+        new Date().toISOString().slice(0, 10)
+      );
     } catch {}
     setVisible(false);
   };

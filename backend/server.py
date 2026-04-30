@@ -57,7 +57,12 @@ def hash_password(plain: str) -> str:
 #  - Has access to the full mini-app catalog.
 ADMIN_EMAILS = {"filip.cojocea122@gmail.com"}
 ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_DEFAULT_PASSWORD", "XL98CZW5599")
-ADMIN_DEFAULT_NAME = "Filip · Creator"
+ADMIN_DEFAULT_NAME = "Admin · Creator"
+# Public-facing name shown to OTHER users whenever they see the Creator
+# in any list/modal/thread. Even if the Creator's full_name is set to
+# something else in their own profile, non-admin viewers always see
+# this label so the Creator account has a single, recognizable brand.
+ADMIN_PUBLIC_DISPLAY_NAME = "Admin · Creator"
 
 
 def _is_admin_email(email: Optional[str]) -> bool:
@@ -1759,6 +1764,31 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
         # User un-ticked: clear the lockout so they can re-tick immediately
         # (matches the "until it's clicked again" UX).
         update["last_ticked_at"] = None
+
+    # ── Per-step XP for DAILY goals ──
+    # Daily goals (unit == "days") award 30 XP per +1 step up to (but not
+    # past) the target. When the user un-ticks, we refund 30 XP per step.
+    # No step-XP is awarded for non-daily goals — only the completion
+    # bonus (`xp_reward`) applies to those, preserving existing behavior.
+    DAILY_STEP_XP = 30
+    step_xp_delta = 0
+    prev_value = int(goal.get("current_value", 0))
+    unit_is_daily = (goal.get("unit") or "").lower() == "days"
+    if unit_is_daily and requested_value != prev_value:
+        target = int(goal.get("target_value", 0))
+        # Steps that cross below/at target earn/refund XP. Steps past the
+        # target are capped (extra ticks don't grant more XP per user's
+        # "stop awarding XP once target is complete" rule).
+        old_capped = min(prev_value, target)
+        new_capped = min(requested_value, target)
+        step_delta = new_capped - old_capped
+        if step_delta != 0:
+            step_xp_delta = step_delta * DAILY_STEP_XP
+            await db.profile.update_one(
+                {"_id": user_id},
+                {"$inc": {"total_xp": step_xp_delta}},
+            )
+
     awarded_xp = 0
     refunded_xp = 0
     if completed and not goal.get("completed"):
@@ -1786,6 +1816,9 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
         goal["awarded_xp"] = awarded_xp
     if refunded_xp:
         goal["refunded_xp"] = refunded_xp
+    if step_xp_delta:
+        # Positive = XP gained on +1 step; negative = XP refunded on un-tick.
+        goal["step_xp_delta"] = step_xp_delta
     return goal
 
 
@@ -2748,7 +2781,15 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
 
     base = {
         "user_id": user_id,
-        "name": prof.get("full_name") or prof.get("name") or "Anonymous",
+        # Admins see their own real name; everyone else sees the brand
+        # "Admin · Creator" (e.g. in Players, Friends, Leaderboard, DM
+        # headers). This ensures consistent Creator branding without
+        # leaking the admin's personal full name.
+        "name": (
+            ADMIN_PUBLIC_DISPLAY_NAME
+            if (is_admin and not viewing_self)
+            else (prof.get("full_name") or prof.get("name") or "Anonymous")
+        ),
         "level": int(prof.get("level", 1) or 1),
         "total_xp": total_xp,
         "current_streak": int(prof.get("current_streak", 0) or 0),
@@ -2858,6 +2899,14 @@ async def list_players(q: str = "", user_id: str = Depends(get_user_or_legacy)):
         rel = rels.get((user_id, other_id))
         status = _relationship_status(rel, user_id)
         out.append(_serialize_player(p, status, viewer_is_admin=viewer_is_admin))
+    # Pin Creator/Admin accounts to the TOP of the Players list so every
+    # user sees the Creator first regardless of search ordering. Admin
+    # entries still respect name search — if the query doesn't match the
+    # admin's name they simply won't be in `out` to pin. Otherwise we
+    # promote them to position 0 (preserve relative order if multiple).
+    admin_rows = [r for r in out if r.get("is_admin")]
+    non_admin_rows = [r for r in out if not r.get("is_admin")]
+    out = admin_rows + non_admin_rows
     return {"players": out}
 
 
@@ -3120,7 +3169,12 @@ async def list_friends(user_id: str = Depends(get_user_or_legacy)):
         prof = await db.profile.find_one({"_id": other_id})
         if not prof:
             continue
-        out.append(_serialize_player(prof, "friends", viewer_is_admin=viewer_is_admin))
+        row = _serialize_player(prof, "friends", viewer_is_admin=viewer_is_admin)
+        # Surface the friendship start timestamp so the unfriend dialog
+        # can show "You've been friends for X days" subtitle on the
+        # client. Fallback to created_at for legacy rows.
+        row["friended_at"] = r.get("accepted_at") or r.get("created_at")
+        out.append(row)
     return {"friends": out}
 
 
@@ -4553,7 +4607,7 @@ async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_use
     sender_prof = await db.profile.find_one({"_id": user_id}) or {}
     sender_name = sender_prof.get("full_name") or sender_prof.get("name") or "A friend"
     if sender_is_admin:
-        sender_name = "👑 Creator"
+        sender_name = ADMIN_PUBLIC_DISPLAY_NAME
     recipient_tokens = await db.push_tokens.find({"user_id": body.to_user_id}).to_list(10)
     for tok_doc in recipient_tokens:
         await _send_expo_push(
@@ -4597,7 +4651,7 @@ async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
         is_admin = _is_admin_email(u.get("email"))
         rows.append({
             "friend_id": fid,
-            "friend_name": ("👑 Creator" if is_admin else (prof.get("full_name") or prof.get("name") or "Anonymous")),
+            "friend_name": (ADMIN_PUBLIC_DISPLAY_NAME if is_admin else (prof.get("full_name") or prof.get("name") or "Anonymous")),
             "friend_avatar_base64": prof.get("avatar_base64"),
             "last_message": _serialize_message(last) if last else None,
             "unread_count": int(unread),
@@ -4969,7 +5023,7 @@ async def admin_gift_xp(body: AdminGiftXPBody, user_id: str = Depends(get_user_o
         upsert=True,
     )
     sender_prof = await db.profile.find_one({"_id": user_id}) or {}
-    sender_name = sender_prof.get("full_name") or "Creator"
+    sender_name = ADMIN_PUBLIC_DISPLAY_NAME
     gift = {
         "id": str(uuid.uuid4()),
         "kind": "xp",
@@ -5057,7 +5111,7 @@ async def admin_gift_boost(body: AdminGiftBoostBody, user_id: str = Depends(get_
         upsert=True,
     )
     sender_prof = await db.profile.find_one({"_id": user_id}) or {}
-    sender_name = sender_prof.get("full_name") or "Creator"
+    sender_name = ADMIN_PUBLIC_DISPLAY_NAME
     gift = {
         "id": str(uuid.uuid4()),
         "kind": "boost",
