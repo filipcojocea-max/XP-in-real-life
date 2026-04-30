@@ -248,6 +248,51 @@ export default function Library() {
                 </View>
               </View>
             </TouchableOpacity>
+            {/* Build Self-Confidence mini-app — featured */}
+            <TouchableOpacity
+              testID="library-card-confidence"
+              activeOpacity={0.85}
+              onPress={() => router.push('/confidence' as any)}
+              style={[styles.featureCard, { marginTop: spacing.md, borderColor: '#FFD70055' }]}
+            >
+              <View style={[styles.featureGlow, { backgroundColor: '#FFD70022' }]} />
+              <View style={styles.featureRow}>
+                <View style={[styles.featureIcon, { backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
+                  <Ionicons name="shirt" size={32} color={'#FFD700'} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.featureKickerRow}>
+                    <Text style={[styles.featureKicker, { color: '#FFD700' }]}>NEW · 4 TRACKS</Text>
+                    <View style={styles.unlockedPill}>
+                      <Ionicons name="checkmark" size={10} color={colors.green} />
+                      <Text style={styles.unlockedText}>UNLOCKED</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.featureTitle}>Build Self-Confidence</Text>
+                  <Text style={styles.featureDesc}>
+                    Daily speaking + posture challenges, gratitude prompts, and an AI Style Coach that reviews your outfit photos.
+                  </Text>
+                  <View style={styles.tagRow}>
+                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
+                      <Ionicons name="chatbubbles" size={10} color={'#FFD700'} />
+                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>Social</Text>
+                    </View>
+                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
+                      <Ionicons name="body" size={10} color={'#FFD700'} />
+                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>Posture</Text>
+                    </View>
+                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
+                      <Ionicons name="sparkles" size={10} color={'#FFD700'} />
+                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>AI Stylist</Text>
+                    </View>
+                  </View>
+                  <View style={[styles.featureCta, { backgroundColor: '#FFD700' }]}>
+                    <Text style={styles.featureCtaText}>Open mini-app</Text>
+                    <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+                  </View>
+                </View>
+              </View>
+            </TouchableOpacity>
             <Text style={styles.sectionLabel}>Coming soon</Text>
             <View style={styles.previewGrid}>
               {[
@@ -317,6 +362,23 @@ export default function Library() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.mineTitle}>Spot the Object</Text>
                 <Text style={styles.mineDesc}>Photo challenges · AI verified</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            </TouchableOpacity>
+
+            {/* Build Self-Confidence installed */}
+            <TouchableOpacity
+              testID="library-mine-confidence"
+              activeOpacity={0.85}
+              onPress={() => router.push('/confidence' as any)}
+              style={[styles.mineCard, { borderColor: '#FFD70055' }]}
+            >
+              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
+                <Ionicons name="shirt" size={24} color={'#FFD700'} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.mineTitle}>Build Self-Confidence</Text>
+                <Text style={styles.mineDesc}>4 daily tracks · AI Style Coach</Text>
               </View>
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </TouchableOpacity>
