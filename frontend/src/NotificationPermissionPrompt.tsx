@@ -28,6 +28,7 @@ import {
   View,
 } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from './theme';
@@ -38,6 +39,11 @@ import {
 
 const PROMPT_FLAG_KEY = 'notif_prompt_v1';        // set only after GRANTED
 const LAST_DISMISSED_KEY = 'notif_prompt_last';    // ISO date of last dismiss — throttles to once per day
+
+function getExpoProjectId(): string | undefined {
+  const cfg: any = Constants?.expoConfig ?? (Constants as any)?.manifest;
+  return cfg?.extra?.eas?.projectId;
+}
 
 export function NotificationPermissionPrompt() {
   const [visible, setVisible] = useState(false);
@@ -58,8 +64,32 @@ export function NotificationPermissionPrompt() {
         const { status, canAskAgain } = await Notifications.getPermissionsAsync();
         if (cancelled) return;
         if (status === 'granted') {
-          // Already granted — kick off the schedule and mark seen forever.
-          scheduleMotivationalNotifications().catch(() => {});
+          // Already granted — kick off the schedule AND ensure the
+          // device token is registered with our backend so pushes can
+          // actually be delivered. Previously this early-return left
+          // the token un-registered, which was the silent cause of
+          // "notifications permitted but no push ever arrives".
+          console.log('[NotifPrompt] OS status=granted on launch — ensuring token registration');
+          scheduleMotivationalNotifications().catch((e) => console.warn('[NotifPrompt] schedule err:', e?.message));
+          try {
+            const projectId = getExpoProjectId();
+            const tokenRes = projectId
+              ? await Notifications.getExpoPushTokenAsync({ projectId })
+              : await Notifications.getExpoPushTokenAsync();
+            const pushToken = tokenRes?.data;
+            console.log('[NotifPrompt] got token:', pushToken ? pushToken.slice(0, 40) + '…' : '(none)');
+            if (pushToken) {
+              const { api } = await import('./api');
+              try {
+                const res = await api.pushRegisterToken(pushToken, Platform.OS);
+                console.log('[NotifPrompt] ✅ backend register OK:', res);
+              } catch (e: any) {
+                console.error('[NotifPrompt] ❌ backend register FAILED:', e?.message || e);
+              }
+            }
+          } catch (e: any) {
+            console.error('[NotifPrompt] getExpoPushTokenAsync failed:', e?.message || e);
+          }
           await AsyncStorage.setItem(PROMPT_FLAG_KEY, '1');
           return;
         }
@@ -95,14 +125,25 @@ export function NotificationPermissionPrompt() {
       if (granted) {
         await scheduleMotivationalNotifications();
         try {
-          const tokenRes = await Notifications.getExpoPushTokenAsync();
+          const projectId = getExpoProjectId();
+          const tokenRes = projectId
+            ? await Notifications.getExpoPushTokenAsync({ projectId })
+            : await Notifications.getExpoPushTokenAsync();
           const token = tokenRes?.data;
+          console.log('[NotifPrompt/Allow] got token:', token ? token.slice(0, 40) + '…' : '(none)');
           if (token) {
             const platform = Platform.OS;
             const { api } = await import('./api');
-            await api.pushRegisterToken(token, platform).catch(() => {});
+            try {
+              const res = await api.pushRegisterToken(token, platform);
+              console.log('[NotifPrompt/Allow] ✅ backend register OK:', res);
+            } catch (e: any) {
+              console.error('[NotifPrompt/Allow] ❌ backend register FAILED:', e?.message || e);
+            }
           }
-        } catch { /* ignore */ }
+        } catch (e: any) {
+          console.error('[NotifPrompt/Allow] getExpoPushTokenAsync failed:', e?.message || e);
+        }
       }
     } catch {
       // ignore — keep the app alive

@@ -4754,22 +4754,63 @@ async def _file_admin_report(reported_user_id: str, kind: str, severity: str, ex
 
 
 async def _send_expo_push(token: str, title: str, body: str, data: dict | None = None):
+    """Send a visible push notification via the Expo Push API.
+
+    Returns {"ok": bool, "status": int|None, "body": dict|str|None, "token_valid": bool}
+    so callers can diagnose failures. The payload always includes BOTH
+    `title` and `body` (plus `sound`+`priority`) so iOS/Android always
+    show the banner — never a silent/data-only push that the OS would
+    suppress.
+    """
     if not token:
-        return
+        logger.warning("[push] skipped send: empty token")
+        return {"ok": False, "status": None, "body": None, "token_valid": False, "reason": "empty_token"}
+    # Expo tokens always start with ExponentPushToken[ or ExpoPushToken[
+    valid_prefix = token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken[")
+    if not valid_prefix:
+        logger.warning(f"[push] invalid token format: {token[:30]}...")
+        return {"ok": False, "status": None, "body": None, "token_valid": False, "reason": "bad_format"}
     try:
         import httpx
         payload = {
             "to": token,
-            "title": title[:80],
-            "body": body[:200],
+            "title": title[:80] or "XP in real life",
+            "body": body[:200] or "You have a new update",
             "sound": "default",
             "priority": "high",
+            "channelId": "motivational",   # Android channel created at first permission grant
             "data": data or {},
         }
         async with httpx.AsyncClient(timeout=8.0) as cl:
-            await cl.post(PUSH_API_URL, json=payload)
+            resp = await cl.post(PUSH_API_URL, json=payload)
+            try:
+                body_json = resp.json()
+            except Exception:
+                body_json = resp.text
+            # Expo returns {"data":{"status":"ok"|"error", ...}}
+            inner_ok = False
+            err_reason = None
+            if isinstance(body_json, dict):
+                d = body_json.get("data") or {}
+                if isinstance(d, list) and d:
+                    d = d[0]
+                inner_ok = isinstance(d, dict) and d.get("status") == "ok"
+                if isinstance(d, dict) and d.get("status") == "error":
+                    err_reason = d.get("message") or d.get("details", {}).get("error")
+            logger.info(
+                f"[push] to={token[:30]}... status={resp.status_code} "
+                f"ok={inner_ok} err={err_reason} body={str(body_json)[:200]}"
+            )
+            return {
+                "ok": resp.status_code == 200 and inner_ok,
+                "status": resp.status_code,
+                "body": body_json,
+                "token_valid": True,
+                "reason": err_reason,
+            }
     except Exception as e:
         logger.warning(f"[push] send failed: {e}")
+        return {"ok": False, "status": None, "body": None, "token_valid": True, "reason": str(e)}
 
 
 def _serialize_message(m: dict) -> dict:
@@ -4954,9 +4995,23 @@ async def messages_unread_summary(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.post("/push/register-token")
 async def push_register_token(body: PushTokenRegisterPayload, user_id: str = Depends(get_user_or_legacy)):
+    # Loud, unambiguous logging so we can see every request hitting this
+    # endpoint in the server logs — the user explicitly asked for this
+    # so they can confirm "the request actually arrived".
+    print(
+        f"[push/register-token] HIT user_id={user_id} "
+        f"token_prefix={(body.token or '')[:30]!r} "
+        f"platform={body.platform!r}",
+        flush=True,
+    )
+    logger.info(
+        "[push/register-token] user_id=%s platform=%s token_prefix=%s",
+        user_id, body.platform, (body.token or "")[:30],
+    )
     if not body.token:
+        print(f"[push/register-token] REJECT user_id={user_id} reason=empty_token", flush=True)
         raise HTTPException(400, "token required")
-    await db.push_tokens.update_one(
+    res = await db.push_tokens.update_one(
         {"user_id": user_id, "token": body.token},
         {"$set": {
             "user_id": user_id,
@@ -4966,7 +5021,51 @@ async def push_register_token(body: PushTokenRegisterPayload, user_id: str = Dep
         }},
         upsert=True,
     )
-    return {"ok": True}
+    print(
+        f"[push/register-token] OK user_id={user_id} "
+        f"matched={res.matched_count} modified={res.modified_count} "
+        f"upserted_id={res.upserted_id}",
+        flush=True,
+    )
+    return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "upserted": bool(res.upserted_id)}
+
+
+# ── Push notification audit (use this to debug why a user isn't ──
+#    receiving notifications). Returns the caller's registered token(s),
+#    platform, last update time. If the list is empty, the device has
+#    never successfully registered — that alone explains why no push
+#    has ever been delivered to this profile. The `debug_send` flag
+#    triggers a live test push so you can confirm delivery end-to-end.
+@api_router.get("/push/status")
+async def push_status(debug_send: bool = False, user_id: str = Depends(get_user_or_legacy)):
+    tokens = await db.push_tokens.find(
+        {"user_id": user_id},
+        {"_id": 0, "token": 1, "platform": 1, "updated_at": 1},
+    ).to_list(20)
+    send_results: list = []
+    if debug_send and tokens:
+        for t in tokens:
+            r = await _send_expo_push(
+                t.get("token", ""),
+                "🔔 XP in real life",
+                "Push notification test — you should see this banner.",
+                {"type": "test"},
+            )
+            send_results.append({
+                "token_prefix": (t.get("token", "") or "")[:25],
+                "platform": t.get("platform"),
+                **r,
+            })
+    return {
+        "user_id": user_id,
+        "registered_tokens": len(tokens),
+        "tokens": [{
+            "token_prefix": (t.get("token", "") or "")[:25] + "...",
+            "platform": t.get("platform"),
+            "updated_at": t.get("updated_at"),
+        } for t in tokens],
+        "debug_send_results": send_results if debug_send else None,
+    }
 
 
 # ───────────────── Admin reports (Creator only) ─────────────────

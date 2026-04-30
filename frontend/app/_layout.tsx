@@ -9,6 +9,7 @@ import { enableAdminTextOverride, disableAdminTextOverride } from '../src/adminT
 import { ImmersiveProvider } from '../src/immersive';
 import { RevealZone } from '../src/components/RevealZone';
 import { NotificationPermissionPrompt } from '../src/NotificationPermissionPrompt';
+import { PushTokenSync } from '../src/PushTokenSync';
 import { enableAndroidImmersive, reassertAndroidImmersive } from '../src/androidImmersive';
 import { SuspensionAlertModal } from '../src/components/SuspensionAlertModal';
 import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
@@ -153,6 +154,13 @@ export default function RootLayout() {
                 can fire the daily motivational push at the user's
                 scheduled times. */}
             <NotificationPermissionPrompt />
+            {/* Fires on every authenticated launch and guarantees the
+                device's Expo push token is registered with our backend
+                (idempotent upsert). Without this mounted, users who
+                granted permission on a previous install would silently
+                never re-register their token and would stop receiving
+                pushes forever. */}
+            <PushTokenSync />
             {/* Global suspension alert — fires whenever the API returns
                 a 403 account_suspended on any request. The user is
                 already signed-out by AuthProvider; this just shows
