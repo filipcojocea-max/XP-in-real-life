@@ -10,6 +10,7 @@ import { ImmersiveProvider } from '../src/immersive';
 import { RevealZone } from '../src/components/RevealZone';
 import { NotificationPermissionPrompt } from '../src/NotificationPermissionPrompt';
 import { PushTokenSync } from '../src/PushTokenSync';
+import { NotificationDeepLinker } from '../src/NotificationDeepLinker';
 import { enableAndroidImmersive, reassertAndroidImmersive } from '../src/androidImmersive';
 import { SuspensionAlertModal } from '../src/components/SuspensionAlertModal';
 import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
@@ -145,6 +146,10 @@ export default function RootLayout() {
                 never re-register their token and would stop receiving
                 pushes forever. */}
             <PushTokenSync />
+            {/* Deep-linker — listens for push-notification taps and
+                opens the right screen. Currently handles DM pushes by
+                routing to /messages/{fromUserId}. */}
+            <NotificationDeepLinker />
             {/* Global suspension alert — fires whenever the API returns
                 a 403 account_suspended on any request. The user is
                 already signed-out by AuthProvider; this just shows

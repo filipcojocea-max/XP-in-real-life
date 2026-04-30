@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,8 @@ import {
   ScrollView,
   Image,
   RefreshControl,
+  Animated,
+  Easing,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -407,6 +409,7 @@ function FriendsTab({
             <PlayerCard
               player={item}
               onPress={() => onPress(item)}
+              onMessage={() => router.push(`/messages/${item.user_id}`)}
               saving={savingId === item.user_id}
               unreadCount={unreadByFriend[item.user_id] || 0}
             />
@@ -425,15 +428,83 @@ function SubTab({ label, active, onPress, testID }: { label: string; active: boo
   );
 }
 
-function PlayerCard({ player, onPress, onAddFriend, saving, unreadCount }: {
+/**
+ * PulsingUnreadDot — visual "ping" used next to a friend's name when
+ * they have unread DMs. The dot scales 1.0 → 1.35 and fades 1.0 → 0.55
+ * on a 900 ms loop to draw the eye without being obnoxious.
+ *
+ * Uses Animated (native-driver) so the pulse runs on the UI thread and
+ * doesn't hitch the Friends list when it's scrolling. When `count` is
+ * 0 we render nothing — pulse loop is torn down cleanly via the effect
+ * cleanup.
+ */
+function PulsingUnreadDot({ count, testID }: { count: number; testID?: string }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const opacity = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (count <= 0) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(scale, {
+            toValue: 1.35,
+            duration: 450,
+            easing: Easing.out(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(opacity, {
+            toValue: 0.55,
+            duration: 450,
+            easing: Easing.out(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.parallel([
+          Animated.timing(scale, {
+            toValue: 1,
+            duration: 450,
+            easing: Easing.in(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(opacity, {
+            toValue: 1,
+            duration: 450,
+            easing: Easing.in(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      // Reset to resting state so a transient count=0 doesn't leave
+      // the dot frozen mid-animation if it remounts.
+      scale.setValue(1);
+      opacity.setValue(1);
+    };
+  }, [count, scale, opacity]);
+
+  if (count <= 0) return null;
+  return (
+    <Animated.View
+      testID={testID}
+      style={[styles.unreadBadge, { transform: [{ scale }], opacity }]}
+    >
+      <Text style={styles.unreadBadgeText}>{count > 9 ? '9+' : count}</Text>
+    </Animated.View>
+  );
+}
+
+function PlayerCard({ player, onPress, onAddFriend, onMessage, saving, unreadCount }: {
   player: Player;
   onPress: () => void;
   onAddFriend?: () => void;
+  onMessage?: () => void;
   saving?: boolean;
   unreadCount?: number;
 }) {
   const adminView = !!player.is_admin_view;
-  const hasUnread = (unreadCount || 0) > 0;
   // ── Admin moderation visuals (only the Creator sees these flags) ──
   // - Red border around the entire card while the player is currently
   //   suspended (transient — auto-clears when suspension expires/lifts)
@@ -477,13 +548,7 @@ function PlayerCard({ player, onPress, onAddFriend, saving, unreadCount }: {
             />
           ) : null}
           <Text style={[styles.playerName, adminView && { color: '#FFD700' }]} numberOfLines={1}>{player.name}</Text>
-          {hasUnread && (
-            <View style={styles.unreadBadge} testID={`friend-unread-${player.user_id}`}>
-              <Text style={styles.unreadBadgeText}>
-                {(unreadCount || 0) > 9 ? '9+' : unreadCount}
-              </Text>
-            </View>
-          )}
+          <PulsingUnreadDot count={unreadCount || 0} testID={`friend-unread-${player.user_id}`} />
           {isCurrentlySuspended ? (
             <View style={styles.suspendedPill} testID={`suspended-pill-${player.user_id}`}>
               <Ionicons name="ban" size={9} color={colors.red} />
@@ -512,7 +577,31 @@ function PlayerCard({ player, onPress, onAddFriend, saving, unreadCount }: {
           </View>
         ) : null}
       </View>
-      {onAddFriend ? <FriendActionButton player={player} onAddFriend={onAddFriend} saving={saving} /> : null}
+      {/* Right-edge action cluster. For friends we show a quick-access
+          cyan "Message" IconButton so users can jump straight into a
+          DM thread without opening the profile modal first (1 tap
+          instead of 3). For non-friends, we fall back to the original
+          "Add Friend" affordance. */}
+      {onMessage && player.friend_status === 'friends' ? (
+        <TouchableOpacity
+          onPress={(e) => {
+            // Stop the card-level onPress from ALSO firing and opening
+            // the profile modal — messaging is its own explicit intent.
+            e.stopPropagation();
+            onMessage();
+          }}
+          activeOpacity={0.75}
+          style={styles.quickMessageBtn}
+          accessibilityRole="button"
+          accessibilityLabel={`Message ${player.name}`}
+          testID={`friend-quick-message-${player.user_id}`}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Ionicons name="chatbubble-ellipses" size={18} color={colors.cyan} />
+        </TouchableOpacity>
+      ) : onAddFriend ? (
+        <FriendActionButton player={player} onAddFriend={onAddFriend} saving={saving} />
+      ) : null}
     </TouchableOpacity>
   );
 }
@@ -1409,6 +1498,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   unreadBadgeText: { color: '#fff', fontSize: 10, fontWeight: '900' },
+  // Quick-access chat button on each friend card — lets the user skip
+  // the profile-modal step when they just want to reply to a message.
+  quickMessageBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.cyan + '18',
+    borderWidth: 1,
+    borderColor: colors.cyan + '66',
+  },
 
   actionBtn: {
     flexDirection: 'row',
