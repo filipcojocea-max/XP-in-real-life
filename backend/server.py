@@ -5255,7 +5255,628 @@ async def debug_health_connect_error(
     return {"ok": True}
 
 
-# ── Push notification audit (use this to debug why a user isn't ──
+# ══════════════ Build Self-Confidence mini-app ══════════════════════
+# A new Library+ mini-app with four tracks:
+#   1) Social Speaking — daily speaking challenge + tips
+#   2) Physical Appearance — daily posture/movement challenge
+#   3) Dress with Confidence — AI photo coach (GPT-4o Vision) + weather
+#   4) Gratitude / Affirmations — daily prompt + positive statements
+#
+# Each track rotates a curated challenge per day so the user gets a
+# fresh prompt without repetition. Completions land in
+# `db.confidence_completions` and award a small XP nudge.
+
+CONFIDENCE_SOCIAL_CHALLENGES = [
+    {
+        "title": "Compliment a Stranger's Outfit",
+        "body": "Pay one genuine compliment to someone you don't know today — a barista, a classmate, a colleague. Keep it specific: 'That jacket suits you' beats 'You look nice'.",
+        "tips": [
+            "Lead with a smile so the compliment feels warm.",
+            "Be specific — mention the colour, the fit or the style.",
+            "Walk away after they thank you; don't hover for a reaction.",
+        ],
+        "examples": [
+            "\"Those shoes are clean — where'd you get them?\"",
+            "\"Great colour on that jumper, really suits you.\"",
+            "\"I love how you styled that shirt.\"",
+        ],
+    },
+    {
+        "title": "Ask a Question in Public",
+        "body": "Ask a cashier, a librarian or a coffee shop worker a real, non-transactional question today. 'What's your favourite thing on the menu?' counts.",
+        "tips": [
+            "Eye contact, then the question. Not a mumble downward.",
+            "Listen for 3 seconds after they answer — that's where the warmth lives.",
+        ],
+        "examples": [
+            "\"What's the most-loved drink you guys make?\"",
+            "\"What book would you recommend to someone who reads zero books?\"",
+            "\"Have you worked here long?\"",
+        ],
+    },
+    {
+        "title": "Speak Up in a Group",
+        "body": "In any group conversation today, share one opinion you'd normally keep to yourself. Even if it's small. Just voice it.",
+        "tips": [
+            "Don't open with 'this is probably stupid but…' — just say the thing.",
+            "Short sentences. Confidence isn't length, it's conviction.",
+        ],
+        "examples": [
+            "\"I actually disagree — I think the first option is better because…\"",
+            "\"I liked that movie.\" (and don't apologise for it)",
+        ],
+    },
+    {
+        "title": "Make Eye Contact for 3 Seconds",
+        "body": "In every conversation today, hold eye contact for at least three full seconds before breaking. Practice this with every person you speak to.",
+        "tips": [
+            "Aim between the eyes if direct contact feels too intense.",
+            "Blink naturally — no staring contest.",
+        ],
+        "examples": [
+            "Cashier hands you your change → 3 seconds + 'thanks'.",
+            "Coworker asks how your day is → 3 seconds + real answer.",
+        ],
+    },
+    {
+        "title": "Say Someone's Name",
+        "body": "Use the name of every person you talk to today at least once. Baristas, colleagues, the delivery driver. Names unlock warmth.",
+        "tips": [
+            "Read name-tags. 'Thanks, Maria.' is instant rapport.",
+            "If you forget a name, ask. 'Sorry, remind me?' is never awkward.",
+        ],
+        "examples": [
+            "\"Good one, Marcus.\"",
+            "\"Thanks for that, Aisha.\"",
+            "\"How was your weekend, Tom?\"",
+        ],
+    },
+    {
+        "title": "Start a Conversation with One Question",
+        "body": "Initiate ONE conversation today with someone you don't know well. A neighbour, a gym regular, a co-worker on another team. One open question gets it started.",
+        "tips": [
+            "'How's your day been?' almost always works.",
+            "Follow-up matters more than the opener. Ask a second question.",
+        ],
+        "examples": [
+            "\"What brings you here today?\"",
+            "\"Have you tried the [thing nearby] yet?\"",
+            "\"How long have you lived around here?\"",
+        ],
+    },
+    {
+        "title": "Tell a Short Story",
+        "body": "In one conversation today, tell a 60-second story from your week. Not a list of facts — a story with a beginning, a middle, and a small point.",
+        "tips": [
+            "Start with a hook: 'So the weirdest thing happened to me yesterday…'",
+            "Land it. End with 'and that's why I now…' or a punchline.",
+        ],
+        "examples": [
+            "The time you got on the wrong bus.",
+            "The argument you had with a self-checkout machine.",
+        ],
+    },
+    {
+        "title": "Accept a Compliment Cleanly",
+        "body": "If anyone compliments you today, say 'thank you' and nothing else. No deflecting, no downplaying, no 'oh this old thing'.",
+        "tips": [
+            "Accepting a compliment is a skill. It tells your brain you deserve it.",
+            "A smile + 'thank you' is a complete answer. Full stop.",
+        ],
+        "examples": [
+            "\"That's kind of you — thank you.\"",
+            "Just: \"Thank you.\"",
+        ],
+    },
+    {
+        "title": "Ask for Someone's Recommendation",
+        "body": "Ask one person for a recommendation today — a show, a book, a restaurant. People LOVE to recommend. It's instant connection.",
+        "tips": [
+            "Ask one follow-up: 'Why that one?'",
+            "Actually try their recommendation and report back another day.",
+        ],
+        "examples": [
+            "\"What's a show I should be watching right now?\"",
+            "\"If I only ever tried one thing on this menu, what would it be?\"",
+        ],
+    },
+    {
+        "title": "Disagree Politely With Someone",
+        "body": "Practice respectful disagreement today. Not aggression — just standing by your view. 'I see it differently. Here's why…' builds real self-respect.",
+        "tips": [
+            "Acknowledge first: 'I hear you, but I actually think…'",
+            "Disagree with the idea, not the person.",
+        ],
+        "examples": [
+            "\"Interesting — I actually think the opposite, because…\"",
+            "\"Respectfully, I'd push back on that.\"",
+        ],
+    },
+    {
+        "title": "Pause Before You Answer",
+        "body": "Today, pause 2 whole seconds before answering any question. No rushing, no filler words. Silence reads as confidence.",
+        "tips": [
+            "'Hmm' is not a pause. Real silence is.",
+            "Your answer comes out cleaner, too.",
+        ],
+        "examples": [
+            "\"What are you doing this weekend?\" → (pause) → \"Actually, I'm…\"",
+        ],
+    },
+    {
+        "title": "Compliment a Friend's Character",
+        "body": "Compliment one friend today on who they are, not what they did. 'You're so dependable' lands deeper than 'thanks for the ride'.",
+        "tips": [
+            "Specific traits > generic. 'You're really loyal' > 'You're great'.",
+            "Say it out loud. Not a text message.",
+        ],
+        "examples": [
+            "\"You're one of the funniest people I know.\"",
+            "\"I admire how calm you stay under pressure.\"",
+        ],
+    },
+    {
+        "title": "Speak Slightly Louder",
+        "body": "All day today, speak 10% louder than you normally would. Not shouting — just clearer. It forces your body to own the space.",
+        "tips": [
+            "Project from your chest, not your throat.",
+            "If someone looks at you when you talk, you nailed it.",
+        ],
+        "examples": [
+            "Order your coffee at 10% volume.",
+            "Say 'good morning' at 10% volume.",
+        ],
+    },
+    {
+        "title": "End a Conversation Confidently",
+        "body": "Practice ending a conversation cleanly today. 'Hey, I've gotta run — great to chat.' No awkward trailing off. You decide when you leave.",
+        "tips": [
+            "A clean exit beats a mumbled 'anyway…' every time.",
+            "Smile. Walk. Don't look back.",
+        ],
+        "examples": [
+            "\"This was great — I'll catch up with you soon.\"",
+            "\"Okay, I'm off. Have a good one!\"",
+        ],
+    },
+    {
+        "title": "Ask for What You Want",
+        "body": "Ask directly for ONE thing you want today. A discount, an extra sauce, a different seat, a favour. No apologies, no 'sorry to bother you'.",
+        "tips": [
+            "'Could I…' is confident. 'Sorry, would it be possible to maybe…' is not.",
+            "The worst they say is no — and that's still a clean outcome.",
+        ],
+        "examples": [
+            "\"Could I swap this for a window seat?\"",
+            "\"Any chance of a student discount?\"",
+        ],
+    },
+]
+
+CONFIDENCE_PHYSICAL_CHALLENGES = [
+    {
+        "title": "Walk Tall — Eyes on the Horizon",
+        "body": "Every time you walk today, look 15 metres ahead — not down at your phone or your feet. Chin parallel to the ground, shoulders back.",
+        "tips": [
+            "Pretend there's a string pulling the top of your head up.",
+            "Pick a distant point and walk toward it.",
+        ],
+        "drills": [
+            "3 laps around your block, eyes forward.",
+            "Supermarket trip — phone in pocket the whole time.",
+        ],
+    },
+    {
+        "title": "The Shoulder Reset",
+        "body": "Every hour today, do the shoulder reset: pull shoulders up to ears, back, then down. Hold 5 seconds. It undoes hunching from screens.",
+        "tips": [
+            "Set an hourly phone reminder.",
+            "Your back should feel slightly stretched each time.",
+        ],
+        "drills": ["10 reps per hour for 8 waking hours = 80 reps."],
+    },
+    {
+        "title": "50 Push-ups (Break 'Em Up)",
+        "body": "50 push-ups total by end of day. Break them into any number of sets. Knees down is fine. Form > ego.",
+        "tips": [
+            "Keep a flat back — no sagging hips.",
+            "Full range of motion. Chest to floor.",
+        ],
+        "drills": ["5 × 10 spread through the day works great."],
+    },
+    {
+        "title": "Plank — 3 Holds",
+        "body": "Hold a plank 3 times today. Aim for 30-60 seconds each. Core strength = posture = presence.",
+        "tips": [
+            "Straight line from heels to head.",
+            "Squeeze your glutes the whole time — it protects your lower back.",
+        ],
+        "drills": ["Morning, midday, evening."],
+    },
+    {
+        "title": "Walk 6,000+ Steps",
+        "body": "Hit 6,000 steps today. Break it into two walks if needed. Fresh air + motion = confidence shift.",
+        "tips": [
+            "Count a lunch walk as your commute.",
+            "Leave the earphones out for one of them. Notice the world.",
+        ],
+        "drills": ["Use your phone's step counter or Health Connect."],
+    },
+    {
+        "title": "Mirror Posture Check — 5 times",
+        "body": "Catch yourself in any mirror today and reset your posture: chin up, shoulders back, belly pulled in slightly. Do it 5 times throughout the day.",
+        "tips": [
+            "Don't judge the reflection — just correct the posture and move on.",
+            "Each reset trains muscle memory.",
+        ],
+        "drills": ["Bathroom mirror, shop windows, phone front-camera."],
+    },
+    {
+        "title": "30 Squats",
+        "body": "Do 30 bodyweight squats at any point today. Quads and glutes are posture muscles — stronger legs = stronger stance.",
+        "tips": [
+            "Knees tracking over toes.",
+            "Chest tall, don't collapse forward.",
+        ],
+        "drills": ["2 × 15 works. Or 3 × 10."],
+    },
+    {
+        "title": "5-Minute Stretch Flow",
+        "body": "Five minutes of stretching today. Focus on chest, hip flexors and hamstrings — the areas that get locked from sitting.",
+        "tips": [
+            "Doorframe chest stretch: 30 seconds each side.",
+            "Couch stretch for hip flexors: 60 seconds each leg.",
+        ],
+        "drills": ["First thing after waking, or right before bed."],
+    },
+    {
+        "title": "Power-Pose Before Something Intimidating",
+        "body": "Before any intimidating thing today — a meeting, a call, a workout — stand feet wide, hands on hips, chin up for 60 seconds. Yes, it actually works.",
+        "tips": [
+            "Do it in the bathroom if it feels weird.",
+            "Breathe deep — slow in, slow out.",
+        ],
+        "drills": ["Aim for at least one power-pose today."],
+    },
+    {
+        "title": "Drink 2 Litres of Water",
+        "body": "Hydration = skin quality + energy = confidence by the afternoon. 2L today.",
+        "tips": [
+            "Big bottle on your desk. Refill when empty.",
+            "One glass before every meal is an easy win.",
+        ],
+        "drills": ["Fill a 1L bottle twice. Done."],
+    },
+    {
+        "title": "No Slouching While Sitting",
+        "body": "Every time you sit today — desk, couch, car — make sure your spine is tall. If your phone or laptop forces you to hunch, raise it.",
+        "tips": [
+            "Laptop at eye level. Phone at eye level.",
+            "If your chair forces a slouch, swap chairs.",
+        ],
+        "drills": ["Every 20 minutes: check your back against the chair."],
+    },
+    {
+        "title": "Go Outside for 20 Minutes",
+        "body": "20 minutes outdoors today, phone-free if possible. Sunlight + movement + perspective. Nothing builds presence faster.",
+        "tips": [
+            "Morning sun hits different. It sets your circadian rhythm.",
+            "Wear something you feel good in — even just for a walk.",
+        ],
+        "drills": ["Morning coffee outside. Evening walk after dinner."],
+    },
+    {
+        "title": "Walk Without Your Phone — 10 Minutes",
+        "body": "Leave the phone behind for one 10-minute walk today. Just you, your breath and the world. Phones destroy posture and presence.",
+        "tips": [
+            "Around the block after dinner works perfectly.",
+            "Notice 3 things you've never noticed before.",
+        ],
+        "drills": ["One 10-minute phone-free walk."],
+    },
+    {
+        "title": "Breath Work — 4-7-8 × 4 rounds",
+        "body": "Practice the 4-7-8 breath today: inhale 4 seconds, hold 7, exhale 8. Four full rounds. Drops your heart rate and gives you a grounded, calm presence.",
+        "tips": [
+            "Nose in, mouth out.",
+            "If you're new, start 3-5-7 and build up.",
+        ],
+        "drills": ["Morning. Before bed. Before anything stressful."],
+    },
+    {
+        "title": "Walk a Little Slower",
+        "body": "All day today, walk 10% slower than usual. Rushed walking reads as nervous. Slower, deliberate steps read as grounded.",
+        "tips": [
+            "Longer strides, heel to toe.",
+            "You'll still arrive on time. Try it.",
+        ],
+        "drills": ["Commute. Grocery store. Any corridor."],
+    },
+]
+
+CONFIDENCE_GRATITUDE_PROMPTS = [
+    {
+        "title": "Three Things You're Grateful For",
+        "body": "Write 3 specific things you're grateful for today. Specific, not generic. 'My morning coffee' beats 'health'.",
+        "affirmation": "I have more than I realise. I am taken care of.",
+    },
+    {
+        "title": "Speak Truth Over Yourself",
+        "body": "Say these out loud, slowly: \"I am loved. I am smart. I am unique. I am worthy of good things. I am growing every day.\"",
+        "affirmation": "My words shape my mind. I choose words that build me up.",
+    },
+    {
+        "title": "One Thing You Did Well Yesterday",
+        "body": "Write ONE thing you did well yesterday — however small. Made your bed? That counts. Held a difficult conversation? That counts more.",
+        "affirmation": "I'm allowed to be proud of my small wins.",
+    },
+    {
+        "title": "Someone Who Loves You",
+        "body": "Name one person who loves you. Write WHY they love you. You're not imagining it — they genuinely do. Let that sink in.",
+        "affirmation": "I am someone worth loving.",
+    },
+    {
+        "title": "A Compliment You Received",
+        "body": "Recall a compliment someone gave you recently. Write it out. Believe it — they saw something real.",
+        "affirmation": "When others see good in me, I trust their eyes.",
+    },
+    {
+        "title": "Your Unique Strength",
+        "body": "Name one strength ONLY you have in your current group of friends or colleagues. The one thing you bring that they don't.",
+        "affirmation": "My strengths are needed. I bring value no one else can.",
+    },
+    {
+        "title": "A Small Joy Today",
+        "body": "Point to one small joy already in your day — a song, a taste, a warm feeling. Let it count.",
+        "affirmation": "Joy isn't rare. I just have to notice it.",
+    },
+    {
+        "title": "A Battle You've Survived",
+        "body": "Name one hard season you've already survived. Write one sentence about how it made you stronger.",
+        "affirmation": "I've been through worse and I'm still here. I'm resilient.",
+    },
+    {
+        "title": "Something You Handled Well",
+        "body": "Describe one thing you handled well this week. However small. Pay yourself the credit you'd pay a friend.",
+        "affirmation": "I'm capable. I'm proving it every day.",
+    },
+    {
+        "title": "Let Go of One Heavy Thing",
+        "body": "Name one thing weighing on your mind. Write it down, then write: 'I release this for today.' You can pick it up tomorrow if you must.",
+        "affirmation": "I'm not obligated to carry everything all at once.",
+    },
+    {
+        "title": "Your Body Did a Good Thing",
+        "body": "Your body woke up, breathed, moved you through the day. Thank one specific part of it. Your legs for walking. Your hands for holding.",
+        "affirmation": "My body is on my team. I appreciate it.",
+    },
+    {
+        "title": "Who You're Becoming",
+        "body": "Write one sentence describing who you're BECOMING — not who you are right now. That future person is already showing up.",
+        "affirmation": "I'm becoming the person I want to be, step by step.",
+    },
+    {
+        "title": "Three Words About You",
+        "body": "List 3 adjectives that describe the BEST version of you. Read them back. Out loud. Mean them.",
+        "affirmation": "These words are mine. I own them.",
+    },
+    {
+        "title": "A Tiny Miracle",
+        "body": "Describe one thing today that, if you really thought about it, is actually a small miracle. Coffee. A warm shower. The sunrise.",
+        "affirmation": "Ordinary moments are full of wonder when I pay attention.",
+    },
+    {
+        "title": "Kindness You Received",
+        "body": "Recall one act of kindness someone showed you recently. Name the person. Thank them silently (or actually).",
+        "affirmation": "I am surrounded by kindness. I notice it more each day.",
+    },
+]
+
+
+def _today_index(n: int, offset: int = 0) -> int:
+    """Rotate a challenge list by day-of-year so every user sees the
+    same content on the same calendar day, and the list cycles without
+    repetition inside a single rotation window."""
+    today = datetime.utcnow().date()
+    return (today.toordinal() + offset) % n
+
+
+@api_router.get("/confidence/daily")
+async def confidence_daily(user_id: str = Depends(get_user_or_legacy)):
+    """Return today's challenge for each non-AI track + the user's
+    completion status for today. The frontend uses this to paint the
+    landing page of the mini-app."""
+    social = CONFIDENCE_SOCIAL_CHALLENGES[_today_index(len(CONFIDENCE_SOCIAL_CHALLENGES))]
+    physical = CONFIDENCE_PHYSICAL_CHALLENGES[_today_index(len(CONFIDENCE_PHYSICAL_CHALLENGES), 3)]
+    gratitude = CONFIDENCE_GRATITUDE_PROMPTS[_today_index(len(CONFIDENCE_GRATITUDE_PROMPTS), 7)]
+    today = datetime.utcnow().date().isoformat()
+    done = await db.confidence_completions.find(
+        {"user_id": user_id, "date": today},
+        {"_id": 0, "track": 1},
+    ).to_list(10)
+    done_tracks = {d.get("track") for d in done}
+    return {
+        "date": today,
+        "social": {**social, "track": "social", "done": "social" in done_tracks},
+        "physical": {**physical, "track": "physical", "done": "physical" in done_tracks},
+        "gratitude": {**gratitude, "track": "gratitude", "done": "gratitude" in done_tracks},
+    }
+
+
+class ConfidenceCompletePayload(BaseModel):
+    track: Literal["social", "physical", "gratitude", "dress"]
+    note: Optional[str] = None
+
+
+@api_router.post("/confidence/complete")
+async def confidence_complete(
+    body: ConfidenceCompletePayload,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Mark a daily confidence challenge as done for today. Idempotent:
+    a second POST for the same track on the same day is a no-op. Awards
+    +15 XP per completion (small nudge, but it adds up to ~60 XP/day if
+    you hit all four tracks)."""
+    today = datetime.utcnow().date().isoformat()
+    existing = await db.confidence_completions.find_one(
+        {"user_id": user_id, "date": today, "track": body.track}
+    )
+    if existing:
+        return {"ok": True, "already_done": True}
+    await db.confidence_completions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "date": today,
+        "track": body.track,
+        "note": (body.note or "")[:500],
+        "created_at": now_iso(),
+    })
+    # Tiny XP nudge — 15 per completion. 4 tracks = 60 XP for the day.
+    try:
+        xp_gain = 15
+        await db.profile.update_one(
+            {"_id": user_id},
+            {"$inc": {"total_xp": xp_gain}},
+        )
+        tz_off = int((await db.profile.find_one({"_id": user_id}, {"tz_offset_minutes": 1}) or {}).get("tz_offset_minutes", 0) or 0)
+        await _log_xp_event(user_id, xp_gain, tz_off)
+    except Exception as e:
+        logger.warning("[confidence] XP award failed: %s", e)
+    return {"ok": True, "already_done": False, "xp_awarded": 15}
+
+
+# ── Dress with Confidence — AI outfit coach ───────────────────────
+class DressAdvicePayload(BaseModel):
+    photo_base64: Optional[str] = None      # optional selfie of the outfit
+    message: str                             # the user's question
+    event_context: Optional[str] = None      # e.g. "party", "office", "outside walk"
+    weather_hint: Optional[str] = None       # e.g. "15°C, light rain"
+    history: Optional[List[dict]] = None  # [{role, content}] for multi-turn
+
+
+@api_router.post("/confidence/dress-advice")
+async def confidence_dress_advice(
+    body: DressAdvicePayload,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """A warm, positive AI stylist that reads a user's selfie of their
+    outfit and answers questions like 'is this good for a party?' Its
+    JOB is to remove doubt, not amplify it. It compliments specifically,
+    explains style, and flags weather/event practicalities.
+
+    We use GPT-4o-mini (cheap + fast) via emergentintegrations with the
+    Emergent LLM key. Photo is downscaled to 640 px for speed.
+    """
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+    except Exception as e:
+        raise HTTPException(503, f"AI not available: {e}")
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        raise HTTPException(503, "No LLM key configured")
+
+    system = (
+        "You are a warm, encouraging personal-style coach helping someone "
+        "feel confident about what they're wearing. Your #1 job is to "
+        "REMOVE DOUBT, not create it. Be genuine — don't flatter empty "
+        "compliments — but be firmly on their side.\n\n"
+        "RULES:\n"
+        "- If a photo is attached, start with ONE specific compliment about "
+        "the outfit (colour, cut, fit, or vibe) before answering.\n"
+        "- If they ask 'is this good for X event', describe the style of the "
+        "outfit in one short line, then give a confident YES / YES WITH ONE "
+        "TWEAK / CONSIDER ONE SWAP verdict.\n"
+        "- If event_context is 'outside' or 'party' or 'office', factor that "
+        "in. If weather_hint is present, mention it practically (bring a "
+        "jacket, layer up, etc).\n"
+        "- Keep the whole reply under 120 words. No lists unless asked.\n"
+        "- NEVER say 'this won't look good' or 'you should change'. Always "
+        "frame as 'try swapping X for Y' or 'add Z to elevate it'.\n"
+        "- End with a one-line confidence booster.\n"
+        f"\nEvent context: {body.event_context or 'not specified'}"
+        f"\nWeather context: {body.weather_hint or 'not provided'}"
+    )
+
+    chat = LlmChat(
+        api_key=api_key,
+        session_id=f"dress-{user_id[:8]}-{uuid.uuid4().hex[:6]}",
+        system_message=system,
+    ).with_model("openai", "gpt-4o-mini")
+
+    # Feed prior turns so the coach remembers what's been discussed.
+    for turn in (body.history or [])[-6:]:  # cap to last 6 for latency
+        role = (turn.get("role") or "").lower()
+        content = turn.get("content") or ""
+        if not content:
+            continue
+        if role == "user":
+            await chat.send_message(UserMessage(text=content))
+
+    # Attach photo if present — downscaled for speed.
+    file_contents = []
+    if body.photo_base64:
+        small = _downscale_image_b64(body.photo_base64, max_dim=640, quality=80)
+        file_contents.append(ImageContent(image_base64=small))
+    try:
+        response = await chat.send_message(UserMessage(
+            text=body.message,
+            file_contents=file_contents if file_contents else None,
+        ))
+    except Exception as e:
+        raise HTTPException(502, f"AI error: {e}")
+    return {"reply": (response or "").strip()}
+
+
+@api_router.get("/confidence/weather")
+async def confidence_weather(lat: float, lon: float):
+    """Thin wrapper over open-meteo (no API key needed) — returns a
+    compact weather snapshot the stylist can use. Purposely minimal so
+    we don't require a third-party key to ship this feature."""
+    try:
+        import httpx
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&current=temperature_2m,precipitation,wind_speed_10m,weather_code"
+            "&timezone=auto"
+        )
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+        cur = (data or {}).get("current") or {}
+        temp = cur.get("temperature_2m")
+        precip = cur.get("precipitation")
+        wind = cur.get("wind_speed_10m")
+        code = cur.get("weather_code")
+        # Turn the numeric weather code into a short string.
+        code_map = {
+            0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+            45: "foggy", 48: "foggy",
+            51: "light drizzle", 53: "drizzle", 55: "heavy drizzle",
+            61: "light rain", 63: "rain", 65: "heavy rain",
+            71: "light snow", 73: "snow", 75: "heavy snow",
+            80: "rain showers", 81: "rain showers", 82: "heavy showers",
+            95: "thunderstorm", 96: "thunderstorm with hail", 99: "severe thunderstorm",
+        }
+        condition = code_map.get(int(code or -1), "unknown")
+        hint_bits = [f"{temp}°C" if temp is not None else "", condition]
+        if (precip or 0) > 0.1:
+            hint_bits.append(f"rain {precip}mm")
+        if (wind or 0) >= 8:
+            hint_bits.append(f"windy ({wind} km/h)")
+        return {
+            "temperature_c": temp,
+            "condition": condition,
+            "precipitation_mm": precip,
+            "wind_kmh": wind,
+            "hint": ", ".join([b for b in hint_bits if b]),
+        }
+    except Exception as e:
+        raise HTTPException(502, f"weather unavailable: {e}")
+
+
+
 #    receiving notifications). Returns the caller's registered token(s),
 #    platform, last update time. If the list is empty, the device has
 #    never successfully registered — that alone explains why no push

@@ -505,6 +505,39 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ entry_id, edited_base64 }),
     }),
+  // ── Build Self-Confidence mini-app ──────────────────────────
+  // Today's daily challenge for each non-AI track + completion state.
+  confidenceDaily: () =>
+    req<{
+      date: string;
+      social: ConfidenceChallenge;
+      physical: ConfidenceChallenge;
+      gratitude: ConfidenceChallenge;
+    }>('/confidence/daily'),
+  confidenceComplete: (track: 'social' | 'physical' | 'gratitude' | 'dress', note?: string) =>
+    req<{ ok: boolean; already_done: boolean; xp_awarded?: number }>('/confidence/complete', {
+      method: 'POST',
+      body: JSON.stringify({ track, note: note || '' }),
+    }),
+  confidenceDressAdvice: (payload: {
+    photo_base64?: string;
+    message: string;
+    event_context?: string;
+    weather_hint?: string;
+    history?: { role: 'user' | 'assistant'; content: string }[];
+  }) =>
+    req<{ reply: string }>('/confidence/dress-advice', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  confidenceWeather: (lat: number, lon: number) =>
+    req<{
+      temperature_c: number | null;
+      condition: string;
+      precipitation_mm: number | null;
+      wind_kmh: number | null;
+      hint: string;
+    }>(`/confidence/weather?lat=${lat}&lon=${lon}`),
 
   // ─── Spot the Object — Multiplayer/Lobby (Phase 2) ──────────────
   spotMatchCreate: (friend_ids: string[]) =>
@@ -1159,3 +1192,15 @@ export type AdminReport = {
   dismissed_at: string | null;
 };
 
+
+// ── Build Self-Confidence mini-app ────────────────────────────────
+export type ConfidenceChallenge = {
+  track: 'social' | 'physical' | 'gratitude';
+  title: string;
+  body: string;
+  tips?: string[];
+  examples?: string[];
+  drills?: string[];
+  affirmation?: string;
+  done: boolean;
+};
