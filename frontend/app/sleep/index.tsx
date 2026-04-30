@@ -465,7 +465,9 @@ function HealthTab() {
   const onConnect = async () => {
     setConnecting(true);
     try {
+      console.log('[HC] onConnect pressed — starting handshake');
       const ok = await requestHealthConnectPermissions();
+      console.log('[HC] handshake result:', ok);
       if (ok) await loadAll();
       else Alert.alert(
         'Permission needed',
@@ -476,6 +478,20 @@ function HealthTab() {
         ],
       );
     } catch (e: any) {
+      console.error('[HC] onConnect caught fatal:', e);
+      // Also ship to the backend so we can audit why the native handshake
+      // died — user might see a friendly Alert but we still want the raw
+      // error server-side for debugging.
+      try {
+        const { api } = await import('../../src/api');
+        await api.reportHealthConnectError({
+          stage: 'onConnect_catch',
+          message: String(e?.message || e || '').slice(0, 500),
+          error_name: String(e?.name || e?.code || 'Error').slice(0, 60),
+          platform: Platform.OS,
+          os_version: String(Platform.Version ?? ''),
+        }).catch(() => {});
+      } catch {}
       Alert.alert(
         'Connection failed',
         String(e?.message || e) + '\n\nIf this keeps happening, open Health Connect and grant permissions manually.',

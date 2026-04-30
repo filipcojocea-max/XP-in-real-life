@@ -560,6 +560,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ token, platform }),
     }),
+  // Health Connect debug reporter — used by the Sleep / "Connect Samsung
+  // Health" flow to ship native crashes + error messages to the server
+  // so we can audit why the system permission dialog never appears.
+  reportHealthConnectError: (payload: {
+    stage: string;
+    message?: string;
+    error_name?: string;
+    platform?: string;
+    os_version?: string;
+    device?: string;
+    app_version?: string;
+    extra?: Record<string, any>;
+  }) =>
+    req<{ ok: boolean }>('/debug/health-connect-error', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   // ─── Admin reports (Creator only) ─────────────────────────────
   adminReportsList: () =>

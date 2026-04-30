@@ -20,6 +20,30 @@
  * dataset returned by the backend so the dashboard always renders something.
  */
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
+
+// ── Crash reporter ──────────────────────────────────────────────────────
+// Posts every native Health-Connect failure to the backend so we can audit
+// why the system permission dialog doesn't appear. Defensive: never throws.
+async function reportHcError(stage: string, err: any, extra?: Record<string, any>) {
+  try {
+    console.error(`[HC:${stage}]`, err);
+    const { api } = await import('./api');
+    const cfg: any = Constants?.expoConfig ?? (Constants as any)?.manifest;
+    await api.reportHealthConnectError({
+      stage,
+      message: String(err?.message || err || '').slice(0, 500),
+      error_name: String(err?.name || err?.code || 'Error').slice(0, 60),
+      platform: Platform.OS,
+      os_version: String(Platform.Version ?? ''),
+      device: Constants?.deviceName || '',
+      app_version: cfg?.version || '',
+      extra: extra || {},
+    }).catch(() => {});
+  } catch {
+    // never let the reporter itself blow up the native call
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────────────────
 export type SleepStage =
@@ -149,6 +173,7 @@ export async function requestPermissions(): Promise<boolean> {
   if (!hc) {
     // The native module is missing — happens in Expo Go and old dev
     // builds that haven't been re-prebuilt after adding the dependency.
+    await reportHcError('module_missing', HC_LOAD_ERROR || 'tryLoadHC returned null');
     throw new Error(
       'Health Connect is not available in this build. Re-build the app with the latest dev client to enable Samsung Health integration.',
     );
@@ -162,21 +187,25 @@ export async function requestPermissions(): Promise<boolean> {
   try {
     availability = await getAvailability();
   } catch (e) {
+    await reportHcError('availability', e);
     throw new Error(
       'Health Connect could not be reached. Please install or update the Health Connect app from the Play Store and try again.',
     );
   }
   if (availability === 'not_installed') {
+    await reportHcError('not_installed', 'getAvailability=not_installed');
     throw new Error(
       'Health Connect app is not installed on this device. Install it from the Play Store and try again.',
     );
   }
   if (availability === 'update_required') {
+    await reportHcError('update_required', 'getAvailability=update_required');
     throw new Error(
       'Your Health Connect app is out of date. Update it from the Play Store and try again.',
     );
   }
   if (availability !== 'available') {
+    await reportHcError('availability_unknown', `value=${availability}`);
     throw new Error(
       'Samsung Health is not available on this device or build.',
     );
@@ -188,6 +217,7 @@ export async function requestPermissions(): Promise<boolean> {
   try {
     await hc.initialize();
   } catch (e) {
+    await reportHcError('initialize', e);
     throw new Error(
       'Health Connect could not be initialized. Make sure the Health Connect app is installed, updated and that this app has been granted access in Android settings.',
     );
@@ -203,12 +233,14 @@ export async function requestPermissions(): Promise<boolean> {
     const out = await hc.requestPermission(REQUIRED_PERMISSIONS);
     if (Array.isArray(out) && out.length > 0) anyGranted = true;
   } catch (e) {
+    await reportHcError('requestPermission_bulk', e, { perms: REQUIRED_PERMISSIONS });
     console.log('[HC] bulk requestPermission failed, falling back:', e);
     for (const perm of REQUIRED_PERMISSIONS) {
       try {
         const out = await hc.requestPermission([perm]);
         if (Array.isArray(out) && out.length > 0) anyGranted = true;
       } catch (e2) {
+        await reportHcError('requestPermission_single', e2, { perm });
         console.log('[HC] requestPermission failed for', perm, e2);
       }
     }
@@ -217,7 +249,8 @@ export async function requestPermissions(): Promise<boolean> {
   // Final fallback — re-query whatever the user actually granted.
   try {
     return await hasGrantedPermissions();
-  } catch {
+  } catch (e) {
+    await reportHcError('hasGrantedPermissions', e);
     return false;
   }
 }

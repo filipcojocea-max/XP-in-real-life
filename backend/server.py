@@ -5012,9 +5012,6 @@ async def messages_unread_summary(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.post("/push/register-token")
 async def push_register_token(body: PushTokenRegisterPayload, user_id: str = Depends(get_user_or_legacy)):
-    # Loud, unambiguous logging so we can see every request hitting this
-    # endpoint in the server logs — the user explicitly asked for this
-    # so they can confirm "the request actually arrived".
     print(
         f"[push/register-token] HIT user_id={user_id} "
         f"token_prefix={(body.token or '')[:30]!r} "
@@ -5045,6 +5042,52 @@ async def push_register_token(body: PushTokenRegisterPayload, user_id: str = Dep
         flush=True,
     )
     return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "upserted": bool(res.upserted_id)}
+
+
+# ── Client-side crash audit (Health Connect) ─────────────────────
+# Receives error reports from the Samsung Health "Connect" button
+# when the native Health Connect handshake fails. We log them loudly
+# to stdout AND persist to MongoDB so the developer can diagnose even
+# without direct logcat access to the user's device.
+class HealthConnectErrorPayload(BaseModel):
+    stage: str            # e.g. "availability", "initialize", "requestPermission", "onConnect_catch"
+    message: Optional[str] = None
+    error_name: Optional[str] = None
+    platform: Optional[str] = None
+    os_version: Optional[str] = None
+    device: Optional[str] = None
+    app_version: Optional[str] = None
+    extra: Optional[dict] = None
+
+
+@api_router.post("/debug/health-connect-error")
+async def debug_health_connect_error(
+    body: HealthConnectErrorPayload,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    now = now_iso()
+    print(
+        f"[HC-ERROR] user_id={user_id} stage={body.stage!r} "
+        f"msg={(body.message or '')[:200]!r} platform={body.platform!r} "
+        f"os={body.os_version!r} device={body.device!r} app_v={body.app_version!r}",
+        flush=True,
+    )
+    logger.warning(
+        "[HC-ERROR] uid=%s stage=%s msg=%s", user_id, body.stage, body.message,
+    )
+    await db.health_connect_errors.insert_one({
+        "user_id": user_id,
+        "stage": body.stage,
+        "message": body.message,
+        "error_name": body.error_name,
+        "platform": body.platform,
+        "os_version": body.os_version,
+        "device": body.device,
+        "app_version": body.app_version,
+        "extra": body.extra or {},
+        "created_at": now,
+    })
+    return {"ok": True}
 
 
 # ── Push notification audit (use this to debug why a user isn't ──
