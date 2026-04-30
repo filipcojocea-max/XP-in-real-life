@@ -173,6 +173,10 @@ function PlanTab({ profile, onChanged }: { profile: SleepProfile; onChanged: () 
   const [regenerating, setRegenerating] = useState(false);
   const [showRegen, setShowRegen] = useState(false);
   const [feedback, setFeedback] = useState('');
+  // Collapsed by default — the generated plan can be long and pushes
+  // the Routine + Check-ins off screen. Users can tap "View more" to
+  // read the full plan and "View less" to collapse it again.
+  const [planExpanded, setPlanExpanded] = useState(false);
 
   const regen = async () => {
     setRegenerating(true);
@@ -189,15 +193,46 @@ function PlanTab({ profile, onChanged }: { profile: SleepProfile; onChanged: () 
     }
   };
 
+  // Quick heuristic: only show the toggle when the plan is actually long
+  // enough to warrant collapsing. Short plans fit fine at 3 lines and
+  // the toggle would look pointless.
+  const planText = profile.plan || '';
+  const isLongPlan = planText.length > 180;
+
   return (
     <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-      {/* Plan card */}
+      {/* Plan card — collapsible to keep the tab compact */}
       <View style={styles.planCard}>
         <View style={styles.planKickerRow}>
           <Ionicons name="sparkles" size={14} color={colors.cyan} />
           <Text style={styles.planKicker}>YOUR PERSONALIZED PLAN</Text>
         </View>
-        <Text style={styles.planText}>{profile.plan}</Text>
+        <Text
+          style={styles.planText}
+          numberOfLines={isLongPlan && !planExpanded ? 3 : undefined}
+          ellipsizeMode="tail"
+        >
+          {planText}
+        </Text>
+        {isLongPlan ? (
+          <TouchableOpacity
+            testID="sleep-plan-toggle"
+            accessibilityRole="button"
+            accessibilityLabel={planExpanded ? 'Collapse plan' : 'Expand plan'}
+            onPress={() => setPlanExpanded((v) => !v)}
+            style={styles.planMoreBtn}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.planMoreText}>
+              {planExpanded ? 'View less' : 'View more'}
+            </Text>
+            <Ionicons
+              name={planExpanded ? 'chevron-up' : 'chevron-down'}
+              size={14}
+              color={colors.cyan}
+            />
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* Routine */}
@@ -1124,6 +1159,22 @@ const styles = StyleSheet.create({
   planKickerRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
   planKicker: { color: colors.cyan, fontSize: 10, fontWeight: '900', letterSpacing: 2 },
   planText: { color: colors.text, fontSize: 13.5, lineHeight: 21 },
+  // View more / View less toggle under the plan body.
+  planMoreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-start',
+    paddingTop: 10,
+    marginTop: 4,
+    minHeight: 32,
+  },
+  planMoreText: {
+    color: colors.cyan,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
 
   sectionTitle: {
     color: colors.text, fontSize: 16, fontWeight: '900', letterSpacing: -0.3,
