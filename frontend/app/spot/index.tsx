@@ -172,6 +172,31 @@ export default function SpotHub() {
           <Ionicons name="chevron-forward" size={20} color={colors.cyan} />
         </TouchableOpacity>
 
+        {/* Mode 4: Admin/Creator-only — Test & Train AI. Hidden for
+            everyone else. Tapping launches the dedicated training
+            screen which walks the Creator through capturing reference
+            photos for each trainable object (few-shot data injected
+            into every other player's vision check). */}
+        {profile?.is_admin ? (
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => router.push('/spot/train')}
+            testID="spot-mode-train"
+            style={[styles.modeCard, { borderColor: '#FFD700', backgroundColor: '#FFD70010' }]}
+          >
+            <View style={[styles.modeIcon, { backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
+              <Ionicons name="sparkles" size={26} color="#FFD700" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.modeTitle, { color: '#FFD700' }]}>Test & Train AI</Text>
+              <Text style={styles.modeDesc}>
+                Capture reference photos so the AI gets faster at recognising every object during gameplay.
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#FFD700" />
+          </TouchableOpacity>
+        ) : null}
+
         {/* Spot Points stat */}
         <View style={styles.statCard}>
           <View>

@@ -371,6 +371,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ gift_id: giftId }),
     }),
+
+  // ── Admin: Spot-the-Object Train Mode ───────────────────────────
+  adminSpotTrainingList: () =>
+    req<{ objects: SpotTrainingObject[] }>('/admin/spot/training/objects'),
+  adminSpotTrainingStart: (objectName?: string) =>
+    req<SpotTrainingSession>('/admin/spot/training/start', {
+      method: 'POST',
+      body: JSON.stringify({ object_name: objectName || null }),
+    }),
+  adminSpotTrainingCapture: (objectName: string, angle: string, imageBase64: string) =>
+    req<SpotTrainingCaptureResult>('/admin/spot/training/capture', {
+      method: 'POST',
+      body: JSON.stringify({ object_name: objectName, angle, image_base64: imageBase64 }),
+    }),
+  adminSpotTrainingSkip: (objectName: string) =>
+    req<{ ok: boolean }>('/admin/spot/training/skip', {
+      method: 'POST',
+      body: JSON.stringify({ object_name: objectName }),
+    }),
   sendFriendRequest: (userId: string) =>
     req<{ status: FriendStatus; message: string }>('/friends/request', {
       method: 'POST',
@@ -897,6 +916,37 @@ export type GiftEntry = {
   from_name: string;
   created_at: string;
   acknowledged_at?: string | null;
+};
+
+// ── Spot-the-Object Admin Train Mode ──────────────────────────────
+export type SpotTrainingObject = {
+  object_name: string;
+  samples_count: number;
+  target_count: number;
+  is_complete: boolean;
+  is_skipped: boolean;
+  last_trained_at?: string | null;
+};
+
+export type SpotTrainingSession = {
+  object_name: string;
+  angles: string[];
+  captured_count: number;
+  total_count: number;
+  next_angle: string | null;
+  instructions: string;
+};
+
+export type SpotTrainingCaptureResult = {
+  ok: boolean;
+  rejected: boolean;
+  reason?: string;
+  captured_count?: number;
+  total_count?: number;
+  progress_pct?: number;
+  next_angle?: string | null;
+  is_complete?: boolean;
+  confidence?: number;
 };
 
 // ───────────────────────── Leaderboard ─────────────────────────

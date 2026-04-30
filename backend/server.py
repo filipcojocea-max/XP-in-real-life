@@ -3752,14 +3752,262 @@ async def spot_get_object(user_id: str = Depends(get_user_or_legacy)):
     return {"object": obj, "challenge_id": str(uuid.uuid4())}
 
 
-async def _spot_vision_check(target_object: str, photo_base64: str) -> dict:
+# ═══════════════ Admin Train Mode (Spot the Object) ═══════════════
+# Object-specific angle prompts the AI walks the Creator through. If an
+# object isn't in this map we fall back to a generic 4-angle sequence.
+SPOT_TRAIN_ANGLES: dict[str, list[str]] = {
+    "scissors": ["closed (handles together)", "fully opened", "side angle", "tilted at 45°"],
+    "cat": ["face zoomed in", "side profile of body", "from above looking down", "full body in frame"],
+    "dog": ["face zoomed in", "side profile of body", "from above looking down", "full body in frame"],
+    "bird": ["close-up of head", "side profile", "wings/feathers detail", "full body in frame"],
+    "book": ["front cover flat", "spine view", "pages slightly open", "tilted at an angle"],
+    "pen": ["full length on flat surface", "tip close-up", "tilted in hand", "from above"],
+    "your phone": ["front screen on", "back side", "from edge", "tilted at angle"],
+    "laptop": ["open with screen visible", "closed lid", "side profile", "keyboard close-up"],
+    "headphones": ["both ear cups visible", "side profile", "folded flat", "from above"],
+    "cup": ["from the side", "from above showing rim", "tilted to show handle", "from below"],
+    "mug": ["from the side", "from above showing rim", "tilted to show handle", "from below"],
+    "bottle of water": ["full body label visible", "from the top", "tilted on its side", "close-up of cap"],
+    "shoe": ["side profile", "top down view", "sole visible", "back/heel view"],
+    "hat": ["worn or upright", "from above (top)", "side profile", "from inside (interior)"],
+    "wristwatch": ["face dial close-up", "side profile of band", "back of watch", "tilted at angle"],
+    "pair of glasses": ["folded flat", "open from front", "side profile", "tilted at angle"],
+    "wallet": ["closed flat", "open showing slots", "side profile (thickness)", "from above"],
+    "set of keys": ["spread on flat surface", "held bunched together", "close-up of one key", "from above"],
+    "remote control": ["front buttons facing up", "side profile", "back side", "tilted at angle"],
+    "candle": ["full standing", "from above (wick)", "side profile", "lit (flame visible)"],
+    "clock": ["face dial close-up", "side profile", "tilted at angle", "from below"],
+    "toothbrush": ["side profile bristles up", "from above (bristles)", "tilted at angle", "handle close-up"],
+    "bowl": ["from above (interior)", "side profile", "tilted at angle", "from below"],
+    "soft toy": ["face zoomed in", "side profile", "from above", "full body in frame"],
+}
+DEFAULT_TRAIN_ANGLES = ["front view", "side view", "top-down view", "tilted at an angle"]
+
+
+def _angles_for(object_name: str) -> list[str]:
+    return SPOT_TRAIN_ANGLES.get((object_name or "").lower().strip(), DEFAULT_TRAIN_ANGLES)
+
+
+@api_router.get("/admin/spot/training/objects")
+async def admin_spot_training_list(user_id: str = Depends(get_user_or_legacy)):
+    """Returns the master list of trainable objects with completion status.
+    Used by the Train Mode home screen to show progress + pick what's next.
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    docs = await db.spot_training.find({}, {"_id": 0}).to_list(2000)
+    by_name = {(d.get("object_name") or "").lower(): d for d in docs}
+    out = []
+    for obj in SPOT_OBJECTS:
+        d = by_name.get(obj.lower())
+        samples = (d or {}).get("samples") or []
+        target_count = len(_angles_for(obj))
+        out.append({
+            "object_name": obj,
+            "samples_count": len(samples),
+            "target_count": target_count,
+            "is_complete": len(samples) >= target_count,
+            "is_skipped": bool((d or {}).get("skipped")),
+            "last_trained_at": (d or {}).get("last_trained_at"),
+        })
+    return {"objects": out}
+
+
+class AdminSpotStartBody(BaseModel):
+    object_name: Optional[str] = None  # explicit pick, else next un-trained
+
+
+@api_router.post("/admin/spot/training/start")
+async def admin_spot_training_start(body: AdminSpotStartBody, user_id: str = Depends(get_user_or_legacy)):
+    """Pick an object to train. If body.object_name omitted, returns the
+    next un-trained, non-skipped object. If none left, falls back to
+    skipped objects so the Creator can revisit them later.
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    pick = (body.object_name or "").strip().lower()
+    if pick:
+        if not any(o.lower() == pick for o in SPOT_OBJECTS):
+            raise HTTPException(404, "Unknown object.")
+        target = pick
+    else:
+        # Pick the first non-skipped, non-complete object. If everything
+        # is either complete or skipped, return the oldest skipped one.
+        docs = {(d.get("object_name") or "").lower(): d for d in await db.spot_training.find({}, {"_id": 0}).to_list(2000)}
+        next_obj = None
+        skipped_pool: list[str] = []
+        for obj in SPOT_OBJECTS:
+            d = docs.get(obj.lower(), {})
+            samples = d.get("samples") or []
+            if len(samples) >= len(_angles_for(obj)):
+                continue
+            if d.get("skipped"):
+                skipped_pool.append(obj)
+                continue
+            next_obj = obj
+            break
+        target = (next_obj or (skipped_pool[0] if skipped_pool else None) or random.choice(SPOT_OBJECTS))
+    target_l = target.lower()
+    angles = _angles_for(target_l)
+    existing = await db.spot_training.find_one({"object_name": target_l}, {"_id": 0}) or {}
+    captured = [s.get("angle") for s in (existing.get("samples") or [])]
+    next_angle_idx = min(len(captured), len(angles) - 1)
+    return {
+        "object_name": target,
+        "angles": angles,
+        "captured_count": len(captured),
+        "total_count": len(angles),
+        "next_angle": angles[next_angle_idx] if len(captured) < len(angles) else None,
+        "instructions": (
+            f"Find a real {target} and capture each angle below. "
+            "After each shot, tap 'This is correct object' to save it."
+        ),
+    }
+
+
+class AdminSpotCaptureBody(BaseModel):
+    object_name: str
+    angle: str
+    image_base64: str
+
+
+@api_router.post("/admin/spot/training/capture")
+async def admin_spot_training_capture(body: AdminSpotCaptureBody, user_id: str = Depends(get_user_or_legacy)):
+    """Save a Creator-confirmed reference photo for the given object/angle.
+    The vision model is asked to verify it's actually the right object —
+    if not, the sample is REJECTED and not saved (so the Creator's
+    training data stays clean).
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    if not body.image_base64:
+        raise HTTPException(400, "image_base64 required")
+    if len(body.image_base64) > 8_000_000:
+        raise HTTPException(400, "Image too large (8MB).")
+    obj = body.object_name.strip().lower()
+    if not any(o.lower() == obj for o in SPOT_OBJECTS):
+        raise HTTPException(404, "Unknown object.")
+    # Verify the photo really shows the object (admin trust, but double-check
+    # so we don't poison the few-shot reference set with bad samples).
+    check = await _spot_vision_check(body.object_name, body.image_base64)
+    if not (check.get("detected") and check.get("confidence", 0) >= 0.55):
+        return {
+            "ok": False,
+            "rejected": True,
+            "reason": check.get("reason") or "Object not clearly visible in this photo.",
+            "confidence": check.get("confidence"),
+        }
+    sample = {
+        "angle": body.angle.strip()[:80] or "unknown",
+        "image_base64": body.image_base64,
+        "captured_at": now_iso(),
+        "captured_by": user_id,
+    }
+    await db.spot_training.update_one(
+        {"object_name": obj},
+        {
+            "$push": {"samples": sample},
+            "$set": {"last_trained_at": now_iso(), "skipped": False},
+            "$setOnInsert": {"object_name": obj, "created_at": now_iso()},
+        },
+        upsert=True,
+    )
+    doc = await db.spot_training.find_one({"object_name": obj}, {"_id": 0})
+    samples = (doc or {}).get("samples") or []
+    angles = _angles_for(obj)
+    captured_angles = [s.get("angle") for s in samples]
+    is_complete = len(samples) >= len(angles)
+    next_angle = None
+    if not is_complete:
+        # Pick the next angle from the canonical sequence that hasn't
+        # been captured yet — falls back to the index-th if none missing.
+        for a in angles:
+            if a not in captured_angles:
+                next_angle = a
+                break
+        if not next_angle:
+            next_angle = angles[len(samples) % len(angles)]
+    return {
+        "ok": True,
+        "rejected": False,
+        "captured_count": len(samples),
+        "total_count": len(angles),
+        "progress_pct": int(round(100 * len(samples) / max(len(angles), 1))),
+        "next_angle": next_angle,
+        "is_complete": is_complete,
+        "confidence": check.get("confidence"),
+    }
+
+
+class AdminSpotSkipBody(BaseModel):
+    object_name: str
+
+
+@api_router.post("/admin/spot/training/skip")
+async def admin_spot_training_skip(body: AdminSpotSkipBody, user_id: str = Depends(get_user_or_legacy)):
+    """Skip the current object — kept in the pool, just not surfaced as
+    'next' until everything else is either complete or also skipped.
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    obj = body.object_name.strip().lower()
+    await db.spot_training.update_one(
+        {"object_name": obj},
+        {"$set": {"skipped": True, "skipped_at": now_iso()},
+         "$setOnInsert": {"object_name": obj, "samples": [], "created_at": now_iso()}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+async def _spot_vision_check(target_object: str, photo_base64: str, distance_aware: bool = False) -> dict:
     """Ask GPT-4o-mini Vision whether the target object is clearly visible.
-    Returns {detected: bool, confidence: float, reason: str}."""
+    Returns {detected: bool, confidence: float, reason: str, distance: 'good'|'too_far'|'too_close'}.
+
+    If we have stored TRAINING SAMPLES for this object name (gathered by
+    the Creator's "Test & Train AI" mode), inject up to 3 of them as
+    visual examples to help the LLM identify the object more reliably.
+    This is few-shot prompting — we cannot fine-tune GPT-4o, but feeding
+    it real reference photos of "this is what scissors look like" makes
+    the recognition substantially more confident.
+    """
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
         api_key = os.environ.get("EMERGENT_LLM_KEY")
         if not api_key:
-            return {"detected": False, "confidence": 0.0, "reason": "No LLM key configured"}
+            return {"detected": False, "confidence": 0.0, "reason": "No LLM key configured", "distance": "good"}
+
+        # Load Creator-trained reference samples for this object — improves
+        # recognition for everyone playing.
+        ref_doc = await db.spot_training.find_one(
+            {"object_name": (target_object or "").lower().strip()},
+            {"_id": 0, "samples": 1},
+        )
+        ref_samples = (ref_doc or {}).get("samples") or []
+        ref_imgs: list = []
+        # Cap reference images to 3 to stay under the LLM's image budget
+        # and keep latency low. Pick the 3 most-recent unique angles.
+        seen_angles: set = set()
+        for s in reversed(ref_samples):
+            ang = (s.get("angle") or "").lower()
+            if ang in seen_angles:
+                continue
+            seen_angles.add(ang)
+            if s.get("image_base64"):
+                ref_imgs.append(ImageContent(image_base64=s["image_base64"]))
+            if len(ref_imgs) >= 3:
+                break
+
+        distance_clause = (
+            " Also classify the framing: 'too_far' if the object is tiny / barely visible, "
+            "'too_close' if the object overflows the frame / cropped severely, otherwise 'good'."
+            if distance_aware else ""
+        )
+        ref_clause = (
+            "\n\nFor reference, here are real photos of the SAME object captured by the Creator. "
+            "Use them as ground truth to compare the user's photo against."
+            if ref_imgs else ""
+        )
         chat = LlmChat(
             api_key=api_key,
             session_id=f"spot-{uuid.uuid4().hex[:8]}",
@@ -3767,18 +4015,18 @@ async def _spot_vision_check(target_object: str, photo_base64: str) -> dict:
                 "You are a strict visual referee for a 'spot the object' photo challenge. "
                 "Look at the user's photo and decide if the requested object is CLEARLY and "
                 "PROMINENTLY in the frame (close enough, in focus, recognisable). "
-                "Reject distant, blurry, or partially-cropped objects.\n\n"
-                "Reply with EXACTLY this JSON and nothing else:\n"
-                '{"detected": true/false, "confidence": 0.0-1.0, "reason": "short reason"}'
+                "Reject distant, blurry, or partially-cropped objects." + distance_clause + ref_clause +
+                "\n\nReply with EXACTLY this JSON and nothing else:\n"
+                '{"detected": true/false, "confidence": 0.0-1.0, "reason": "short reason"' +
+                (', "distance": "good"|"too_far"|"too_close"' if distance_aware else '') + '}'
             ),
         ).with_model("openai", "gpt-4o-mini")
         msg = UserMessage(
             text=f"Target object: {target_object}\n\nIs this object clearly visible in the attached photo?",
-            file_contents=[ImageContent(image_base64=photo_base64)],
+            file_contents=[ImageContent(image_base64=photo_base64)] + ref_imgs,
         )
         response = await chat.send_message(msg)
         raw = (response or "").strip()
-        # Pull JSON out of any markdown fencing
         import re, json as _json
         m = re.search(r"\{[^{}]*\}", raw, re.S)
         data = _json.loads(m.group(0)) if m else {}
@@ -3786,11 +4034,10 @@ async def _spot_vision_check(target_object: str, photo_base64: str) -> dict:
             "detected": bool(data.get("detected", False)),
             "confidence": float(data.get("confidence", 0) or 0),
             "reason": str(data.get("reason", "")),
+            "distance": str(data.get("distance", "good")),
         }
     except Exception as e:
-        # Vision API failure → don't block the user; mark not detected so the
-        # shutter stays locked but they can still keep trying.
-        return {"detected": False, "confidence": 0.0, "reason": f"vision unavailable: {e}"}
+        return {"detected": False, "confidence": 0.0, "reason": f"vision unavailable: {e}", "distance": "good"}
 
 
 @api_router.post("/spot/check")
@@ -3801,7 +4048,8 @@ async def spot_check(body: SpotCheckPayload, user_id: str = Depends(get_user_or_
         raise HTTPException(400, "photo_base64 required")
     if len(body.photo_base64) > 8_000_000:
         raise HTTPException(400, "Image too large (8MB limit)")
-    result = await _spot_vision_check(body.target_object, body.photo_base64)
+    # distance_aware so the frontend can show "too close / too far" toasts.
+    result = await _spot_vision_check(body.target_object, body.photo_base64, distance_aware=True)
     result["can_capture"] = bool(result.get("detected") and result.get("confidence", 0) >= 0.55)
     return result
 
