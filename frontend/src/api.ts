@@ -1106,6 +1106,10 @@ export type LibraryCatalogResponse = {
   spot_the_object: CatalogSection;
   improve_sleep_questions: CatalogSection;
   points_plus_boosts: CatalogSection;
+  confidence_social?: CatalogSection;
+  confidence_physical?: CatalogSection;
+  confidence_gratitude?: CatalogSection;
+  confidence_dress?: CatalogSection;
 };
 
 /** Helpers for rendering admin players (∞ + golden treatment). */

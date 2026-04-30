@@ -41,12 +41,16 @@ export default function LibraryCatalog() {
     );
   }
 
-  const sections: { key: string; section: CatalogSection; icon: string }[] = [
+  const sections: { key: string; section: CatalogSection | undefined; icon: string }[] = [
     { key: 'challenge_tasks', section: data.challenge_tasks, icon: 'flash' },
     { key: 'spot_the_object', section: data.spot_the_object, icon: 'scan-circle' },
     { key: 'improve_sleep_questions', section: data.improve_sleep_questions, icon: 'moon' },
     { key: 'points_plus_boosts', section: data.points_plus_boosts, icon: 'flame' },
-  ];
+    { key: 'confidence_social', section: data.confidence_social, icon: 'chatbubbles' },
+    { key: 'confidence_physical', section: data.confidence_physical, icon: 'body' },
+    { key: 'confidence_dress', section: data.confidence_dress, icon: 'shirt' },
+    { key: 'confidence_gratitude', section: data.confidence_gratitude, icon: 'sparkles' },
+  ].filter((s) => !!s.section) as { key: string; section: CatalogSection; icon: string }[];
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -109,16 +113,13 @@ export default function LibraryCatalog() {
                           ) : null}
                           {it.options && it.options.length ? (
                             <View style={styles.tagsRow}>
-                              {it.options.slice(0, 6).map((o: any, i: number) => (
+                              {it.options.map((o: any, i: number) => (
                                 <View key={i} style={styles.tag}>
                                   <Text style={styles.tagText}>
                                     {typeof o === 'string' ? o : o?.label || JSON.stringify(o)}
                                   </Text>
                                 </View>
                               ))}
-                              {it.options.length > 6 ? (
-                                <Text style={styles.moreText}>+{it.options.length - 6} more</Text>
-                              ) : null}
                             </View>
                           ) : null}
                           {(it.category || it.difficulty) ? (

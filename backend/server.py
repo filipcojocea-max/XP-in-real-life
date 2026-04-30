@@ -6437,6 +6437,89 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
     boost_defs = [
         {"type": k, **v} for k, v in BOOST_DEFS.items()
     ]
+    # Build Self-Confidence — all 4 tracks
+    social_items = [
+        {
+            "id": f"social-{i}",
+            "title": c.get("title", ""),
+            "description": c.get("body", ""),
+            "options": (c.get("tips") or []) + (c.get("examples") or []),
+            "category": "Social Speaking",
+        }
+        for i, c in enumerate(CONFIDENCE_SOCIAL_CHALLENGES)
+    ]
+    physical_items = [
+        {
+            "id": f"physical-{i}",
+            "title": c.get("title", ""),
+            "description": c.get("body", ""),
+            "options": (c.get("tips") or []) + (c.get("examples") or []),
+            "category": "Physical Appearance",
+        }
+        for i, c in enumerate(CONFIDENCE_PHYSICAL_CHALLENGES)
+    ]
+    gratitude_items = [
+        {
+            "id": f"gratitude-{i}",
+            "title": c.get("title", ""),
+            "description": c.get("body", ""),
+            "options": (c.get("tips") or []) + (c.get("examples") or []),
+            "category": "No Negative Thinking",
+        }
+        for i, c in enumerate(CONFIDENCE_GRATITUDE_PROMPTS)
+    ]
+    # Dress with Confidence — describe the AI-driven flow for admin inspection.
+    dress_items = [
+        {
+            "id": "dress-overview",
+            "title": "Dress with Confidence · AI Style Coach",
+            "description": (
+                "User snaps a selfie of their outfit, picks an event context "
+                "(casual/office/date/party/outside/gym/interview), and asks a "
+                "question. GPT-4o-mini Vision (via emergentintegrations + "
+                "EMERGENT_LLM_KEY) analyses the photo and answers in under "
+                "120 words. Local weather is auto-fetched via open-meteo and "
+                "passed as context. Each conversation is saved to history "
+                "with a 320px thumbnail for replay; caller can delete any "
+                "past entry."
+            ),
+            "options": [
+                "Start with ONE specific compliment (colour / cut / fit / vibe)",
+                "Verdict format: YES / YES WITH ONE TWEAK / CONSIDER ONE SWAP",
+                "Factor in event_context (party, office, date, outside, gym, interview)",
+                "Factor in weather_hint (e.g. 15°C, light rain, windy)",
+                "Frame suggestions positively: 'try swapping X for Y', 'add Z to elevate'",
+                "End with a one-line confidence booster",
+            ],
+            "category": "AI Photo Coach",
+        },
+        {
+            "id": "dress-endpoints",
+            "title": "Backend endpoints",
+            "description": (
+                "POST /confidence/dress-advice {photo_base64?, message, "
+                "event_context?, weather_hint?, history?} → {reply, entry_id}.\n"
+                "GET /confidence/dress-history?limit=30 → {items[]}.\n"
+                "DELETE /confidence/dress-history/{id} → {deleted}.\n"
+                "GET /confidence/weather?lat=&lon= → open-meteo snapshot."
+            ),
+            "options": [
+                "Photo downscaled to 640px JPEG q=80 before vision call",
+                "Thumbnail downscaled to 320px JPEG q=70 for history replay",
+                "History scoped to caller (JWT or X-Anonymous-Id)",
+                "Cross-user delete is silent no-op ({deleted:0})",
+            ],
+            "category": "AI Photo Coach",
+        },
+        {
+            "id": "dress-events",
+            "title": "Event chips the user can select",
+            "description": "Shown as horizontal scroll chips in the dress.tsx composer to anchor the AI's verdict to a specific occasion.",
+            "options": ["No event", "Casual", "Office", "Date", "Party", "Outside", "Gym", "Interview"],
+            "category": "AI Photo Coach",
+        },
+    ]
+
     return {
         "challenge_tasks": {
             "name": "Challenge Tasks",
@@ -6481,6 +6564,26 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
                 }
                 for b in boost_defs
             ],
+        },
+        "confidence_social": {
+            "name": "Build Self-Confidence · Social Speaking",
+            "count": len(social_items),
+            "items": social_items,
+        },
+        "confidence_physical": {
+            "name": "Build Self-Confidence · Physical Appearance",
+            "count": len(physical_items),
+            "items": physical_items,
+        },
+        "confidence_gratitude": {
+            "name": "Build Self-Confidence · No Negative Thinking",
+            "count": len(gratitude_items),
+            "items": gratitude_items,
+        },
+        "confidence_dress": {
+            "name": "Build Self-Confidence · Dress with Confidence (AI Coach)",
+            "count": len(dress_items),
+            "items": dress_items,
         },
     }
 
