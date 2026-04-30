@@ -958,6 +958,10 @@ export type LeaderboardRow = {
   total_xp: number;
   weekly_xp: number;
   is_self: boolean;
+  // Admin / Creator flags — backend sets level=999 + is_admin_view=true
+  // when OTHERS view the Creator so the list renders the golden shield.
+  is_admin?: boolean;
+  is_admin_view?: boolean;
   tz_offset_minutes: number;
   is_week_closed: boolean;
   medals_count: number;

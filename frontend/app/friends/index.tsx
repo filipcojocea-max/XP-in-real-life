@@ -554,12 +554,15 @@ function formatLastSeen(iso: string): string {
 
 function PlayerAvatar({ player }: { player: Player }) {
   const adminView = !!player.is_admin_view;
-  const wrapStyle = adminView ? { borderWidth: 2, borderColor: '#FFD700', borderRadius: 26, padding: 1 } : undefined;
   // In list views we show a Level Shield as the fallback "avatar" so the
   // player's progression shines through at a glance — much more
   // expressive than a single letter. The actual user-uploaded photo is
   // still revealed when they tap into the profile detail modal.
   if (player.avatar_base64) {
+    // Circular photo avatar — golden ring for admin when viewed by others.
+    const wrapStyle = adminView
+      ? { borderWidth: 2, borderColor: '#FFD700', borderRadius: 26, padding: 1 }
+      : undefined;
     return (
       <View style={wrapStyle as any}>
         <Image source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }} style={styles.avatar} />
@@ -568,12 +571,16 @@ function PlayerAvatar({ player }: { player: Player }) {
   }
   // Admin profiles always render as a golden Lv999 shield even if no
   // photo is set — keeps the Creator's visual identity consistent.
+  // CRITICAL: the shield renders as a FREE-STANDING SVG (no circular
+  // clip). Previously we nested the shield inside a 44×44 `borderRadius:
+  // 22` container with `overflow: 'hidden'`, which clipped the shield
+  // points and produced an "empty yellow circle" for the admin (whose
+  // shield is 18 % larger than a regular shield) and a bland blue blob
+  // for regular Heroes. The fix: render the shield without clipping.
   const shieldLevel = adminView ? 999 : Math.max(1, Number(player.level || 1));
   return (
-    <View style={wrapStyle as any}>
-      <View style={[styles.avatar, styles.avatarShieldWrap, adminView && { backgroundColor: '#FFD70015', borderColor: '#FFD700' }]}>
-        <PremiumShield level={shieldLevel} size={36} />
-      </View>
+    <View style={styles.shieldSlot} testID={`shield-slot-${player.user_id}`}>
+      <PremiumShield level={shieldLevel} size={44} />
     </View>
   );
 }
@@ -1347,6 +1354,16 @@ const styles = StyleSheet.create({
   },
   avatar: { width: 44, height: 44, borderRadius: 22 },
   avatarFallback: { backgroundColor: colors.cyan + '22', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.cyan + '55' },
+  // Container for the PremiumShield fallback. No borderRadius / overflow
+  // so the shield's pointy silhouette renders in full — this is what
+  // fixes the "empty yellow circle" Admin bug and the "generic blue
+  // blob" for regular Heroes.
+  shieldSlot: {
+    width: 52,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   avatarShieldWrap: {
     backgroundColor: colors.surface,
     borderWidth: 1,

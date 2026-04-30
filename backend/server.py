@@ -3485,14 +3485,31 @@ async def friends_leaderboard(
         their_tz = int(prof.get("tz_offset_minutes", tz) or tz)
         weekly_xp = await _sum_week_xp(uid, their_tz, anchor)
         medals = await _compute_medals(uid)
+        # Admin visibility: others see them as ∞ / level 999 / "Admin · Creator"
+        # so the leaderboard renders the golden Creator shield instead of a
+        # generic blue shield. Admin-on-self continues to see their real
+        # name/level to keep the admin dashboard truthful.
+        u = await db.users.find_one({"_id": uid}, {"email": 1}) or {}
+        is_admin = _is_admin_email(u.get("email"))
+        viewing_self = (uid == user_id)
+        show_unlimited = is_admin and not viewing_self
+        display_name = (
+            ADMIN_PUBLIC_DISPLAY_NAME
+            if show_unlimited
+            else (prof.get("full_name") or prof.get("name") or "Anonymous")
+        )
+        display_level = 999 if show_unlimited else int(prof.get("level", 1) or 1)
+        display_total_xp = -1 if show_unlimited else int(prof.get("total_xp", 0) or 0)
         rows.append({
             "user_id": uid,
-            "name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "name": display_name,
             "avatar_base64": prof.get("avatar_base64"),
-            "level": int(prof.get("level", 1) or 1),
-            "total_xp": int(prof.get("total_xp", 0) or 0),
+            "level": display_level,
+            "total_xp": display_total_xp,
             "weekly_xp": int(weekly_xp),
-            "is_self": uid == user_id,
+            "is_self": viewing_self,
+            "is_admin": bool(is_admin),
+            "is_admin_view": bool(show_unlimited),
             "tz_offset_minutes": their_tz,
             "is_week_closed": _is_local_sunday(their_tz),  # already in Sunday locally
             "medals_count": len([m for m in medals if not m.get("revoked")]),

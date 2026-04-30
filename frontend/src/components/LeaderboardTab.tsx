@@ -27,6 +27,7 @@ import {
 } from '../api';
 import { showAlert } from '../uiAlert';
 import { colors, spacing, radii } from '../theme';
+import PremiumShield from './PremiumShield';
 
 const GOLD = '#FFD700';
 const GOLD_SOFT = '#FFC727';
@@ -207,10 +208,8 @@ function WinnerSpotlight({ winner, onTap }: { winner: LeaderboardRow & { medal_r
           {winner.avatar_base64 ? (
             <Image source={{ uri: `data:image/jpeg;base64,${winner.avatar_base64}` }} style={styles.winnerAvatar} />
           ) : (
-            <View style={[styles.winnerAvatar, { backgroundColor: GOLD + '22', alignItems: 'center', justifyContent: 'center' }]}>
-              <Text style={{ color: GOLD, fontWeight: '900', fontSize: 26 }}>
-                {(winner.name || '?').slice(0, 1).toUpperCase()}
-              </Text>
+            <View style={[styles.winnerAvatar, { alignItems: 'center', justifyContent: 'center' }]}>
+              <PremiumShield level={Math.max(1, Number(winner.level || 1))} size={56} />
             </View>
           )}
           {revoked ? (
@@ -271,15 +270,25 @@ function LeaderRow({ row, rank, isWinner, onPress }: { row: LeaderboardRow; rank
         {row.avatar_base64 ? (
           <Image source={{ uri: `data:image/jpeg;base64,${row.avatar_base64}` }} style={styles.avatar} />
         ) : (
-          <View style={[styles.avatar, styles.avatarFallback]}>
-            <Text style={styles.avatarLetter}>{(row.name || '?').slice(0, 1).toUpperCase()}</Text>
+          // PremiumShield fallback — tier & color auto-derive from row.level.
+          // For the Creator, the backend sends level=999 (only when others
+          // view them) which triggers the golden "Creator" shield.
+          <View style={styles.avatar} testID={`lb-shield-${row.user_id}`}>
+            <PremiumShield level={Math.max(1, Number(row.level || 1))} size={40} />
           </View>
         )}
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
         <View style={styles.nameRow}>
           <Text
-            style={[styles.name, isWinner && styles.nameGold, row.is_self && !isWinner && { color: colors.cyan }]}
+            style={[
+              styles.name,
+              isWinner && styles.nameGold,
+              // Creator always gets the golden name treatment in lists so
+              // their "Admin · Creator" identity matches the profile view.
+              row.is_admin_view && styles.nameGold,
+              row.is_self && !isWinner && !row.is_admin_view && { color: colors.cyan },
+            ]}
             numberOfLines={1}
           >
             {row.name}{row.is_self ? ' (you)' : ''}
@@ -297,10 +306,16 @@ function LeaderRow({ row, rank, isWinner, onPress }: { row: LeaderboardRow; rank
             </View>
           ) : null}
         </View>
-        <Text style={styles.sub}>Lv {row.level} · Total {formatXp(row.total_xp)} XP</Text>
+        <Text style={styles.sub}>
+          {row.is_admin_view
+            ? 'Creator · Unlimited XP'
+            : `Lv ${row.level} · Total ${formatXp(row.total_xp)} XP`}
+        </Text>
       </View>
       <View style={{ alignItems: 'flex-end' }}>
-        <Text style={[styles.weeklyXp, isWinner && { color: GOLD }]}>{row.weekly_xp}</Text>
+        <Text style={[styles.weeklyXp, (isWinner || row.is_admin_view) && { color: GOLD }]}>
+          {row.is_admin_view ? '∞' : row.weekly_xp}
+        </Text>
         <Text style={styles.weeklyXpLabel}>THIS WK</Text>
       </View>
     </TouchableOpacity>
@@ -501,10 +516,11 @@ function LeaderboardProfileModal({
                       style={styles.profileAvatar}
                     />
                   ) : (
-                    <View style={[styles.profileAvatar, styles.avatarFallback]}>
-                      <Text style={{ color: colors.cyan, fontWeight: '900', fontSize: 42 }}>
-                        {(profile.name || '?').slice(0, 1).toUpperCase()}
-                      </Text>
+                    // Big PremiumShield fallback on the leaderboard player
+                    // detail modal — matches the "View Profile" page so the
+                    // visual identity is consistent from list → detail.
+                    <View style={[styles.profileAvatar, { alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent', borderWidth: 0 }]}>
+                      <PremiumShield level={Math.max(1, Number(profile.level || 1))} size={96} />
                     </View>
                   )}
                 </View>
