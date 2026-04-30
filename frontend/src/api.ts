@@ -493,6 +493,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     }),
+  // Post-capture photo editing — preview an artistic filter then
+  // optionally save it over the original spot image.
+  spotEditPreview: (entry_id: string, filter: 'painting' | 'bw' | 'auto') =>
+    req<{ edited_base64: string }>('/spot/edit/preview', {
+      method: 'POST',
+      body: JSON.stringify({ entry_id, filter }),
+    }),
+  spotEditSave: (entry_id: string, edited_base64: string) =>
+    req<{ ok: boolean }>('/spot/edit/save', {
+      method: 'POST',
+      body: JSON.stringify({ entry_id, edited_base64 }),
+    }),
 
   // ─── Spot the Object — Multiplayer/Lobby (Phase 2) ──────────────
   spotMatchCreate: (friend_ids: string[]) =>

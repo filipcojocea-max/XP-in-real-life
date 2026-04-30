@@ -228,8 +228,7 @@ export default function SpotHub() {
   );
 }
 
-function FeedCard({ entry, onTap }: { entry: SpotEntry; onTap: () => void }) {
-  const success = entry.success;
+function FeedCard({ entry, onTap }: { entry: SpotEntry; onTap: () => void }) {  const success = entry.success;
   return (
     <TouchableOpacity activeOpacity={0.88} onPress={onTap} style={styles.feedCard} testID={`spot-card-${entry.id}`}>
       <View style={styles.feedHead}>
@@ -290,10 +289,26 @@ function SpotEntryModal({
   const [submitting, setSubmitting] = useState(false);
   const [liking, setLiking] = useState(false);
   const [local, setLocal] = useState<SpotEntry | null>(null);
+  // Edit state:
+  //   editing=true  → the filter toolbar is visible over the photo.
+  //   activeFilter  → which filter the server has applied in the preview.
+  //   previewB64    → the preview returned by /spot/edit/preview. We show
+  //                   this instead of the stored photo until the user saves
+  //                   or cancels. Keeping it as separate state lets the
+  //                   user toggle between filters without losing the
+  //                   ability to revert.
+  const [editing, setEditing] = useState(false);
+  const [activeFilter, setActiveFilter] = useState<'painting' | 'bw' | 'auto' | null>(null);
+  const [previewB64, setPreviewB64] = useState<string | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
 
   useEffect(() => {
     setLocal(entry);
     setComment('');
+    // Reset editor state whenever a new entry opens.
+    setEditing(false);
+    setActiveFilter(null);
+    setPreviewB64(null);
   }, [entry?.id]);
 
   if (!entry || !local) return null;
@@ -327,6 +342,49 @@ function SpotEntryModal({
     }
   };
 
+  // ──────────── Photo editing handlers ────────────
+  const canEdit = !!local.is_self && local.success && !!local.photo_base64;
+
+  const applyFilter = async (which: 'painting' | 'bw' | 'auto') => {
+    if (!local || editBusy) return;
+    setEditBusy(true);
+    try {
+      const r = await api.spotEditPreview(local.id, which);
+      setPreviewB64(r.edited_base64);
+      setActiveFilter(which);
+    } catch (e: any) {
+      showAlert('Filter failed', String(e?.message || e));
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!local || !previewB64 || editBusy) return;
+    setEditBusy(true);
+    try {
+      await api.spotEditSave(local.id, previewB64);
+      // Optimistically update local state so the new filtered photo is
+      // instantly visible throughout the modal + the parent feed.
+      setLocal({ ...local, photo_base64: previewB64 });
+      setEditing(false);
+      setActiveFilter(null);
+      setPreviewB64(null);
+      onChange();
+      showAlert('Saved', 'Your edited photo replaced the original.');
+    } catch (e: any) {
+      showAlert('Could not save', String(e?.message || e));
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+    setActiveFilter(null);
+    setPreviewB64(null);
+  };
+
   return (
     <View style={styles.detailBackdrop}>
       <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1 }}>
@@ -354,11 +412,92 @@ function SpotEntryModal({
                 <Text style={styles.detailSub}>{local.player_spot_points || 0} Spot Points</Text>
               </View>
             </View>
-            <Image
-              source={{ uri: `data:image/jpeg;base64,${local.photo_base64}` }}
-              style={styles.detailImage}
-              resizeMode="cover"
-            />
+            {/* Photo with in-place edit overlay. The pencil icon shows
+                only for the OWNER of the spot; viewers of friend spots
+                see the raw photo. Tapping the pencil toggles a filter
+                toolbar that overlays the image; the preview is applied
+                server-side in <500 ms and rendered via previewB64. */}
+            <View style={{ position: 'relative' }}>
+              <Image
+                source={{ uri: `data:image/jpeg;base64,${previewB64 || local.photo_base64}` }}
+                style={styles.detailImage}
+                resizeMode="cover"
+              />
+              {canEdit && !editing ? (
+                <TouchableOpacity
+                  onPress={() => setEditing(true)}
+                  testID="spot-edit-open"
+                  style={styles.editPencilBtn}
+                  accessibilityLabel="Edit photo"
+                  activeOpacity={0.8}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="pencil" size={18} color={colors.bg} />
+                </TouchableOpacity>
+              ) : null}
+              {editBusy ? (
+                <View style={styles.editBusyOverlay}>
+                  <ActivityIndicator color={colors.cyan} />
+                  <Text style={styles.editBusyLabel}>Applying filter…</Text>
+                </View>
+              ) : null}
+            </View>
+
+            {/* Filter chooser row — only visible while editing */}
+            {canEdit && editing ? (
+              <View style={styles.editToolbar}>
+                <Text style={styles.editToolbarKicker}>PHOTO EDITS</Text>
+                <View style={styles.filterRow}>
+                  <FilterChip
+                    label="Painting"
+                    icon="color-palette"
+                    active={activeFilter === 'painting'}
+                    onPress={() => applyFilter('painting')}
+                    disabled={editBusy}
+                    testID="spot-filter-painting"
+                  />
+                  <FilterChip
+                    label="B&W"
+                    icon="contrast"
+                    active={activeFilter === 'bw'}
+                    onPress={() => applyFilter('bw')}
+                    disabled={editBusy}
+                    testID="spot-filter-bw"
+                  />
+                  <FilterChip
+                    label="Auto Edit"
+                    icon="flash"
+                    active={activeFilter === 'auto'}
+                    onPress={() => applyFilter('auto')}
+                    disabled={editBusy}
+                    testID="spot-filter-auto"
+                  />
+                </View>
+                <View style={styles.editActionsRow}>
+                  <TouchableOpacity
+                    style={[styles.editActionBtn, styles.editCancelBtn]}
+                    onPress={cancelEdit}
+                    disabled={editBusy}
+                    testID="spot-edit-cancel"
+                  >
+                    <Text style={styles.editCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.editActionBtn,
+                      styles.editSaveBtn,
+                      (!previewB64 || editBusy) && { opacity: 0.45 },
+                    ]}
+                    onPress={saveEdit}
+                    disabled={!previewB64 || editBusy}
+                    testID="spot-edit-save"
+                  >
+                    <Ionicons name="save" size={16} color={colors.bg} />
+                    <Text style={styles.editSaveText}>Save Photo</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : null}
             <View style={styles.detailMeta}>
               <Text style={styles.detailMetaText}>
                 {local.success ? '✅ Found the object' : "❌ Didn't find the object"} · {local.remaining_seconds}s left
@@ -418,6 +557,42 @@ function SpotEntryModal({
     </View>
   );
 }
+
+/**
+ * FilterChip — small pill button used in the photo editor toolbar.
+ * Highlights cyan when active so the user can see which filter the
+ * current preview is showing without reading the label.
+ */
+function FilterChip({
+  label, icon, active, onPress, disabled, testID,
+}: {
+  label: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  active: boolean;
+  onPress: () => void;
+  disabled?: boolean;
+  testID?: string;
+}) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      disabled={disabled}
+      testID={testID}
+      activeOpacity={0.75}
+      style={[
+        styles.filterChip,
+        active && styles.filterChipActive,
+        disabled && { opacity: 0.5 },
+      ]}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active, disabled }}
+    >
+      <Ionicons name={icon} size={15} color={active ? colors.bg : colors.cyan} />
+      <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
@@ -507,6 +682,75 @@ const styles = StyleSheet.create({
   detailName: { color: colors.text, fontWeight: '900', fontSize: 15 },
   detailSub: { color: colors.amber, fontSize: 12, marginTop: 2, fontWeight: '700' },
   detailImage: { width: '100%', aspectRatio: 1, borderRadius: radii.md, backgroundColor: '#000' },
+  // ── Photo edit overlay ──
+  editPencilBtn: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: colors.cyan,
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Slight dark scrim behind the icon for contrast over busy photos.
+    borderWidth: 2,
+    borderColor: '#00000055',
+  },
+  editBusyOverlay: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: '#00000066',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radii.md,
+    gap: 8,
+  },
+  editBusyLabel: { color: colors.text, fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },
+  editToolbar: {
+    marginTop: spacing.sm,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.cyan + '66',
+    backgroundColor: colors.surfaceGlass,
+    gap: spacing.sm,
+  },
+  editToolbarKicker: { color: colors.cyan, fontSize: 10, fontWeight: '900', letterSpacing: 2 },
+  filterRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: colors.cyan + '66',
+    backgroundColor: colors.cyan + '14',
+    minHeight: 40,
+  },
+  filterChipActive: {
+    backgroundColor: colors.cyan,
+    borderColor: colors.cyan,
+  },
+  filterChipText: { color: colors.cyan, fontSize: 13, fontWeight: '800' },
+  filterChipTextActive: { color: colors.bg },
+  editActionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  editActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    borderRadius: radii.md,
+    minHeight: 44,
+  },
+  editCancelBtn: { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.border },
+  editCancelText: { color: colors.textMuted, fontSize: 13, fontWeight: '700' },
+  editSaveBtn: { backgroundColor: colors.green },
+  editSaveText: { color: colors.bg, fontSize: 13, fontWeight: '900' },
   detailMeta: { marginTop: spacing.md, marginBottom: spacing.md },
   detailMetaText: { color: colors.text, fontSize: 14, fontWeight: '700' },
   detailMetaSub: { color: colors.textMuted, fontSize: 12, marginTop: 4 },

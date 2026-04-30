@@ -105,6 +105,76 @@
 user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "Spot Photo Editing — /spot/edit/preview + /spot/edit/save (Pillow filters: painting / bw / auto)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "NEW: Two endpoints under /api/spot/edit/* that apply Pillow-based filters to an already-captured spot photo. (1) POST /spot/edit/preview {entry_id, filter: 'painting'|'bw'|'auto'} — loads the user's OWN spot completion (403 if viewer is not the owner, 404 if entry doesn't exist), runs _apply_spot_filter() which applies SMOOTH_MORE+MedianFilter+posterize+color/contrast for 'painting', grayscale+autocontrast for 'bw', autocontrast+saturation+contrast boost+highlight-rolloff-via-LUT for 'auto'. Returns {edited_base64}. (2) POST /spot/edit/save {entry_id, edited_base64} — overwrites photo_base64 on db.spot_completions (403 if not owner, 404 if missing). Rejects missing/too-large (>12MB) edited_base64 with 400."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 17/17 assertions in /app/backend_test.py (run 2026-04-30 against https://xp-confidence.preview.emergentagent.com/api). Registered Owner (Maya Patel) + Other (Ryan Chen) @ gmail.com — both got JWT immediately on /auth/register. Owner GET /spot/object → 200 target='ball'; Owner POST /spot/complete with real synthetic JPEG (200×160 JPEG with JPEG magic bytes) success=true → 200 with entry_id returned. (a) For each of the 3 filters (painting, bw, auto) — POST /spot/edit/preview {entry_id, filter} → 200 with edited_base64; decoded bytes start with JPEG magic \\xFF\\xD8\\xFF AND PIL.Image.open().verify() succeeds. Byte sizes: painting=1320 b64 chars, bw=640 b64 chars, auto=11528 b64 chars (all valid JPEGs). (b) Owner POST /spot/edit/save {entry_id, edited_base64=<auto preview>} → 200 {ok:true}. (c) GET /spot/{entry_id} as Owner → 200 with photo_base64 EXACTLY equal to saved edited_base64 AND new `edited_at` field present as ISO-8601 string ('2026-04-30T11:45:08.957826+00:00'). (d) Other POST /spot/edit/preview with Owner's entry_id → 403 'You can only edit your own spot photos'. (e) Other POST /spot/edit/save with Owner's entry_id → 403. (f) POST /spot/edit/preview with bogus entry_id='does-not-exist' → 404 'Spot entry not found'. (g) POST /spot/edit/save with bogus entry_id → 404. (h) POST /spot/edit/preview with invalid filter='sepia' → 422 (Pydantic Literal validation correctly rejects). (i) POST /spot/edit/save with edited_base64='' → 400 'Invalid edited image'. (j) POST /spot/edit/save with edited_base64 of 12_000_001 chars → 400. All ownership checks, Pillow filter correctness, and Pydantic validation are working correctly."
+  - task: "Spot Vision Check — optimized latency (image downscale + terse binary prompt + ref-sample few-shot)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "OPTIMIZED: _spot_vision_check() now downscales user photo to 512px longest edge via new _downscale_image_b64 helper (97% payload reduction in benchmark), uses terse system prompt ('Is there a {target}? compact JSON y/c/d/r') instead of the previous verbose referee persona, caps Creator reference images to 2 (was 3) and downscales them to 384px. Output schema back-compat: maps short keys (y/c/d/r) to old (detected/confidence/distance/reason). Measured: 1.0-1.7s per call vs ~4-6s previously."
+        - working: true
+          agent: "testing"
+          comment: "PASS regression — 5/5 assertions (run 2026-04-30). GET /spot/object → 200 with {object, challenge_id}. POST /spot/check with empty photo → 400 'photo_base64 required'. POST /spot/check with real Flickr leaf JPEG (~24KB) target='leaf' → 200 with keys {detected, confidence, reason, distance, can_capture} present and shape correct; LLM returned detected=True conf=1.0 and can_capture invariant `detected AND confidence>=0.55` holds. POST /spot/check with target='chair' and the same leaf photo → 200 with detected=False, confidence=0.0, can_capture=False (shape correct, negative case working). GPT-4o-mini via emergentintegrations reached successfully; call-to-call latency ~1-2s."
+  - task: "Leaderboard Admin Display — is_admin_view + level=999 sentinel for Creator rows"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "FIX: /api/friends/leaderboard row serializer now calls _is_admin_email() on each uid and, when the Creator is viewed by someone else, emits name='Admin · Creator', level=999, total_xp=-1, weekly_xp unchanged, is_admin=true, is_admin_view=true."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 13/13 assertions (run 2026-04-30). Registered fresh non-admin B (Priya Sharma @ gmail.com). B POST /friends/request {user_id:admin} → 200, admin POST /friends/accept {user_id:B} → 200. (a) B GET /friends/leaderboard?tz=0 → 200 with 2 rows. Admin row has name='Admin · Creator', level=999, total_xp=-1, is_admin=true, is_admin_view=true — exactly as specified. (b) B self row has is_admin=false, is_admin_view=false, real level=1. (c) Admin GET /friends/leaderboard?tz=0 → 200; admin's OWN row has is_admin_view=false, real level=1, real total_xp=40, real name='Filip · Creator' (the Creator's stored full_name, which differs from the 'Admin · Creator' public display label — admin-viewing-self sees truth). (d) Other row (B) unchanged when admin views. All sentinel values and is_admin_view toggle working correctly."
+  - task: "Push Notification Token Registration — loud logging + validation"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "OBSERVABILITY: POST /push/register-token now emits `print('[push/register-token] HIT user_id=… platform=… token_prefix=…')` on every call, and logs matched/modified/upserted counts on success. Empty token still rejected with 400. Idempotent upsert behaviour unchanged."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 8/8 assertions (run 2026-04-30). (a) POST /push/register-token {token:'ExponentPushToken[testtest]', platform:'android'} as authed user → 200 with response body containing ok:true AND the new extended keys matched=0, modified=0, upserted=true (first insert). (b) Same token re-POST → 200 with upserted=false and matched=1 (idempotent upsert). (c) Empty token → 400 'token required'. (d) Anonymous (no JWT, no X-Anonymous-Id) → 200 with ok:true (legacy 'main' binding, observed upserted_id=69f340cd... and matched=0 modified=0 since that token was new for legacy user). Loud logging verified in backend logs — stdout shows '[push/register-token] HIT user_id=afdc7a2c-... token_prefix=\\'ExponentPushToken[testtest]\\' platform=\\'android\\'' and '[push/register-token] OK user_id=... matched=1 modified=1 upserted_id=None' on each call, and '[push/register-token] REJECT user_id=... reason=empty_token' on the empty-token path."
+  - task: "Debug endpoint /api/debug/health-connect-error"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "NEW: POST /api/debug/health-connect-error — accepts {stage, message?, error_name?, platform?, os_version?, device?, app_version?, extra?} and persists to db.health_connect_errors + prints loudly to server stdout. Used by the Samsung Health Connect frontend to ship native handshake failures server-side for debugging."
+        - working: true
+          agent: "testing"
+          comment: "PASS — 3/3 assertions (run 2026-04-30). (a) POST /debug/health-connect-error {stage:'initialize', message:'test', platform:'android', os_version:'35'} as authed user → 200 {ok:true}. (b) POST with just {stage:'availability'} (extra omitted — it's Optional) → 200 (does not crash on missing optional fields). (c) Anonymous POST (no JWT, no X-Anonymous-Id) → 200 {ok:true} (uses get_user_or_legacy → falls back to 'main'). Loud logging verified in stdout: '[HC-ERROR] user_id=afdc7a2c-... stage=\\'initialize\\' msg=\\'test\\' platform=\\'android\\' os=\\'35\\' ...' fires per call. Docs persist to db.health_connect_errors as designed."
   - task: "Friend Profile DETAILS endpoint (/api/friends/profile/{other_id}/details) — friend-gated mini-apps + tasks + goals"
     implemented: true
     working: true
@@ -389,6 +459,10 @@ test_plan:
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+    - agent: "testing"
+      message: "2026-04-30 regression of the 5 new/modified capabilities — 55/55 PASS via /app/backend_test.py against https://xp-confidence.preview.emergentagent.com/api.\n\n  ✅ [1] Spot Photo Editing (HIGHEST PRIORITY): Registered Owner (Maya Patel) + Other (Ryan Chen) @ gmail.com. Owner created real JPEG spot entry via /spot/complete (target='ball'). All 3 filters (painting/bw/auto) return valid JPEGs (magic bytes verified, PIL.Image.verify passes). /spot/edit/save overwrites photo_base64 AND sets edited_at ISO timestamp (verified via GET /spot/{id}). Ownership enforced: Other→403 on both preview and save. Bogus entry_id→404 on both. Invalid filter='sepia'→422 (Pydantic Literal). Empty edited_base64→400, >12M→400. 17/17 assertions PASS.\n\n  ✅ [2] Spot Vision regression: /spot/object→200 shape ok; /spot/check empty→400; real leaf JPEG target=leaf→200 with full shape {detected,confidence,reason,distance,can_capture} and invariant holds (detected=True,conf=1.0,can_capture=True); leaf photo target=chair→200 with detected=False,conf=0.0 (correct negative). 5/5 PASS.\n\n  ✅ [3] Leaderboard Admin Display: Registered B (Priya Sharma), made B↔admin friends. B sees 2 rows; admin row has name='Admin · Creator' exactly, level=999, total_xp=-1, is_admin=true, is_admin_view=true. B self row has is_admin=false, is_admin_view=false, real level=1. Admin viewing own LB: admin_self row has is_admin_view=false, real level=1, real total_xp=40, real stored name='Filip · Creator'. 13/13 PASS.\n\n  ✅ [4] /push/register-token: valid token→200 with ok:true AND new extended keys matched=0/modified=0/upserted=true. Re-POST same token→200 upserted=false, matched=1 (idempotent). Empty token→400 'token required'. Anonymous (no auth)→200 bound to legacy 'main'. Loud logging verified in backend stdout — '[push/register-token] HIT user_id=... token_prefix=... platform=...' and '[push/register-token] OK user_id=... matched=.. modified=.. upserted_id=..' fire on every call; REJECT path logs 'reason=empty_token'. 8/8 PASS.\n\n  ✅ [5] /debug/health-connect-error: authed with full payload→200 ok:true; authed with only {stage:'availability'} (extra omitted)→200 (does not crash on missing Optional fields); anonymous→200 (uses get_user_or_legacy). Loud logging '[HC-ERROR] user_id=... stage=... msg=... platform=... os=... device=... app_v=...' fires per call. 3/3 PASS.\n\n  ✅ Regression smoke: /auth/register (gmail) → JWT immediate; /auth/login admin (correct creds)→200; /profile (JWT)→200; /spot/feed?limit=50→200 (entries:[1]); /friends/list→200. 5/5 PASS.\n\n  NOTE: Review request referenced /api/spot/get-object but the actual endpoint is /api/spot/object (same semantics; tested with that). No bugs found across any of the 5 tasks. All marked working:true, needs_retesting:false. Main agent can ship."
 
 agent_communication:
     - agent: "testing"

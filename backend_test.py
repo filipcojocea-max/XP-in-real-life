@@ -1,449 +1,683 @@
-"""Backend test for Direct Messaging + AI safety guard + Admin reports.
+"""Backend regression + new-feature test harness.
 
-Run: python /app/backend_test.py
+Covers the 5 new/modified capabilities from the 2026-04-29 review request:
+  1. Spot Photo Editing (/spot/edit/preview, /spot/edit/save)
+  2. Spot Vision Check optimized latency (regression)
+  3. Leaderboard Admin Display (is_admin_view + level=999 sentinel)
+  4. Push Token Registration (loud logging + extended response body)
+  5. Debug endpoint /api/debug/health-connect-error
+
+Plus targeted regression smoke:
+  /api/auth/register, /api/auth/login, /api/profile, /api/spot/feed,
+  /api/friends/list.
 """
-import os
+
 import sys
-import time
 import uuid
-import json
 import base64
-import random
-import string
+import io
+import traceback
+import urllib.request
+import ssl
+
 import requests
 
 BASE = "https://xp-confidence.preview.emergentagent.com/api"
-TIMEOUT = 90
-
 ADMIN_EMAIL = "filip.cojocea122@gmail.com"
 ADMIN_PASSWORD = "XL98CZW5599"
 
-PASS = []
-FAIL = []
+PASSES = 0
+FAILS = 0
 
 
-def _check(cond: bool, label: str, info=""):
-    tag = "PASS" if cond else "FAIL"
-    line = f"[{tag}] {label}"
-    if info and not cond:
-        line += f"  ({info})"
-    print(line)
-    (PASS if cond else FAIL).append(label)
-    return cond
+def ok(msg):
+    global PASSES
+    PASSES += 1
+    print(f"  ✅ {msg}")
 
 
-def _post(path, json=None, headers=None):
-    return requests.post(BASE + path, json=json, headers=headers or {}, timeout=TIMEOUT)
+def bad(msg):
+    global FAILS
+    FAILS += 1
+    print(f"  ❌ {msg}")
 
 
-def _get(path, headers=None):
-    return requests.get(BASE + path, headers=headers or {}, timeout=TIMEOUT)
+def section(title):
+    print(f"\n=== {title} ===")
 
 
-def _rnd_email(prefix):
-    return f"{prefix}.{uuid.uuid4().hex[:8]}@gmail.com"
+def h(token=None, anon=None):
+    out = {"Content-Type": "application/json"}
+    if token:
+        out["Authorization"] = f"Bearer {token}"
+    if anon:
+        out["X-Anonymous-Id"] = anon
+    return out
 
 
-def _hdr(token):
-    return {"Authorization": f"Bearer {token}"}
+def register(full_name, email, password):
+    r = requests.post(f"{BASE}/auth/register", json={
+        "full_name": full_name, "email": email, "password": password,
+    }, timeout=30)
+    r.raise_for_status()
+    d = r.json()
+    return d["token"], d["user"]
 
 
-def _register(name, email, password):
-    r = _post("/auth/register", json={"full_name": name, "email": email, "password": password})
-    if r.status_code != 200:
-        raise RuntimeError(f"register failed: {r.status_code} {r.text}")
-    body = r.json()
-    return body["token"], body["user"]
+def login(email, password):
+    r = requests.post(f"{BASE}/auth/login", json={
+        "email": email, "password": password,
+    }, timeout=30)
+    r.raise_for_status()
+    d = r.json()
+    return d["token"], d["user"]
 
 
-def _fetch_image_b64():
-    """Fetch a real small JPEG (leaf) from loremflickr.com and return b64."""
+def fresh_email(tag):
+    return f"sdet_{tag}_{uuid.uuid4().hex[:10]}@gmail.com"
+
+
+def download_loremflickr(keyword="leaf", w=320, h=240):
+    url = f"https://loremflickr.com/{w}/{h}/{keyword}"
+    ctx = ssl.create_default_context()
+    req = urllib.request.Request(url, headers={"User-Agent": "sdet/1.0"})
+    with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+        data = resp.read()
+    return base64.b64encode(data).decode("ascii")
+
+
+def make_tiny_jpeg_b64():
+    from PIL import Image
+    im = Image.new("RGB", (200, 160), (80, 140, 60))
+    for x in range(0, 200, 10):
+        for y in range(0, 160, 10):
+            im.putpixel((x, y), (200, 80, 60))
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=82)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def is_valid_jpeg_b64(b64):
     try:
-        url = f"https://loremflickr.com/200/200/leaf?lock={random.randint(1, 9999)}"
-        r = requests.get(url, timeout=20, allow_redirects=True)
-        if r.status_code == 200 and len(r.content) > 1000:
-            return base64.b64encode(r.content).decode("ascii")
-    except Exception as e:
-        print(f"image fetch failed: {e}")
-    # Fallback: small valid JPEG
-    minimal = bytes.fromhex(
-        "ffd8ffe000104a46494600010100000100010000ffdb0043000806060706050806070707"
-        "0909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837"
-        "292c30313434341f27393d38323c2e333432ffdb0043010909090c0b0c180d0d18321f1c"
-        "1f3232323232323232323232323232323232323232323232323232323232323232323232"
-        "32323232323232323232323232323232ffc0001108000100010301220002110103110103"
-        "ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400"
-        "b5100002010303020403050504040000017d010203000411051221314106135161072271"
-        "1432819114a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363"
-        "738393a434445464748494a535455565758595a636465666768696a737475767778797a"
-        "8485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3"
-        "c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa"
-        "ffda0008010100003f00fbfcffd9"
-    )
-    return base64.b64encode(minimal).decode("ascii")
+        raw = base64.b64decode(b64)
+        if raw[:3] != b"\xff\xd8\xff":
+            return False
+        from PIL import Image
+        Image.open(io.BytesIO(raw)).verify()
+        return True
+    except Exception:
+        return False
 
 
-def main():
-    print(f"=== Direct Messaging + Admin Reports test against {BASE} ===")
-    suffix = uuid.uuid4().hex[:6]
+section("0. Admin login")
+admin_token, admin_user = None, None
+try:
+    admin_token, admin_user = login(ADMIN_EMAIL, ADMIN_PASSWORD)
+    ok(f"Admin login → 200, admin_id={admin_user['id']}")
+except Exception as e:
+    bad(f"Admin login failed: {e}")
 
-    alice_email = _rnd_email(f"alice{suffix}")
-    bob_email = _rnd_email(f"bob{suffix}")
-    carol_email = _rnd_email(f"carol{suffix}")
+ADMIN_ID = admin_user["id"] if admin_user else None
 
-    alice_token, alice_user = _register("Alice Morgan", alice_email, "Strong#Pass1A")
-    bob_token, bob_user = _register("Bob Carter", bob_email, "Strong#Pass1B")
-    carol_token, carol_user = _register("Carol Diaz", carol_email, "Strong#Pass1C")
+# ══════════════════════════════════════════════════════════════════
+# 1. SPOT PHOTO EDITING (HIGHEST PRIORITY)
+# ══════════════════════════════════════════════════════════════════
+section("1. Spot Photo Editing — /spot/edit/preview & /spot/edit/save")
 
-    alice_id = alice_user["id"]
-    bob_id = bob_user["id"]
-    carol_id = carol_user["id"]
-    print(f"alice={alice_id}\nbob={bob_id}\ncarol={carol_id}")
+owner_email = fresh_email("owner")
+other_email = fresh_email("other")
+owner_token = other_token = None
+owner_id = other_id = None
 
-    A = _hdr(alice_token)
-    B = _hdr(bob_token)
-    C = _hdr(carol_token)
+try:
+    owner_token, ouser = register("Maya Patel", owner_email, "StrongPass99!")
+    owner_id = ouser["id"]
+    ok(f"Owner registered id={owner_id}")
+except Exception as e:
+    bad(f"Owner register failed: {e}")
 
-    # Friend Alice ↔ Bob (use /friends/accept since /friends/respond doesn't exist)
-    r = _post("/friends/request", json={"user_id": bob_id}, headers=A)
-    _check(r.status_code == 200, "SETUP: Alice → Bob friend request 200", f"{r.status_code} {r.text}")
-    r = _post("/friends/accept", json={"user_id": alice_id}, headers=B)
-    _check(r.status_code == 200 and r.json().get("status") == "friends",
-           "SETUP: Bob accepts → friends", f"{r.status_code} {r.text}")
+try:
+    other_token, xuser = register("Ryan Chen", other_email, "AnotherPwd88!")
+    other_id = xuser["id"]
+    ok(f"Other registered id={other_id}")
+except Exception as e:
+    bad(f"Other register failed: {e}")
 
-    # ── 1. /messages/refine ─────────────────────────────────────────────
-    print("\n— [1] /messages/refine —")
-    r = _post("/messages/refine", json={"text": "hey hows it going lol"}, headers=A)
-    if _check(r.status_code == 200, "refine: casual text 200", f"{r.status_code} {r.text}"):
-        d = r.json()
-        _check(isinstance(d.get("refined"), str) and len(d["refined"]) > 0,
-               "refine: refined non-empty for casual text", json.dumps(d))
-        _check(d.get("severity") in ("none", "mild"),
-               f"refine: severity ∈ none|mild got={d.get('severity')}", json.dumps(d))
-        _check(d.get("flagged") is False,
-               f"refine: flagged=false got={d.get('flagged')}", json.dumps(d))
-
-    r = _post("/messages/refine", json={"text": ""}, headers=A)
-    if _check(r.status_code == 200, "refine: empty 200", f"{r.status_code} {r.text}"):
-        d = r.json()
-        _check(d.get("refined", "x") == "" and d.get("severity") == "none",
-               "refine: empty → refined='' severity='none'", json.dumps(d))
-
-    r = _post("/messages/refine", json={"text": "shit dude this sucks"}, headers=A)
-    if _check(r.status_code == 200, "refine: profanity 200", f"{r.status_code} {r.text}"):
-        d = r.json()
-        _check(d.get("severity") in ("none", "mild"),
-               f"refine: profanity severity in (none, mild) got={d.get('severity')}", json.dumps(d))
-        _check(isinstance(d.get("refined"), str), "refine: profanity returns string")
-
-    r = _post("/messages/refine", json={"text": "send me nudes right now baby"}, headers=A)
-    if _check(r.status_code == 200, "refine: explicit/predatory 200", f"{r.status_code} {r.text}"):
-        d = r.json()
-        _check(d.get("severity") == "severe",
-               f"refine: explicit → severity='severe' got={d.get('severity')}", json.dumps(d))
-        _check(d.get("refined", "x") == "",
-               "refine: explicit → refined=''", json.dumps(d))
-        _check(d.get("flagged") is True,
-               "refine: explicit → flagged=true", json.dumps(d))
-
-    # ── 2. /messages/send ───────────────────────────────────────────────
-    print("\n— [2] /messages/send —")
-    r = _post("/messages/send",
-              json={"to_user_id": bob_id,
-                    "refined_text": "Hey Bob! How's it going?",
-                    "original_text": "hey bob hows it going"},
-              headers=A)
-    if _check(r.status_code == 200, "send: Alice→Bob good 200", f"{r.status_code} {r.text}"):
-        msg = r.json().get("message", {})
-        _check(bool(msg.get("id")), "send: msg has id")
-        _check(msg.get("from_user_id") == alice_id, "send: from=Alice")
-        _check(msg.get("to_user_id") == bob_id, "send: to=Bob")
-        _check(bool(msg.get("text")), "send: text non-empty")
-        _check(msg.get("severity") in ("none", "mild"),
-               f"send: severity none|mild got={msg.get('severity')}")
-        _check(msg.get("read_at") is None, "send: read_at=null")
-
-    r = _post("/messages/send", json={"to_user_id": carol_id, "refined_text": "hi"}, headers=A)
-    _check(r.status_code == 403, f"send: Alice→Carol stranger 403 got={r.status_code}", r.text)
-
-    r = _post("/messages/send", json={"to_user_id": alice_id, "refined_text": "self note"}, headers=A)
-    _check(r.status_code == 400, f"send: self → 400 got={r.status_code}", r.text)
-
-    r = _post("/messages/send", json={"to_user_id": bob_id, "refined_text": ""}, headers=A)
-    _check(r.status_code == 400, f"send: empty → 400 got={r.status_code}", r.text)
-
-    r = _post("/messages/send",
-              json={"to_user_id": bob_id,
-                    "refined_text": "send me nude pics right now baby",
-                    "original_text": "send me nude pics right now baby"},
-              headers=A)
-    if _check(r.status_code == 400, f"send: predatory blocked 400 got={r.status_code}", r.text):
-        try:
-            payload = r.json()
-        except Exception:
-            payload = {}
-        detail = payload.get("detail", payload)
-        if isinstance(detail, dict):
-            _check(detail.get("error") == "blocked",
-                   f"send: predatory detail.error='blocked' got={detail.get('error')}", json.dumps(detail))
-        else:
-            _check(False, f"send: predatory detail not dict: {detail}")
-
-    # ── 3. /messages/threads ────────────────────────────────────────────
-    print("\n— [3] /messages/threads —")
-    r = _get("/messages/threads", headers=A)
-    if _check(r.status_code == 200, "threads: Alice GET 200", f"{r.status_code} {r.text}"):
-        threads = r.json().get("threads", [])
-        bob_t = next((t for t in threads if t.get("friend_id") == bob_id), None)
-        _check(bob_t is not None, "threads: Alice has Bob thread")
-        if bob_t:
-            _check(bob_t.get("last_message") is not None, "threads: last_message present")
-            _check(bob_t.get("unread_count") == 0,
-                   f"threads: Alice unread=0 got={bob_t.get('unread_count')}")
-
-    r = _get("/messages/threads", headers=B)
-    if _check(r.status_code == 200, "threads: Bob GET 200", f"{r.status_code} {r.text}"):
-        threads = r.json().get("threads", [])
-        alice_t = next((t for t in threads if t.get("friend_id") == alice_id), None)
-        _check(alice_t is not None, "threads: Bob has Alice thread")
-        if alice_t:
-            _check(alice_t.get("unread_count") == 1,
-                   f"threads: Bob unread=1 got={alice_t.get('unread_count')}")
-            _check((alice_t.get("last_message") or {}).get("text"),
-                   "threads: Bob last_message has text")
-
-    r = _get("/messages/threads", headers=C)
-    if _check(r.status_code == 200, "threads: Carol GET 200", f"{r.status_code} {r.text}"):
-        _check(r.json().get("threads") == [], "threads: Carol empty")
-
-    # ── 4. /messages/thread/{friend_id} ─────────────────────────────────
-    print("\n— [4] /messages/thread/{friend_id} —")
-    r = _get(f"/messages/thread/{alice_id}", headers=B)
-    if _check(r.status_code == 200, "thread: Bob → Alice 200", f"{r.status_code} {r.text}"):
-        msgs = r.json().get("messages", [])
-        _check(len(msgs) >= 1, f"thread: ≥1 msg got={len(msgs)}")
-        if msgs:
-            _check(bool(msgs[0].get("id")) and bool(msgs[0].get("text")),
-                   "thread: msg shape ok")
-            ts = [m.get("created_at", "") for m in msgs]
-            _check(ts == sorted(ts), "thread: chronological order")
-
-    r = _get(f"/messages/thread/{carol_id}", headers=B)
-    _check(r.status_code == 403, f"thread: Bob → Carol stranger 403 got={r.status_code}")
-
-    # ── 5. /messages/read ───────────────────────────────────────────────
-    print("\n— [5] /messages/read —")
-    r = _post("/messages/read", json={"friend_id": alice_id}, headers=B)
-    if _check(r.status_code == 200, "read: Bob → Alice thread 200", f"{r.status_code} {r.text}"):
-        _check(r.json().get("updated", 0) >= 1,
-               f"read: updated≥1 got={r.json().get('updated')}")
-
-    r = _get("/messages/threads", headers=B)
-    if r.status_code == 200:
-        threads = r.json().get("threads", [])
-        alice_t = next((t for t in threads if t.get("friend_id") == alice_id), None)
-        if alice_t:
-            _check(alice_t.get("unread_count") == 0,
-                   f"read: post-read unread=0 got={alice_t.get('unread_count')}")
-
-    r = _post("/messages/read", json={"friend_id": carol_id}, headers=B)
-    _check(r.status_code == 403, f"read: Bob → Carol stranger 403 got={r.status_code}")
-
-    # ── 6. /messages/unread-summary ─────────────────────────────────────
-    print("\n— [6] /messages/unread-summary —")
-    for n in (1, 2):
-        r = _post("/messages/send",
-                  json={"to_user_id": bob_id,
-                        "refined_text": f"Following up #{n} — let me know.",
-                        "original_text": f"following up #{n}"},
-                  headers=A)
-        _check(r.status_code == 200, f"unread-summary: prep send #{n}", f"{r.status_code} {r.text}")
-
-    r = _get("/messages/unread-summary", headers=B)
-    if _check(r.status_code == 200, "unread-summary: Bob GET 200", f"{r.status_code} {r.text}"):
-        d = r.json()
-        unread = d.get("unread_by_friend", {})
-        _check(unread.get(alice_id) == 2,
-               f"unread-summary: Alice→Bob unread=2 got={unread.get(alice_id)}", json.dumps(d))
-        _check(d.get("total_unread") == 2,
-               f"unread-summary: total_unread=2 got={d.get('total_unread')}", json.dumps(d))
-
-    # ── 7. /push/register-token ─────────────────────────────────────────
-    print("\n— [7] /push/register-token —")
-    fake_token = "ExponentPushToken[fakebob]"
-    r = _post("/push/register-token", json={"token": fake_token, "platform": "android"}, headers=B)
-    _check(r.status_code == 200 and r.json().get("ok") is True,
-           f"push: register 200 ok=true got={r.status_code} {r.text}")
-
-    r = _post("/push/register-token", json={"token": fake_token, "platform": "android"}, headers=B)
-    _check(r.status_code == 200, f"push: re-register 200 (upsert) got={r.status_code}")
-
-    r = _post("/push/register-token", json={"token": "", "platform": "ios"}, headers=B)
-    _check(r.status_code == 400, f"push: empty 400 got={r.status_code}")
-
-    r = requests.post(BASE + "/push/register-token",
-                      json={"token": "ExponentPushToken[anonGuy]", "platform": "ios"},
-                      timeout=TIMEOUT)
-    _check(r.status_code == 200, f"push: anonymous 200 got={r.status_code} {r.text}")
-
-    # ── 8. /messages/check-image ────────────────────────────────────────
-    print("\n— [8] /messages/check-image —")
-    img_b64 = _fetch_image_b64()
-    print(f"  (image b64 len={len(img_b64)})")
-    r = _post("/messages/check-image", json={"image_base64": img_b64}, headers=A)
-    if _check(r.status_code == 200, "check-image: leaf JPEG 200", f"{r.status_code} {r.text[:200]}"):
-        d = r.json()
-        _check(isinstance(d.get("safe"), bool), f"check-image: safe is bool got={d.get('safe')}")
-        _check(d.get("severity") in ("none", "mild", "severe"),
-               f"check-image: severity ok got={d.get('severity')}")
-        _check("reason" in d, "check-image: has reason")
-
-    r = _post("/messages/check-image", json={"image_base64": ""}, headers=A)
-    _check(r.status_code == 400, f"check-image: empty 400 got={r.status_code}")
-
-    big = "A" * 8_000_001
-    r = _post("/messages/check-image", json={"image_base64": big}, headers=A)
-    _check(r.status_code == 400, f"check-image: >8MB 400 got={r.status_code}")
-
-    # ── 9. Admin endpoints ──────────────────────────────────────────────
-    print("\n— [9] Admin endpoints —")
-    r = _post("/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
-    if not _check(r.status_code == 200, f"admin: login 200 got={r.status_code}", r.text):
-        print("Admin login failed; cannot continue admin tests")
-    else:
-        admin_token = r.json()["token"]
-        AD = _hdr(admin_token)
-
-        r = _get("/admin/reports", headers=AD)
-        if _check(r.status_code == 200, f"admin: GET /admin/reports 200 got={r.status_code}"):
-            d = r.json()
-            _check("reports" in d and isinstance(d["reports"], list), "admin: reports list")
-            _check("new_count" in d and isinstance(d["new_count"], int), "admin: new_count int")
-            reports = d["reports"]
-            new_count_initial = d.get("new_count", 0)
-            alice_report = next(
-                (rep for rep in reports
-                 if rep.get("reported_user_id") == alice_id
-                 and rep.get("kind") == "message_text"
-                 and rep.get("severity") == "severe"
-                 and not rep.get("viewed_at")
-                 and not rep.get("dismissed_at")),
-                None,
-            )
-            if not alice_report:
-                alice_report = next(
-                    (rep for rep in reports
-                     if rep.get("reported_user_id") == alice_id
-                     and rep.get("kind") == "message_text"),
-                    None,
-                )
-            _check(alice_report is not None,
-                   "admin: Alice severe message_text report present",
-                   f"reported_user_ids sample={[r.get('reported_user_id') for r in reports[:8]]}")
-            if alice_report:
-                _check(alice_report.get("severity") == "severe", "admin: severity=severe")
-                _check(alice_report.get("kind") == "message_text", "admin: kind=message_text")
-                rid = alice_report.get("id")
-
-                r = _get("/admin/reports", headers=B)
-                _check(r.status_code == 403, f"admin: Bob non-admin → 403 got={r.status_code}")
-
-                r = _post(f"/admin/reports/{rid}/view", headers=AD)
-                _check(r.status_code == 200, f"admin: view 200 got={r.status_code} {r.text}")
-
-                r = _get("/admin/reports", headers=AD)
-                d2 = r.json()
-                same = next((rep for rep in d2.get("reports", []) if rep.get("id") == rid), None)
-                _check(same is not None and same.get("viewed_at") is not None,
-                       f"admin: post-view viewed_at populated got={same.get('viewed_at') if same else None}")
-                _check(d2.get("new_count", 99) <= max(0, new_count_initial - 1),
-                       f"admin: new_count decremented {new_count_initial}→{d2.get('new_count')}")
-
-                r = _post(f"/admin/reports/{rid}/dismiss", headers=AD)
-                _check(r.status_code == 200, f"admin: dismiss 200 got={r.status_code}")
-
-                r = _get("/admin/reports", headers=AD)
-                d3 = r.json()
-                still = next((rep for rep in d3.get("reports", []) if rep.get("id") == rid), None)
-                _check(still is None, "admin: dismissed report no longer in inbox")
-
-    # ── 10. Regression ──────────────────────────────────────────────────
-    print("\n— [10] Regression —")
-    r = _post("/auth/login", json={"email": alice_email, "password": "Strong#Pass1A"})
-    _check(r.status_code == 200, f"regression: /auth/login 200 got={r.status_code}", r.text)
-    r = _post("/auth/login", json={"email": alice_email, "password": "WrongPass!"})
-    _check(r.status_code == 401, f"regression: wrong pw 401 got={r.status_code}")
-
-    r = _get("/profile", headers=A)
-    if _check(r.status_code == 200, f"regression: /profile 200 got={r.status_code}"):
-        prof = r.json()
-        _check("last_seen_at" in prof,
-               f"regression: /profile has last_seen_at (keys with seen/tz: {[k for k in prof.keys() if 'seen' in k or 'tz' in k]})")
-        _check("onboarding_tz_done" in prof,
-               "regression: /profile has onboarding_tz_done")
-
-    # /api/spot/match smoke
-    r = _post("/spot/match/create", json={"friend_ids": [bob_id]}, headers=A)
-    if _check(r.status_code == 200, f"regression: spot/match/create 200 got={r.status_code} {r.text[:200]}"):
-        match = r.json().get("match", {})
-        match_id = match.get("id")
-        _check(bool(match_id), "regression: match has id")
-        _check(match.get("status") == "waiting",
-               f"regression: status=waiting got={match.get('status')}")
-        if match_id:
-            r = _get("/spot/match/list", headers=A)
-            _check(r.status_code == 200, f"regression: spot/match/list 200 got={r.status_code}")
-            r = _get(f"/spot/match/{match_id}", headers=A)
-            _check(r.status_code == 200, f"regression: spot/match/{{id}} 200 got={r.status_code}")
-            r = _post(f"/spot/match/{match_id}/cancel", headers=A)
-            _check(r.status_code == 200, f"regression: spot/match cancel 200 got={r.status_code}")
-
-    # /friends/list with last_seen_at
-    r = _get("/friends/list", headers=A)
-    if _check(r.status_code == 200, f"regression: friends/list 200 got={r.status_code}"):
-        body = r.json()
-        if isinstance(body, list):
-            friends = body
-        else:
-            friends = body.get("friends") or body.get("data") or []
-        if friends:
-            _check(any("last_seen_at" in f for f in friends),
-                   f"regression: friends entry has last_seen_at (keys={list(friends[0].keys())})")
-        else:
-            _check(False, f"regression: friends list empty: {str(body)[:200]}")
-
-    # /challenge/today — best-effort NOW quote check
-    found_now = False
-    sample = ""
-    for _ in range(3):
-        r = _get("/challenge/today", headers=A)
+entry_id = None
+target = "leaf"
+if owner_token:
+    try:
+        r = requests.get(f"{BASE}/spot/object", headers=h(owner_token), timeout=30)
         if r.status_code == 200:
-            quote = (r.json().get("quote") or {})
-            qtext = quote.get("text", "") or ""
-            if not sample:
-                sample = qtext
-            if "NOW" in qtext:
-                found_now = True
-                break
-    if not found_now:
+            target = r.json().get("object") or "leaf"
+            ok(f"/spot/object → 200 target={target!r}")
+        else:
+            bad(f"/spot/object → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"/spot/object failed: {e}")
+
+    try:
+        photo = make_tiny_jpeg_b64()
+        r = requests.post(f"{BASE}/spot/complete", headers=h(owner_token), json={
+            "target_object": target,
+            "photo_base64": photo,
+            "success": True,
+            "remaining_seconds": 0,
+            "mode": "solo_constant",
+        }, timeout=30)
+        if r.status_code == 200:
+            d = r.json()
+            entry_id = (d.get("entry") or {}).get("id")
+            if entry_id:
+                ok(f"/spot/complete → 200 entry_id={entry_id}")
+            else:
+                bad(f"/spot/complete 200 but no entry_id: {d}")
+        else:
+            bad(f"/spot/complete → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"/spot/complete failed: {e}")
+        traceback.print_exc()
+
+preview_results = {}
+if entry_id and owner_token:
+    for flt in ["painting", "bw", "auto"]:
         try:
-            with open("/app/backend/challenges_data.py", "r") as fh:
-                src = fh.read()
-            _check("is NOW." in src,
-                   f"regression: 'is NOW.' present in challenges_data.py (today's user-specific quote='{sample[:60]}')")
+            r = requests.post(f"{BASE}/spot/edit/preview", headers=h(owner_token), json={
+                "entry_id": entry_id, "filter": flt,
+            }, timeout=60)
+            if r.status_code != 200:
+                bad(f"/spot/edit/preview {flt} → {r.status_code} {r.text[:200]}")
+                continue
+            b64 = r.json().get("edited_base64")
+            if not b64:
+                bad(f"/spot/edit/preview {flt}: no edited_base64")
+                continue
+            if is_valid_jpeg_b64(b64):
+                ok(f"/spot/edit/preview filter={flt} → valid JPEG ({len(b64)} b64 chars)")
+                preview_results[flt] = b64
+            else:
+                bad(f"/spot/edit/preview {flt}: base64 not a valid JPEG")
         except Exception as e:
-            _check(False, f"regression: could not check NOW quote: {e}")
+            bad(f"/spot/edit/preview {flt} failed: {e}")
+
+if entry_id and owner_token and "auto" in preview_results:
+    saved_b64 = preview_results["auto"]
+    try:
+        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
+            "entry_id": entry_id, "edited_base64": saved_b64,
+        }, timeout=30)
+        if r.status_code == 200 and r.json().get("ok") is True:
+            ok("/spot/edit/save owner → 200 {ok:true}")
+        else:
+            bad(f"/spot/edit/save → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"/spot/edit/save failed: {e}")
+
+    try:
+        r = requests.get(f"{BASE}/spot/{entry_id}", headers=h(owner_token), timeout=30)
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("photo_base64") == saved_b64:
+                ok("GET /spot/{id}.photo_base64 == saved edited_base64")
+            else:
+                bad(f"photo_base64 mismatch (stored_len={len(d.get('photo_base64') or '')}, saved_len={len(saved_b64)})")
+            if d.get("edited_at"):
+                ok(f"GET /spot/{{id}}.edited_at set ({d['edited_at']})")
+            else:
+                bad("GET /spot/{id}.edited_at NOT set")
+        else:
+            bad(f"GET /spot/{{id}} → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"GET /spot/{{id}} failed: {e}")
+
+# 1e: Other cannot preview → 403
+if entry_id and other_token:
+    try:
+        r = requests.post(f"{BASE}/spot/edit/preview", headers=h(other_token), json={
+            "entry_id": entry_id, "filter": "bw",
+        }, timeout=30)
+        if r.status_code == 403:
+            ok("Other /spot/edit/preview on owner entry → 403")
+        else:
+            bad(f"Other preview → {r.status_code} expected 403")
+    except Exception as e:
+        bad(f"Other preview failed: {e}")
+
+# 1f: Other cannot save → 403
+if entry_id and other_token and "bw" in preview_results:
+    try:
+        r = requests.post(f"{BASE}/spot/edit/save", headers=h(other_token), json={
+            "entry_id": entry_id, "edited_base64": preview_results["bw"],
+        }, timeout=30)
+        if r.status_code == 403:
+            ok("Other /spot/edit/save on owner entry → 403")
+        else:
+            bad(f"Other save → {r.status_code} expected 403")
+    except Exception as e:
+        bad(f"Other save failed: {e}")
+
+# 1g: Bogus id preview → 404
+if owner_token:
+    try:
+        r = requests.post(f"{BASE}/spot/edit/preview", headers=h(owner_token), json={
+            "entry_id": "does-not-exist", "filter": "painting",
+        }, timeout=30)
+        if r.status_code == 404:
+            ok("/spot/edit/preview bogus id → 404")
+        else:
+            bad(f"/spot/edit/preview bogus → {r.status_code} expected 404")
+    except Exception as e:
+        bad(f"bogus preview failed: {e}")
+
+# 1h: Bogus id save → 404
+if owner_token:
+    try:
+        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
+            "entry_id": "does-not-exist", "edited_base64": "xxx",
+        }, timeout=30)
+        if r.status_code == 404:
+            ok("/spot/edit/save bogus id → 404")
+        else:
+            bad(f"/spot/edit/save bogus → {r.status_code} expected 404")
+    except Exception as e:
+        bad(f"bogus save failed: {e}")
+
+# 1i: Invalid filter → 422
+if owner_token and entry_id:
+    try:
+        r = requests.post(f"{BASE}/spot/edit/preview", headers=h(owner_token), json={
+            "entry_id": entry_id, "filter": "sepia",
+        }, timeout=30)
+        if r.status_code == 422:
+            ok("/spot/edit/preview filter='sepia' → 422 (Pydantic Literal)")
+        else:
+            bad(f"/spot/edit/preview filter=sepia → {r.status_code} expected 422")
+    except Exception as e:
+        bad(f"invalid filter failed: {e}")
+
+# 1j: Empty save → 400
+if owner_token and entry_id:
+    try:
+        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
+            "entry_id": entry_id, "edited_base64": "",
+        }, timeout=30)
+        if r.status_code == 400:
+            ok("/spot/edit/save empty → 400")
+        else:
+            bad(f"/spot/edit/save empty → {r.status_code} expected 400")
+    except Exception as e:
+        bad(f"empty save failed: {e}")
+
+# 1k: >12M save → 400
+if owner_token and entry_id:
+    try:
+        big = "A" * 12_000_001
+        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
+            "entry_id": entry_id, "edited_base64": big,
+        }, timeout=60)
+        if r.status_code == 400:
+            ok("/spot/edit/save >12M → 400")
+        else:
+            bad(f"/spot/edit/save >12M → {r.status_code} expected 400")
+    except Exception as e:
+        bad(f"big save failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 2. SPOT VISION CHECK regression
+# ══════════════════════════════════════════════════════════════════
+section("2. Spot Vision Check — /spot/object + /spot/check regression")
+
+if owner_token:
+    try:
+        r = requests.get(f"{BASE}/spot/object", headers=h(owner_token), timeout=30)
+        if r.status_code == 200 and r.json().get("object") and r.json().get("challenge_id"):
+            ok("/spot/object → 200 with {object, challenge_id}")
+        else:
+            bad(f"/spot/object → {r.status_code}")
+    except Exception as e:
+        bad(f"/spot/object failed: {e}")
+
+    try:
+        r = requests.post(f"{BASE}/spot/check", headers=h(owner_token), json={
+            "target_object": "leaf", "photo_base64": "",
+        }, timeout=30)
+        if r.status_code == 400:
+            ok("/spot/check empty photo → 400")
+        else:
+            bad(f"/spot/check empty → {r.status_code} expected 400")
+    except Exception as e:
+        bad(f"/spot/check empty failed: {e}")
+
+    try:
+        leaf_b64 = download_loremflickr("leaf", 320, 240)
+        r = requests.post(f"{BASE}/spot/check", headers=h(owner_token), json={
+            "target_object": "leaf", "photo_base64": leaf_b64,
+        }, timeout=60)
+        if r.status_code == 200:
+            d = r.json()
+            required = {"detected", "confidence", "reason", "distance", "can_capture"}
+            if required.issubset(d.keys()):
+                ok(f"/spot/check leaf/leaf → shape OK detected={d['detected']} conf={d['confidence']}")
+            else:
+                bad(f"/spot/check leaf keys missing: {list(d.keys())}")
+            if bool(d.get("can_capture")) == bool(d.get("detected") and d.get("confidence", 0) >= 0.55):
+                ok("/spot/check can_capture invariant holds")
+            else:
+                bad(f"/spot/check invariant BROKEN: {d}")
+        else:
+            bad(f"/spot/check → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"/spot/check leaf failed: {e}")
+
+    try:
+        leaf_b64 = download_loremflickr("leaf", 320, 240)
+        r = requests.post(f"{BASE}/spot/check", headers=h(owner_token), json={
+            "target_object": "chair", "photo_base64": leaf_b64,
+        }, timeout=60)
+        if r.status_code == 200:
+            d = r.json()
+            if {"detected", "confidence", "can_capture"}.issubset(d.keys()):
+                ok(f"/spot/check chair/leaf shape OK detected={d['detected']} conf={d['confidence']}")
+            else:
+                bad(f"/spot/check chair/leaf shape bad: {d}")
+        else:
+            bad(f"/spot/check chair/leaf → {r.status_code}")
+    except Exception as e:
+        bad(f"/spot/check chair/leaf failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 3. LEADERBOARD ADMIN DISPLAY
+# ══════════════════════════════════════════════════════════════════
+section("3. Leaderboard Admin Display (is_admin_view / level=999)")
+
+B_email = fresh_email("lbB")
+B_token = None
+B_id = None
+try:
+    B_token, B_u = register("Priya Sharma", B_email, "LeaderboardB22!")
+    B_id = B_u["id"]
+    ok(f"B registered id={B_id}")
+except Exception as e:
+    bad(f"B register failed: {e}")
+
+if B_token and ADMIN_ID and admin_token:
+    try:
+        r = requests.post(f"{BASE}/friends/request", headers=h(B_token), json={"user_id": ADMIN_ID}, timeout=30)
+        if r.status_code == 200:
+            ok("B→admin /friends/request → 200")
+        else:
+            bad(f"B→admin request → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"friend request failed: {e}")
+
+    try:
+        r = requests.post(f"{BASE}/friends/accept", headers=h(admin_token), json={"user_id": B_id}, timeout=30)
+        if r.status_code == 200:
+            ok("admin accepts B → 200")
+        else:
+            bad(f"admin accept → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"accept failed: {e}")
+
+if B_token:
+    try:
+        r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h(B_token), timeout=30)
+        if r.status_code == 200:
+            d = r.json()
+            rows = d.get("rows", [])
+            if len(rows) >= 2:
+                ok(f"B leaderboard rows={len(rows)}")
+            else:
+                bad(f"B leaderboard rows={len(rows)} (expected >=2)")
+
+            admin_row = next((x for x in rows if x.get("user_id") == ADMIN_ID), None)
+            self_row = next((x for x in rows if x.get("user_id") == B_id), None)
+
+            if admin_row:
+                if admin_row.get("name") == "Admin · Creator":
+                    ok("Admin row name == 'Admin · Creator'")
+                else:
+                    bad(f"Admin row name → {admin_row.get('name')!r}")
+                if admin_row.get("level") == 999:
+                    ok("Admin row level == 999")
+                else:
+                    bad(f"Admin row level → {admin_row.get('level')}")
+                if admin_row.get("total_xp") == -1:
+                    ok("Admin row total_xp == -1")
+                else:
+                    bad(f"Admin row total_xp → {admin_row.get('total_xp')}")
+                if admin_row.get("is_admin") is True:
+                    ok("Admin row is_admin=true")
+                else:
+                    bad(f"Admin row is_admin → {admin_row.get('is_admin')}")
+                if admin_row.get("is_admin_view") is True:
+                    ok("Admin row is_admin_view=true")
+                else:
+                    bad(f"Admin row is_admin_view → {admin_row.get('is_admin_view')}")
+            else:
+                bad(f"Admin row missing from B lb; ids={[x.get('user_id') for x in rows]}")
+
+            if self_row:
+                if self_row.get("is_admin") is False:
+                    ok("B self is_admin=false")
+                else:
+                    bad(f"B self is_admin → {self_row.get('is_admin')}")
+                if self_row.get("is_admin_view") is False:
+                    ok("B self is_admin_view=false")
+                else:
+                    bad(f"B self is_admin_view → {self_row.get('is_admin_view')}")
+                if isinstance(self_row.get("level"), int) and self_row.get("level") < 999:
+                    ok(f"B self level is real ({self_row.get('level')})")
+                else:
+                    bad(f"B self level → {self_row.get('level')}")
+            else:
+                bad("B self row missing")
+        else:
+            bad(f"B leaderboard → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"B leaderboard failed: {e}")
+
+if admin_token:
+    try:
+        r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h(admin_token), timeout=30)
+        if r.status_code == 200:
+            rows = r.json().get("rows", [])
+            admin_self = next((x for x in rows if x.get("user_id") == ADMIN_ID), None)
+            if admin_self:
+                if admin_self.get("is_admin_view") is False:
+                    ok("Admin self-view is_admin_view=false")
+                else:
+                    bad(f"Admin self-view is_admin_view → {admin_self.get('is_admin_view')}")
+                if admin_self.get("level") != 999:
+                    ok(f"Admin self-view level is real ({admin_self.get('level')})")
+                else:
+                    bad("Admin self-view level == 999 (should be real)")
+                if admin_self.get("total_xp") != -1:
+                    ok(f"Admin self-view total_xp real ({admin_self.get('total_xp')})")
+                else:
+                    bad("Admin self-view total_xp == -1")
+                ok(f"Admin self-view name={admin_self.get('name')!r}")
+            else:
+                bad("Admin self row missing from admin lb")
+        else:
+            bad(f"Admin lb → {r.status_code}")
+    except Exception as e:
+        bad(f"Admin lb failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 4. PUSH TOKEN
+# ══════════════════════════════════════════════════════════════════
+section("4. /push/register-token")
+
+if owner_token:
+    token_str = "ExponentPushToken[testtest]"
+    try:
+        r = requests.post(f"{BASE}/push/register-token", headers=h(owner_token), json={
+            "token": token_str, "platform": "android",
+        }, timeout=30)
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("ok") is True:
+                ok("/push/register-token first → 200 ok:true")
+            else:
+                bad(f"/push/register-token first missing ok: {d}")
+            for key in ("matched", "modified", "upserted"):
+                if key in d:
+                    ok(f"response has {key}={d[key]}")
+                else:
+                    bad(f"response missing {key}")
+        else:
+            bad(f"/push/register-token first → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"push first failed: {e}")
+
+    try:
+        r = requests.post(f"{BASE}/push/register-token", headers=h(owner_token), json={
+            "token": token_str, "platform": "android",
+        }, timeout=30)
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("upserted") is False:
+                ok("2nd call upserted=false")
+            else:
+                bad(f"2nd call upserted → {d.get('upserted')}")
+            if d.get("matched", 0) >= 1:
+                ok(f"2nd call matched={d.get('matched')}")
+            else:
+                bad(f"2nd call matched → {d.get('matched')}")
+        else:
+            bad(f"2nd call → {r.status_code}")
+    except Exception as e:
+        bad(f"push 2nd failed: {e}")
+
+    try:
+        r = requests.post(f"{BASE}/push/register-token", headers=h(owner_token), json={
+            "token": "", "platform": "android",
+        }, timeout=30)
+        if r.status_code == 400:
+            ok("/push/register-token empty → 400")
+        else:
+            bad(f"/push/register-token empty → {r.status_code}")
+    except Exception as e:
+        bad(f"empty push failed: {e}")
+
+try:
+    r = requests.post(f"{BASE}/push/register-token", json={
+        "token": "ExponentPushToken[anonanon]", "platform": "ios",
+    }, headers={"Content-Type": "application/json"}, timeout=30)
+    if r.status_code == 200 and r.json().get("ok") is True:
+        ok("/push/register-token anonymous → 200 (legacy main)")
     else:
-        _check(True, f"regression: 'NOW' quote surfaced in /challenge/today: '{sample[:80]}'")
-
-    # ───────────────────────────────────────────────────────────────────
-    print(f"\n=== {len(PASS)} PASS, {len(FAIL)} FAIL ===")
-    if FAIL:
-        for f in FAIL:
-            print(f"  ✗ {f}")
-        sys.exit(1)
-    sys.exit(0)
+        bad(f"anon push → {r.status_code} {r.text[:200]}")
+except Exception as e:
+    bad(f"anon push failed: {e}")
 
 
-if __name__ == "__main__":
-    main()
+# ══════════════════════════════════════════════════════════════════
+# 5. DEBUG ENDPOINT
+# ══════════════════════════════════════════════════════════════════
+section("5. /debug/health-connect-error")
+
+if owner_token:
+    try:
+        r = requests.post(f"{BASE}/debug/health-connect-error", headers=h(owner_token), json={
+            "stage": "initialize", "message": "test", "platform": "android", "os_version": "35",
+        }, timeout=30)
+        if r.status_code == 200 and r.json().get("ok") is True:
+            ok("/debug/health-connect-error authed → 200 ok:true")
+        else:
+            bad(f"HC authed → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"HC authed failed: {e}")
+
+    try:
+        r = requests.post(f"{BASE}/debug/health-connect-error", headers=h(owner_token), json={
+            "stage": "availability",
+        }, timeout=30)
+        if r.status_code == 200:
+            ok("HC (only stage, no extra) → 200")
+        else:
+            bad(f"HC minimal → {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        bad(f"HC minimal failed: {e}")
+
+try:
+    r = requests.post(f"{BASE}/debug/health-connect-error", headers={"Content-Type": "application/json"}, json={
+        "stage": "anon_check", "message": "hello",
+    }, timeout=30)
+    if r.status_code == 200 and r.json().get("ok") is True:
+        ok("HC anonymous → 200 ok:true")
+    else:
+        bad(f"HC anon → {r.status_code} {r.text[:200]}")
+except Exception as e:
+    bad(f"HC anon failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# REGRESSION
+# ══════════════════════════════════════════════════════════════════
+section("R. Regression smoke")
+
+reg_email = fresh_email("reg")
+try:
+    r = requests.post(f"{BASE}/auth/register", json={
+        "full_name": "Regression Rita", "email": reg_email, "password": "RegPass1234!",
+    }, timeout=30)
+    if r.status_code == 200 and r.json().get("token"):
+        ok("/auth/register (gmail) → 200 + token")
+    else:
+        bad(f"/auth/register → {r.status_code}")
+except Exception as e:
+    bad(f"auth/register regression failed: {e}")
+
+try:
+    r = requests.post(f"{BASE}/auth/login", json={
+        "email": ADMIN_EMAIL, "password": ADMIN_PASSWORD,
+    }, timeout=30)
+    if r.status_code == 200 and r.json().get("token"):
+        ok("/auth/login admin → 200")
+    else:
+        bad(f"/auth/login admin → {r.status_code}")
+except Exception as e:
+    bad(f"admin login regression failed: {e}")
+
+if owner_token:
+    try:
+        r = requests.get(f"{BASE}/profile", headers=h(owner_token), timeout=30)
+        if r.status_code == 200 and r.json().get("name"):
+            ok("/profile (JWT) → 200")
+        else:
+            bad(f"/profile → {r.status_code}")
+    except Exception as e:
+        bad(f"/profile failed: {e}")
+
+if owner_token:
+    try:
+        r = requests.get(f"{BASE}/spot/feed?limit=50", headers=h(owner_token), timeout=30)
+        if r.status_code == 200 and "entries" in r.json():
+            ok(f"/spot/feed → 200 entries={len(r.json()['entries'])}")
+        else:
+            bad(f"/spot/feed → {r.status_code}")
+    except Exception as e:
+        bad(f"/spot/feed failed: {e}")
+
+if B_token:
+    try:
+        r = requests.get(f"{BASE}/friends/list", headers=h(B_token), timeout=30)
+        if r.status_code == 200:
+            body = r.json()
+            if isinstance(body, list) or (isinstance(body, dict) and isinstance(body.get("friends"), list)):
+                ok("/friends/list → 200 (list)")
+            else:
+                bad(f"/friends/list shape unexpected: {type(body).__name__}")
+        else:
+            bad(f"/friends/list → {r.status_code}")
+    except Exception as e:
+        bad(f"/friends/list failed: {e}")
+
+
+print(f"\n==================== {PASSES} passed / {FAILS} failed ====================")
+sys.exit(0 if FAILS == 0 else 1)

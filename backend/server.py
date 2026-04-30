@@ -4120,6 +4120,122 @@ async def spot_check(body: SpotCheckPayload, user_id: str = Depends(get_user_or_
     return result
 
 
+# ───────────────────── Spot the Object — Photo Editing ─────────────────
+# Post-capture filter pipeline. All three filters are computed server-side
+# via Pillow so the client doesn't need heavy image-processing libraries
+# and the round-trip is <500 ms for a 1 MB photo on a warm connection.
+#
+# Why server-side:
+#   - Pillow gives us deterministic, tested ImageEnhance primitives that
+#     produce the same result on every device (no GPU-driver variance).
+#   - Keeps the mobile app's bundle lean — no native skia / gl-react.
+#   - Leaves the door open to a true AI "painting" model later (gpt-image-1
+#     edit) without a mobile rebuild.
+#
+# Filters:
+#   - painting: Pillow edge-smoothed + posterize + saturation boost. Gives a
+#     clean oil-painting-esque result without an external API call.
+#   - bw: Pillow L-convert + autocontrast — crisp high-contrast black & white.
+#   - auto: Pillow autocontrast + saturation & contrast enhancement + mild
+#     highlight roll-off (tone curve pulls pure whites back to ~240) so the
+#     image looks punchier without blowing out.
+
+class SpotEditPreviewPayload(BaseModel):
+    entry_id: str
+    filter: Literal["painting", "bw", "auto"]
+
+
+class SpotEditSavePayload(BaseModel):
+    entry_id: str
+    edited_base64: str
+
+
+def _apply_spot_filter(b64: str, which: str) -> str:
+    """Apply an instant on-device-equivalent filter to a JPEG base64 photo."""
+    try:
+        import io, base64 as _b64
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+        data = _b64.b64decode(b64)
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        # Cap the working size at 1600 px longest edge — our spot photos
+        # are typically 1080-1200 px already so this is a safety net.
+        w, h = im.size
+        longest = max(w, h)
+        if longest > 1600:
+            scale = 1600 / float(longest)
+            im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+        if which == "bw":
+            # Neutral black & white with an autocontrast stretch so the
+            # result isn't muddy. A 1 % cutoff eliminates outliers.
+            im = ImageOps.grayscale(im).convert("RGB")
+            im = ImageOps.autocontrast(im, cutoff=1)
+        elif which == "auto":
+            # Punchier colors + slightly reduced highlights.
+            im = ImageOps.autocontrast(im, cutoff=0.5)
+            im = ImageEnhance.Color(im).enhance(1.18)     # +18 % saturation
+            im = ImageEnhance.Contrast(im).enhance(1.08)  # +8 % contrast
+            im = ImageEnhance.Brightness(im).enhance(1.02)
+            # Light highlight roll-off via a LUT: pixels > 245 get pulled
+            # down to blunt blown-out areas.
+            lut = []
+            for v in range(256):
+                lut.append(int(min(v, 250)))
+            im = im.point(lut * 3)
+        elif which == "painting":
+            # Edge-preserving smoothing to flatten fine detail → paint-like
+            # surfaces, then posterize to simulate brush strokes and a
+            # saturation bump for richer colors.
+            im = im.filter(ImageFilter.SMOOTH_MORE)
+            im = im.filter(ImageFilter.MedianFilter(size=5))
+            im = ImageOps.posterize(im, 5)                 # 32 colors/channel
+            im = ImageEnhance.Color(im).enhance(1.25)
+            im = ImageEnhance.Contrast(im).enhance(1.08)
+        else:
+            raise ValueError(f"unknown filter: {which}")
+
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=88, optimize=True)
+        return _b64.b64encode(out.getvalue()).decode("ascii")
+    except Exception as e:
+        raise HTTPException(400, f"edit failed: {e}")
+
+
+@api_router.post("/spot/edit/preview")
+async def spot_edit_preview(body: SpotEditPreviewPayload, user_id: str = Depends(get_user_or_legacy)):
+    """Return a preview of the chosen filter applied to the user's OWN
+    spot photo. Doesn't persist — the client must call /spot/edit/save
+    if the user hits the "Save Photo" button."""
+    entry = await db.spot_completions.find_one({"id": body.entry_id})
+    if not entry:
+        raise HTTPException(404, "Spot entry not found")
+    if entry.get("user_id") != user_id:
+        raise HTTPException(403, "You can only edit your own spot photos")
+    orig = entry.get("photo_base64") or ""
+    if not orig:
+        raise HTTPException(400, "No photo to edit")
+    edited = _apply_spot_filter(orig, body.filter)
+    return {"edited_base64": edited}
+
+
+@api_router.post("/spot/edit/save")
+async def spot_edit_save(body: SpotEditSavePayload, user_id: str = Depends(get_user_or_legacy)):
+    """Overwrite the spot photo with the edited version returned by
+    /spot/edit/preview. Only the owner of the spot can save."""
+    entry = await db.spot_completions.find_one({"id": body.entry_id})
+    if not entry:
+        raise HTTPException(404, "Spot entry not found")
+    if entry.get("user_id") != user_id:
+        raise HTTPException(403, "You can only edit your own spot photos")
+    if not body.edited_base64 or len(body.edited_base64) > 12_000_000:
+        raise HTTPException(400, "Invalid edited image")
+    await db.spot_completions.update_one(
+        {"id": body.entry_id},
+        {"$set": {"photo_base64": body.edited_base64, "edited_at": now_iso()}},
+    )
+    return {"ok": True}
+
+
 @api_router.post("/spot/complete")
 async def spot_complete(body: SpotCompletePayload, user_id: str = Depends(get_user_or_legacy)):
     """Save a completed spot attempt. Awards +1 spot point for successful solo
