@@ -4650,6 +4650,45 @@ async def spot_match_create(
     }
     await db.spot_matches.insert_one(match_doc)
     profiles = await _load_profiles_cache([user_id, *confirmed])
+
+    # Broadcast a push notification to every confirmed friend so they see
+    # the invite even if they don't have the app open. Each friend gets a
+    # tap-action that deep-links them straight into the lobby (the
+    # 2-minute countdown begins on the host's clock at *insert* time —
+    # see _match_invite_expiry_tick which auto-cancels lobbies older
+    # than 120s when no one has accepted).
+    try:
+        host_name = (
+            profiles.get(user_id, {}).get("full_name")
+            or profiles.get(user_id, {}).get("name")
+            or "A friend"
+        )
+        for fid in confirmed:
+            tokens = await db.push_tokens.find({"user_id": fid}).to_list(10)
+            for t in tokens:
+                tok = t.get("token")
+                if not tok:
+                    continue
+                try:
+                    await _send_expo_push(
+                        tok,
+                        f"🎯 {host_name} invited you to a 2-min Spot match",
+                        "Tap within 2 minutes to accept and join the lobby.",
+                        {
+                            "kind": "spot_match_invite",
+                            "match_id": match_doc["id"],
+                            "deeplink": f"/spot/multiplayer/{match_doc['id']}",
+                            "expires_at": (
+                                datetime.now(timezone.utc) + timedelta(seconds=120)
+                            ).isoformat(),
+                            "channelId": "spot_surprise",
+                        },
+                    )
+                except Exception as e:
+                    logger.warning("[match.invite.push] %s: %s", fid, e)
+    except Exception as e:
+        logger.warning("[match.invite.broadcast] %s", e)
+
     return {"match": _serialize_match(match_doc, user_id, profiles)}
 
 
@@ -5032,13 +5071,26 @@ async def _send_expo_push(token: str, title: str, body: str, data: dict | None =
         return {"ok": False, "status": None, "body": None, "token_valid": False, "reason": "bad_format"}
     try:
         import httpx
+        # Allow callers to override the Android channel via data.channelId
+        # (e.g. "spot_surprise" so the custom Spot notification sound plays).
+        channel = "motivational"
+        sound: str | dict = "default"
+        if isinstance(data, dict):
+            ch = (data.get("channelId") or "").strip()
+            if ch:
+                channel = ch
+            # iOS uses an explicit sound filename — for spot surprises we
+            # ship `spot_surprise.caf` (mapped from spot_surprise.mp3 in
+            # the Expo plugin) which plays the Creator-supplied sound.
+            if channel == "spot_surprise":
+                sound = "spot_surprise.wav"
         payload = {
             "to": token,
             "title": title[:80] or "XP in real life",
             "body": body[:200] or "You have a new update",
-            "sound": "default",
+            "sound": sound,
             "priority": "high",
-            "channelId": "motivational",   # Android channel created at first permission grant
+            "channelId": channel,
             "data": data or {},
         }
         async with httpx.AsyncClient(timeout=8.0) as cl:
@@ -6666,6 +6718,152 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
     }
 
 
+# ── Server-side notification scheduler ──────────────────────────────
+# 4× daily motivational pushes + 3× daily Spot-the-Object surprises
+# + 2-minute multiplayer-invite expiry sweep. Lives in
+# notif_scheduler.py to keep the lookup table of scheduled jobs small
+# and isolated from the request handlers above.
+try:
+    from notif_scheduler import init_scheduler as _init_notif_scheduler  # noqa: E402
+    from notif_scheduler import shutdown_scheduler as _shutdown_notif_scheduler  # noqa: E402
+except Exception as _imp_err:  # pragma: no cover
+    _init_notif_scheduler = None
+    _shutdown_notif_scheduler = None
+    logger.warning("[scheduler] module import failed: %s", _imp_err)
+
+
+# Server-side bank of motivational lines. Mirrors the front-end array
+# in src/notifications.ts so users get the same brand voice whether
+# the push came from the device's local schedule or our scheduler.
+_SERVER_MOTIVATIONAL_LINES = [
+    "Stay Focused. Stay Committed. Stay Consistent.",
+    "One more rep. One more win.",
+    "Future you is watching. Make them proud.",
+    "Small steps. Big quests. Stack XP.",
+    "Your streak is waiting for you.",
+    "Show up. Even now. Especially now.",
+    "Discipline is freedom. Tap in.",
+    "Every tick is a level up.",
+    "You don't need motivation. You need to move.",
+    "Legends are built 10 minutes at a time.",
+    "Your character is leveling up. Claim the XP.",
+    "Win the next 60 seconds.",
+    "The best version of you is one tap away.",
+    "No zero days.",
+    "Focus beats talent. Commit.",
+    "Keep the promise you made to yourself.",
+    "You are not behind. You are becoming.",
+    "Today's quest is waiting. Press play.",
+    "Confidence is built. Start building.",
+    "Level up in real life.",
+]
+
+
+def _server_pick_motivation() -> str:
+    import random as _r
+    return _r.choice(_SERVER_MOTIVATIONAL_LINES)
+
+
+async def _push_send_bool_wrapper(token: str, title: str, body: str, data: dict | None = None) -> bool:
+    """Adapter that turns _send_expo_push's dict response into a bool
+    for the scheduler module's typed signature."""
+    res = await _send_expo_push(token, title, body, data)
+    return bool(res and res.get("ok"))
+
+
+@app.on_event("startup")
+async def _start_notification_scheduler():
+    if _init_notif_scheduler is None:
+        return
+    try:
+        _init_notif_scheduler(
+            db=db,
+            send_push=_push_send_bool_wrapper,
+            pick_motivation=_server_pick_motivation,
+        )
+    except Exception as e:
+        logger.warning("[scheduler] start failed: %s", e)
+
+
+@app.on_event("shutdown")
+async def _stop_notification_scheduler():
+    if _shutdown_notif_scheduler is None:
+        return
+    try:
+        _shutdown_notif_scheduler()
+    except Exception:
+        pass
+
+
 # Re-attach api_router so endpoints declared after the original include
 # (admin-seed, catalog) are reachable.
+app.include_router(api_router)
+
+
+# ── Admin scheduler diagnostics ──────────────────────────────────────
+# These endpoints only respond for admins and are aimed at the
+# operator: "is the scheduler running? what jobs? when's the next run?".
+# They are useful both during dev and during a live incident.
+@api_router.get("/admin/scheduler/status")
+async def admin_scheduler_status(user_id: str = Depends(get_user_or_legacy)):
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only")
+    try:
+        from notif_scheduler import scheduler as _sched
+    except Exception:
+        return {"running": False, "jobs": []}
+    if _sched is None:
+        return {"running": False, "jobs": []}
+    jobs = []
+    try:
+        for j in _sched.get_jobs():
+            jobs.append({
+                "id": j.id,
+                "name": j.name,
+                "next_run_time": j.next_run_time.isoformat() if j.next_run_time else None,
+                "trigger": str(j.trigger),
+                "max_instances": getattr(j, "max_instances", None),
+            })
+    except Exception as e:
+        logger.warning("[scheduler.status] %s", e)
+    return {"running": _sched.running, "jobs": jobs}
+
+
+@api_router.post("/admin/scheduler/test-push")
+async def admin_scheduler_test_push(
+    body: dict, user_id: str = Depends(get_user_or_legacy),
+):
+    """Send an immediate push to a target user (or self) for QA. Body:
+    `{user_id?: str, kind?: 'motivation'|'spot_surprise'|'custom',
+       title?: str, body?: str}`. Admin-only."""
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only")
+    target = (body or {}).get("user_id") or user_id
+    kind = (body or {}).get("kind") or "motivation"
+    title = (body or {}).get("title")
+    msg = (body or {}).get("body")
+    if not title or not msg:
+        if kind == "spot_surprise":
+            title = "🎯 Spot the Object — Surprise Challenge"
+            msg = "Tap to start a 60-second hunt before the timer expires."
+        else:
+            title = "Critique AI · Daily push"
+            msg = _server_pick_motivation()
+    tokens = await db.push_tokens.find({"user_id": target}).to_list(20)
+    sent = 0
+    for t in tokens:
+        tok = t.get("token")
+        if not tok:
+            continue
+        res = await _send_expo_push(
+            tok, title, msg,
+            {"kind": kind, "channelId": "spot_surprise" if kind == "spot_surprise" else "motivational"},
+        )
+        if res and res.get("ok"):
+            sent += 1
+    return {"target": target, "tokens": len(tokens), "sent": sent, "kind": kind}
+
+
+# Final include for any endpoints declared AFTER the previous includes —
+# specifically the /admin/scheduler/* diagnostic endpoints above.
 app.include_router(api_router)

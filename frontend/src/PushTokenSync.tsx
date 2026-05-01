@@ -54,6 +54,38 @@ export function PushTokenSync() {
     let cancelled = false;
     (async () => {
       try {
+        // Android-only: ensure a dedicated 'spot_surprise' channel exists
+        // so notifications routed to it play the bundled custom sound and
+        // appear at HIGH importance (lock screen, sound, vibration). No-op
+        // on iOS because iOS uses payload-level sound + categories instead.
+        if (Platform.OS === 'android') {
+          try {
+            await Notifications.setNotificationChannelAsync('spot_surprise', {
+              name: 'Spot the Object · Surprise Challenges',
+              description: 'Random Spot the Object pings 3× a day + multiplayer match invites.',
+              importance: Notifications.AndroidImportance.HIGH,
+              sound: 'spot_surprise.wav',
+              vibrationPattern: [0, 250, 250, 250],
+              lightColor: '#00FF88',
+              lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+              enableLights: true,
+              enableVibrate: true,
+              showBadge: true,
+            });
+            await Notifications.setNotificationChannelAsync('motivational', {
+              name: 'Daily Motivation',
+              description: 'Up to 4 motivational pings a day.',
+              importance: Notifications.AndroidImportance.DEFAULT,
+              sound: 'default',
+              vibrationPattern: [0, 200, 200, 200],
+              lightColor: '#00FF88',
+              lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+            });
+            console.log('[PushTokenSync] Android notification channels registered.');
+          } catch (e: any) {
+            console.warn('[PushTokenSync] channel setup failed:', e?.message || e);
+          }
+        }
         const perm = await Notifications.getPermissionsAsync();
         console.log('[PushTokenSync] OS permission status:', perm.status, 'canAskAgain:', perm.canAskAgain);
         if (cancelled) return;

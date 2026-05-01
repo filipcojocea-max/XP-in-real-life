@@ -64,7 +64,8 @@
       [
         "expo-notifications",
         {
-          "color": "#00FF88"
+          "color": "#00FF88",
+          "sounds": ["./assets/sounds/spot_surprise.wav"]
         }
       ],
       [

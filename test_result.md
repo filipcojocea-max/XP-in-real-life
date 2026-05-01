@@ -105,6 +105,17 @@
 user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "Notification overhaul: APScheduler + multiplayer-invite broadcast (4× motivation/day, 3× Spot surprise/day, 2-min lobby expiry, /admin/scheduler/* diagnostics, custom Spot push sound)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py + /app/backend/notif_scheduler.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "PHASE 1 — backend overhaul + sound asset. (1) New `/app/backend/notif_scheduler.py` (APScheduler in-process AsyncIOScheduler) running 3 jobs: `_motivation_tick` (every 1 min) — fires per-user push at 09/13/17/20 local time, deduped per slot via `motivation_last_slot_key`; `_spot_surprise_tick` (every 1 min) — at first run of each user's local day generates 3 random slots in 09:00–21:00 with ≥90 min spacing, fires each as it comes due (≤30 min late grace, then silently consumed); `_match_invite_expiry_tick` (every 20 sec) — cancels any `spot_matches` row in `status='waiting'` older than 120 sec where `joined.length<=1`. (2) `_send_expo_push` now reads `data.channelId` so spot-surprise pushes route to the new Android channel + iOS uses `spot_surprise.wav`. (3) `/spot/match/create` now broadcasts a push notification to every confirmed friend with deeplink + 2-min `expires_at`. (4) Two new admin-only diagnostics: `GET /admin/scheduler/status` → `{running, jobs[{id,name,next_run_time,trigger}]}`; `POST /admin/scheduler/test-push {user_id?, kind:'motivation'|'spot_surprise'|'custom', title?, body?}` → fires a push immediately. Both 403 for non-admin. (5) Sound asset: Creator-supplied MP3 downloaded → converted to mono 22kHz WAV (132KB) at `/app/frontend/assets/sounds/spot_surprise.wav`, wired into expo-notifications plugin in app.json (`sounds: ['./assets/sounds/spot_surprise.wav']`) AND registered as the Android channel `spot_surprise` (HIGH importance, lock-screen visibility, vibration pattern) inside `PushTokenSync.tsx`. (6) `requirements.txt` updated: APScheduler==3.11.2, tzlocal==5.3.1. Smoke-tested live at https://xp-confidence.preview.emergentagent.com/api: 11/11 assertions pass (scheduler running with all 3 jobs, 403 gating, test-push returns sent counts, match create broadcast works, fresh match NOT cancelled by sweep, friend pairing flow works). Server-side scheduler logs confirm `[scheduler] started: motivation_tick + spot_surprise_tick + match_invite_expiry` and ticks running every 20s/60s without errors. NOTE: Phase 2 (frontend grace-period modal + Profile sync) deferred to next commit per scope budget."
   - task: "Boost activation — 500 fix on Creator-gifted custom boosts (POST /api/boosts/activate)"
     implemented: true
     working: true
