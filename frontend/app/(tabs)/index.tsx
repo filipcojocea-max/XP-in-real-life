@@ -14,7 +14,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import Ring from '../../src/components/Ring';
 import Card from '../../src/components/Card';
 import MotivationBanner from '../../src/components/MotivationBanner';
-import PremiumShield from '../../src/components/PremiumShield';
+import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
 import { api, Profile, DailyStats } from '../../src/api';
 import { colors, focusMeta, spacing, radii } from '../../src/theme';
 import { scheduleMotivationalNotifications, pickMotivation } from '../../src/notifications';
@@ -134,7 +134,14 @@ export default function Home() {
             <View style={styles.emblemCore}>
               <View style={styles.emblemGlow} />
               {profile.level >= 2 ? (
-                <PremiumShield size={110} level={profile.level} />
+                <PremiumShield
+                  size={110}
+                  level={getDynamicShieldLevel({
+                    level: profile.level,
+                    total_xp: profile.total_xp,
+                    is_admin: profile.is_admin,
+                  })}
+                />
               ) : (
                 <>
                   <Ionicons name="shield" size={88} color={colors.cyan} />

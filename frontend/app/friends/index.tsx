@@ -21,7 +21,7 @@ import { api, Player, FriendStatus, FriendRequestEntry, FriendProfileDetails, Fr
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 import LeaderboardTab from '../../src/components/LeaderboardTab';
-import PremiumShield from '../../src/components/PremiumShield';
+import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
 import { SuspendUserModal } from '../../src/components/SuspendUserModal';
 import { GiftComposerModal } from '../../src/components/GiftComposerModal';
 
@@ -642,7 +642,7 @@ function formatLastSeen(iso: string): string {
 }
 
 function PlayerAvatar({ player }: { player: Player }) {
-  const adminView = !!player.is_admin_view;
+  const adminView = !!player.is_admin_view || !!player.is_admin;
   // In list views we show a Level Shield as the fallback "avatar" so the
   // player's progression shines through at a glance — much more
   // expressive than a single letter. The actual user-uploaded photo is
@@ -659,14 +659,22 @@ function PlayerAvatar({ player }: { player: Player }) {
     );
   }
   // Admin profiles always render as a golden Lv999 shield even if no
-  // photo is set — keeps the Creator's visual identity consistent.
+  // photo is set — keeps the Creator's visual identity consistent across
+  // search, friends list, requests AND the admin's own self-row. We
+  // route every shield through the centralized `getDynamicShieldLevel`
+  // bridge so future tier rules live in ONE place.
   // CRITICAL: the shield renders as a FREE-STANDING SVG (no circular
   // clip). Previously we nested the shield inside a 44×44 `borderRadius:
   // 22` container with `overflow: 'hidden'`, which clipped the shield
   // points and produced an "empty yellow circle" for the admin (whose
   // shield is 18 % larger than a regular shield) and a bland blue blob
   // for regular Heroes. The fix: render the shield without clipping.
-  const shieldLevel = adminView ? 999 : Math.max(1, Number(player.level || 1));
+  const shieldLevel = getDynamicShieldLevel({
+    level: player.level,
+    total_xp: (player as any).total_xp,
+    is_admin: player.is_admin,
+    is_admin_view: player.is_admin_view,
+  });
   return (
     <View style={styles.shieldSlot} testID={`shield-slot-${player.user_id}`}>
       <PremiumShield level={shieldLevel} size={44} />
@@ -789,10 +797,19 @@ function PlayerProfileModal({
                   style={styles.bigAvatar}
                 />
               ) : (
-                <View style={[styles.bigAvatar, styles.avatarFallback]}>
-                  <Text style={styles.bigAvatarLetter}>
-                    {(player.name || '?').slice(0, 1).toUpperCase()}
-                  </Text>
+                // Big shield fallback in the player detail modal — uses
+                // the same dynamic bridge so non-admin friends evolve from
+                // blue → yellow → gold as their XP grows.
+                <View style={[styles.bigAvatar, styles.avatarFallback, { borderWidth: 0, backgroundColor: 'transparent' }]}>
+                  <PremiumShield
+                    level={getDynamicShieldLevel({
+                      level: player.level,
+                      total_xp: (player as any).total_xp,
+                      is_admin: player.is_admin,
+                      is_admin_view: player.is_admin_view,
+                    })}
+                    size={120}
+                  />
                 </View>
               )}
               <View style={styles.levelPill}>

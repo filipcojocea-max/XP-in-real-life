@@ -163,6 +163,37 @@ function pickTier(level: number): { tier: TierKey; sizeMul: number } {
   return { tier: 'blue', sizeMul: 1 };
 }
 
+/**
+ * Public bridge: maps a player's current state to the dynamic shield level
+ * the SVG should render at. Use this everywhere a shield is drawn so the
+ * tier picks itself based on the *latest* XP, with one consistent rule
+ * across Home, Profile, Friends List, Search and Leaderboard.
+ *
+ * Rules:
+ *   - Creator/Admin → ALWAYS the golden Creator shield (sentinel 999),
+ *     regardless of whether the admin is looking at themselves or others
+ *     are looking at them. This is the spec: the admin's progress shield
+ *     must look identical in every public surface.
+ *   - Anonymous / pre-Lv2 / missing data → falls back to Lv 1 (blue base).
+ *   - Otherwise → the player's real level (1..200).
+ *
+ * Optional `userXP` is accepted for forward compatibility (e.g. if we ever
+ * tier purely off raw XP instead of pre-computed level) but currently
+ * level is the source of truth, since the backend computes it consistently
+ * via xp_progress() on every read.
+ */
+export function getDynamicShieldLevel(opts: {
+  level?: number | null;
+  total_xp?: number | null;
+  is_admin?: boolean | null;
+  is_admin_view?: boolean | null;
+}): number {
+  if (opts?.is_admin || opts?.is_admin_view) return 999;
+  const lvl = Number(opts?.level || 0);
+  if (lvl >= 1) return Math.min(200, Math.floor(lvl));
+  return 1;
+}
+
 // ── Geometry (shared across all tiers) ─────────────────────────────────────
 const SHIELD_PATH =
   'M 50 8 L 14 18 L 14 50 C 14 76 30 92 50 102 C 70 92 86 76 86 50 L 86 18 L 50 8 Z';

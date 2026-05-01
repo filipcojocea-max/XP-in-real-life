@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
 import { useRouter, useFocusEffect } from 'expo-router';
 import Card from '../../src/components/Card';
 import Ring from '../../src/components/Ring';
@@ -140,7 +141,19 @@ export default function ProfileScreen() {
               {profile.avatar_base64 ? (
                 <Image source={{ uri: profile.avatar_base64 }} style={styles.avatarImg} />
               ) : (
-                <Ionicons name={profile.is_admin ? 'star' : 'shield'} size={70} color={profile.is_admin ? '#FFD700' : colors.cyan} />
+                // Single source of truth for the user's progress emblem.
+                // For the admin/Creator → gold Lv999 shield. Otherwise →
+                // tier-correct shield matching the leaderboard / friends
+                // list / search so what you see in your own profile is
+                // exactly what others see in public surfaces.
+                <PremiumShield
+                  size={120}
+                  level={getDynamicShieldLevel({
+                    level: profile.level,
+                    total_xp: profile.total_xp,
+                    is_admin: profile.is_admin,
+                  })}
+                />
               )}
             </View>
           </Ring>

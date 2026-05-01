@@ -27,7 +27,7 @@ import {
 } from '../api';
 import { showAlert } from '../uiAlert';
 import { colors, spacing, radii } from '../theme';
-import PremiumShield from './PremiumShield';
+import PremiumShield, { getDynamicShieldLevel } from './PremiumShield';
 
 const GOLD = '#FFD700';
 const GOLD_SOFT = '#FFC727';
@@ -209,7 +209,15 @@ function WinnerSpotlight({ winner, onTap }: { winner: LeaderboardRow & { medal_r
             <Image source={{ uri: `data:image/jpeg;base64,${winner.avatar_base64}` }} style={styles.winnerAvatar} />
           ) : (
             <View style={[styles.winnerAvatar, { alignItems: 'center', justifyContent: 'center' }]}>
-              <PremiumShield level={Math.max(1, Number(winner.level || 1))} size={56} />
+              <PremiumShield
+                level={getDynamicShieldLevel({
+                  level: winner.level,
+                  total_xp: (winner as any).total_xp,
+                  is_admin: (winner as any).is_admin,
+                  is_admin_view: (winner as any).is_admin_view,
+                })}
+                size={56}
+              />
             </View>
           )}
           {revoked ? (
@@ -270,11 +278,19 @@ function LeaderRow({ row, rank, isWinner, onPress }: { row: LeaderboardRow; rank
         {row.avatar_base64 ? (
           <Image source={{ uri: `data:image/jpeg;base64,${row.avatar_base64}` }} style={styles.avatar} />
         ) : (
-          // PremiumShield fallback — tier & color auto-derive from row.level.
-          // For the Creator, the backend sends level=999 (only when others
-          // view them) which triggers the golden "Creator" shield.
+          // PremiumShield fallback — tier & color auto-derive from the
+          // dynamic shield bridge so the Creator/Admin renders gold even
+          // on their own self-row (level=999 sentinel for is_admin).
           <View style={styles.avatar} testID={`lb-shield-${row.user_id}`}>
-            <PremiumShield level={Math.max(1, Number(row.level || 1))} size={40} />
+            <PremiumShield
+              level={getDynamicShieldLevel({
+                level: row.level,
+                total_xp: row.total_xp,
+                is_admin: row.is_admin,
+                is_admin_view: row.is_admin_view,
+              })}
+              size={40}
+            />
           </View>
         )}
       </View>
@@ -520,7 +536,15 @@ function LeaderboardProfileModal({
                     // detail modal — matches the "View Profile" page so the
                     // visual identity is consistent from list → detail.
                     <View style={[styles.profileAvatar, { alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent', borderWidth: 0 }]}>
-                      <PremiumShield level={Math.max(1, Number(profile.level || 1))} size={96} />
+                      <PremiumShield
+                        level={getDynamicShieldLevel({
+                          level: profile.level,
+                          total_xp: (profile as any).total_xp,
+                          is_admin: (profile as any).is_admin,
+                          is_admin_view: (profile as any).is_admin_view,
+                        })}
+                        size={96}
+                      />
                     </View>
                   )}
                 </View>
