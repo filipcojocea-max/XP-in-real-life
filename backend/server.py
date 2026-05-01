@@ -3253,49 +3253,127 @@ async def boosts_activate(body: BoostActivatePayload, user_id: str = Depends(get
             "message": "Enter the unlock code first to access XP boosts.",
         })
 
-    # New path: activate by inventory_id
+    # ── Resolve the boost to activate ─────────────────────────────────
+    # Two valid paths:
+    #   (A) inventory_id  → consume an entry from boost_inventory
+    #       (preferred — used by gifted boosts + claimed shop boosts)
+    #   (B) type only     → legacy, auto-creates a one-shot from BOOST_DEFS
     inv: list = prof.get("boost_inventory") or []
     entry = None
+    boost_type: Optional[str] = None
+    multiplier: Optional[int] = None
+    duration_days: Optional[int] = None
+    label: Optional[str] = None
+
     if body.inventory_id:
+        # Find the requested inventory entry. Be explicit about the
+        # failure mode so the client can show a useful message.
         for it in inv:
-            if it.get("id") == body.inventory_id and not it.get("activated"):
+            if it.get("id") == body.inventory_id:
                 entry = it
                 break
         if not entry:
             raise HTTPException(404, "Boost not in your inventory")
-        boost_type = entry["type"]
+        if entry.get("activated"):
+            # Idempotent guard — don't re-activate the same gift twice.
+            raise HTTPException(409, "This boost has already been activated.")
+        boost_type = entry.get("type") or "custom_gift"
+        # CRITICAL FIX: prefer the inventory entry's own metadata. Gifted
+        # entries (especially custom_gift) carry their multiplier +
+        # duration_days inline and their `type` may NOT exist in BOOST_DEFS.
+        # Falling back to BOOST_DEFS[type] without these guards used to
+        # crash with `TypeError: 'NoneType' object is not subscriptable`
+        # → 500 Internal Server Error on activation of any custom gift.
+        try:
+            multiplier = int(entry.get("multiplier") or 0)
+        except (TypeError, ValueError):
+            multiplier = 0
+        try:
+            duration_days = int(entry.get("duration_days") or 0)
+        except (TypeError, ValueError):
+            duration_days = 0
+        label = entry.get("label")
+        # Fill any missing piece from BOOST_DEFS as a last-ditch fallback.
+        if (not multiplier or not duration_days) and boost_type in BOOST_DEFS:
+            cfg = BOOST_DEFS[boost_type]
+            multiplier = multiplier or int(cfg.get("multiplier") or 0)
+            duration_days = duration_days or int(cfg.get("duration_days") or 0)
+            label = label or cfg.get("label")
     elif body.type:
-        # Legacy path: activate by type (auto-creates a consumable if unlocked)
         if body.type not in BOOST_DEFS:
             raise HTTPException(400, "Unknown boost type")
         boost_type = body.type
+        cfg = BOOST_DEFS[boost_type]
+        multiplier = int(cfg.get("multiplier") or 0)
+        duration_days = int(cfg.get("duration_days") or 0)
+        label = cfg.get("label")
     else:
         raise HTTPException(400, "inventory_id or type required")
 
-    cfg = BOOST_DEFS.get(boost_type)
-    expires = datetime.now(timezone.utc) + timedelta(days=cfg["duration_days"])
+    # Sanity-check the resolved metadata before we burn it into the
+    # profile. A malformed record (e.g. a partially-written gift) used
+    # to slip through and 500 later when serialize_profile tried to
+    # parse expires_at. We catch those here with a clear 400.
+    if not (isinstance(multiplier, int) and 2 <= multiplier <= 10):
+        raise HTTPException(400, "Boost multiplier is invalid (expected 2..10).")
+    if not (isinstance(duration_days, int) and 1 <= duration_days <= 365):
+        raise HTTPException(400, "Boost duration is invalid (expected 1..365 days).")
+
+    activated_at_dt = datetime.now(timezone.utc)
+    expires_dt = activated_at_dt + timedelta(days=duration_days)
     boost_doc = {
         "type": boost_type,
-        "multiplier": cfg["multiplier"],
-        "activated_at": now_iso(),
-        "expires_at": expires.isoformat(),
+        "multiplier": multiplier,
+        "duration_days": duration_days,
+        "label": label or boost_type,
+        "activated_at": activated_at_dt.isoformat(),
+        "expires_at": expires_dt.isoformat(),
     }
+
     # If we consumed an inventory entry, mark it activated (keeps history)
-    if entry:
-        await db.profile.update_one(
-            {"_id": user_id, "boost_inventory.id": entry["id"]},
-            {"$set": {
-                "xp_boost": boost_doc,
-                "boost_inventory.$.activated": True,
-                "boost_inventory.$.activated_at": now_iso(),
-                "boost_inventory.$.expires_at": expires.isoformat(),
-            }},
-        )
-    else:
-        await db.profile.update_one(
-            {"_id": user_id},
-            {"$set": {"xp_boost": boost_doc}},
-        )
+    try:
+        if entry:
+            res = await db.profile.update_one(
+                {
+                    "_id": user_id,
+                    # $elemMatch ensures we look at the SPECIFIC entry by id
+                    # AND check that *that* entry is not yet activated, in
+                    # one atomic query. (Without $elemMatch the activated
+                    # check would scan the whole array and reject any user
+                    # who has ANY other previously-activated boost.)
+                    "boost_inventory": {
+                        "$elemMatch": {
+                            "id": entry["id"],
+                            "activated": {"$ne": True},
+                        }
+                    },
+                },
+                {"$set": {
+                    "xp_boost": boost_doc,
+                    "boost_inventory.$.activated": True,
+                    "boost_inventory.$.activated_at": activated_at_dt.isoformat(),
+                    "boost_inventory.$.expires_at": expires_dt.isoformat(),
+                    # Persist any metadata that was missing on the gift
+                    # entry so future reads don't have to back-fill.
+                    "boost_inventory.$.multiplier": multiplier,
+                    "boost_inventory.$.duration_days": duration_days,
+                }},
+            )
+            if res.matched_count == 0:
+                # Either someone else already activated this entry (race)
+                # or it was deleted between the lookup and the update.
+                raise HTTPException(409, "This boost has already been activated.")
+        else:
+            await db.profile.update_one(
+                {"_id": user_id},
+                {"$set": {"xp_boost": boost_doc}},
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[boosts/activate] db update failed for user=%s: %s", user_id, e)
+        raise HTTPException(500, "Could not activate the boost. Please try again.")
+
     prof = await db.profile.find_one({"_id": user_id})
     return {"active_boost": _serialize_active_boost(prof), "profile": serialize_profile(prof)}
 

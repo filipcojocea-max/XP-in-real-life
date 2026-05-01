@@ -105,6 +105,17 @@
 user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "Boost activation — 500 fix on Creator-gifted custom boosts (POST /api/boosts/activate)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "BUG FIX (P0). User reported 'Internal Server Error' when activating a Creator-gifted Special Top-Up 2x boost. Root cause traced in two places: (1) `admin_gift_boost` writes inventory entries with `type='custom_gift'` for the custom path. The activation endpoint then did `cfg = BOOST_DEFS.get(boost_type)` followed by `cfg['duration_days']` — which crashes with `TypeError: 'NoneType' object is not subscriptable` (→ 500) because 'custom_gift' is NOT a key in BOOST_DEFS. (2) Even for preset gifts (e.g. `double_week`), gifts override `duration_days=1` but the activation read 7 from BOOST_DEFS, silently giving the wrong window. FIX: rewrote `boosts_activate` to (a) prefer the inventory entry's own `multiplier` + `duration_days` + `label` (the gifting endpoint already populates these), with BOOST_DEFS as a last-ditch fallback only; (b) validate multiplier 2..10 and duration 1..365 before computing expires (rejects partially-written gifts with a clean 400 instead of 500); (c) add idempotent 409 if the entry is already activated (separate from the 'not in inventory' 404); (d) atomic update guard via `$elemMatch` on the SPECIFIC entry id + `activated:{$ne:true}` to prevent races (previous attempt used `boost_inventory.activated:$ne:true` which incorrectly treated the whole array atomically); (e) wrap the DB update in try/except so any unexpected motor error returns a friendly 500 with logger.exception traceback instead of bubbling raw. xp_boost doc now also stores duration_days + label for the timer card. Verified via /tmp/boost_fix_test.py against the live ingress (https://xp-confidence.preview.emergentagent.com/api): admin gifts CUSTOM (5x for 3 days) → recipient activates → 200 with multiplier=5, expires=+3d. Admin gifts PRESET (`double_week` overridden to 1 day) → activate → 200 with multiplier=2, expires=+1d (correctly honours gift override, not the 7d default). Idempotent re-activation → 409 (was 500). Bogus inventory_id → 404. Legacy {type:'triple_day'} path still 200."
   - task: "Confidence: Dress with Confidence AI coach + history (/api/confidence/dress-advice, /api/confidence/dress-history, /api/confidence/dress-history/{id} DELETE, /api/confidence/weather)"
     implemented: true
     working: true
