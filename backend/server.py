@@ -4657,13 +4657,31 @@ async def spot_match_create(
     # 2-minute countdown begins on the host's clock at *insert* time —
     # see _match_invite_expiry_tick which auto-cancels lobbies older
     # than 120s when no one has accepted).
+    #
+    # DAYLIGHT-ONLY GATE: only push to friends currently inside their
+    # local sunrise→sunset window. A friend in night-mode (e.g. 02:00
+    # local) is silently skipped — the match still creates so the host
+    # can play, but we don't wake the friend up.
+    try:
+        from notif_scheduler import _is_daylight_now as _scheduler_is_daylight_now  # noqa: E402
+    except Exception:
+        _scheduler_is_daylight_now = None
     try:
         host_name = (
             profiles.get(user_id, {}).get("full_name")
             or profiles.get(user_id, {}).get("name")
             or "A friend"
         )
+        broadcast_count = 0
+        skipped_night = 0
         for fid in confirmed:
+            # Pull the friend's profile to check daylight. profiles cache
+            # already has it from _load_profiles_cache above.
+            fprof = profiles.get(fid) or await db.profile.find_one({"_id": fid}) or {}
+            if _scheduler_is_daylight_now and not _scheduler_is_daylight_now(fprof):
+                skipped_night += 1
+                logger.info("[match.invite.skip_night] user=%s tz=%s", fid, fprof.get("timezone"))
+                continue
             tokens = await db.push_tokens.find({"user_id": fid}).to_list(10)
             for t in tokens:
                 tok = t.get("token")
@@ -4684,8 +4702,13 @@ async def spot_match_create(
                             "channelId": "spot_surprise",
                         },
                     )
+                    broadcast_count += 1
                 except Exception as e:
                     logger.warning("[match.invite.push] %s: %s", fid, e)
+        logger.info(
+            "[match.invite.broadcast] match=%s pushed=%d skipped_night=%d",
+            match_doc["id"], broadcast_count, skipped_night,
+        )
     except Exception as e:
         logger.warning("[match.invite.broadcast] %s", e)
 
@@ -6862,6 +6885,43 @@ async def admin_scheduler_test_push(
         if res and res.get("ok"):
             sent += 1
     return {"target": target, "tokens": len(tokens), "sent": sent, "kind": kind}
+
+
+@api_router.get("/admin/scheduler/daylight")
+async def admin_scheduler_daylight(
+    user_id: str = Depends(get_user_or_legacy),
+    target_user_id: Optional[str] = None,
+):
+    """Inspect a user's daylight window and surprise-slot plan for today.
+    Useful for verifying the sunrise/sunset calc is sane in production.
+    Admin-only."""
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only")
+    target = target_user_id or user_id
+    prof = await db.profile.find_one({"_id": target})
+    if not prof:
+        raise HTTPException(404, "Profile not found")
+    try:
+        from notif_scheduler import (  # noqa: E402
+            _user_daylight_today,
+            _is_daylight_now,
+            _generate_spot_slots_for_user,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Scheduler unavailable: {e}")
+    sunrise, sunset = _user_daylight_today(prof)
+    return {
+        "user_id": target,
+        "timezone": prof.get("timezone"),
+        "now_utc": datetime.now(timezone.utc).isoformat(),
+        "sunrise_utc": sunrise.isoformat(),
+        "sunset_utc": sunset.isoformat(),
+        "is_daylight_now": _is_daylight_now(prof),
+        "next_3_random_slots_utc": _generate_spot_slots_for_user(prof),
+        "stored_slots": prof.get("spot_random_slots") or [],
+        "stored_slots_day": prof.get("spot_random_slots_day"),
+        "stored_consumed": prof.get("spot_random_consumed") or [],
+    }
 
 
 # Final include for any endpoints declared AFTER the previous includes —

@@ -32,6 +32,17 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# Astral — local sunrise/sunset calculations (no API key required).
+# Falls back to a hardcoded "safe daylight" window if the user's timezone
+# can't be resolved to a known city.
+try:
+    from astral.sun import sun as _astral_sun
+    from astral.geocoder import database as _astral_db, lookup as _astral_lookup
+    _ASTRAL_DB = _astral_db()
+except Exception:  # pragma: no cover
+    _astral_sun = None
+    _ASTRAL_DB = None
+
 logger = logging.getLogger("notif_scheduler")
 
 # Public hooks: server.py wires these to its own collections + push helper.
@@ -45,9 +56,11 @@ scheduler: Optional[AsyncIOScheduler] = None
 # Fixed local-time slots for motivational pushes. We deliberately spread
 # them across waking hours so the user doesn't get bombarded.
 MOTIVATION_LOCAL_HOURS = [9, 13, 17, 20]
-# Spot-the-Object surprise window (local time, inclusive).
-SPOT_RANDOM_HOUR_MIN = 9
-SPOT_RANDOM_HOUR_MAX = 21
+# Spot-the-Object surprise window — the OUTER bound. The actual upper /
+# lower bound is the user's local SUNRISE & SUNSET, intersected with
+# this fence so we don't ping someone at 04:00 in arctic summer.
+SPOT_RANDOM_FALLBACK_HOUR_MIN = 8
+SPOT_RANDOM_FALLBACK_HOUR_MAX = 21
 SPOT_RANDOM_DAILY_COUNT = 3
 
 DEFAULT_TZ = "Australia/Sydney"  # safe fallback when user has no TZ set
@@ -67,6 +80,103 @@ def _today_local(prof: dict) -> str:
 
 def _local_now(prof: dict) -> datetime:
     return datetime.now(_user_tz(prof))
+
+
+# ── Sunrise / sunset (per-user, daylight-aware) ─────────────────────
+# Resolves a profile's timezone string → an astral.LocationInfo so we
+# can compute today's sunrise + sunset in UTC. Falls back to a fixed
+# 06:00–20:00 local-day window if the city can't be resolved.
+_GEOCODE_OVERRIDES: dict[str, str] = {
+    # Common timezones whose city portion isn't directly findable in the
+    # astral built-in DB. Map to a representative city that IS in the DB.
+    "America/New_York": "New York",
+    "America/Los_Angeles": "Los Angeles",
+    "America/Chicago": "Chicago",
+    "America/Toronto": "Toronto",
+    "America/Mexico_City": "Mexico City",
+    "America/Sao_Paulo": "Sao Paulo",
+    "America/Argentina/Buenos_Aires": "Buenos Aires",
+    "Europe/London": "London",
+    "Europe/Paris": "Paris",
+    "Europe/Berlin": "Berlin",
+    "Europe/Madrid": "Madrid",
+    "Europe/Rome": "Rome",
+    "Europe/Amsterdam": "Amsterdam",
+    "Europe/Stockholm": "Stockholm",
+    "Europe/Bucharest": "Bucharest",
+    "Europe/Athens": "Athens",
+    "Europe/Moscow": "Moscow",
+    "Asia/Tokyo": "Tokyo",
+    "Asia/Shanghai": "Shanghai",
+    "Asia/Singapore": "Singapore",
+    "Asia/Kolkata": "Kolkata",
+    "Asia/Dubai": "Dubai",
+    "Asia/Bangkok": "Bangkok",
+    "Asia/Seoul": "Seoul",
+    "Australia/Sydney": "Sydney",
+    "Australia/Melbourne": "Melbourne",
+    "Australia/Perth": "Perth",
+    "Africa/Cairo": "Cairo",
+    "Africa/Lagos": "Lagos",
+    "Africa/Johannesburg": "Johannesburg",
+    "Pacific/Auckland": "Auckland",
+}
+
+
+def _user_daylight_today(prof: dict) -> tuple[datetime, datetime]:
+    """Return today's sunrise and sunset for the user's timezone, both as
+    UTC-aware datetimes. Today is whatever date it currently is in the
+    user's local timezone (i.e. for a Sydney user at UTC 16:00 it's
+    "today UTC + 1 day").
+
+    On any failure, fall back to a generous 06:00–20:00 local-day window
+    so the user still gets surprise pings — better than going dark."""
+    tz = _user_tz(prof)
+    local_today = datetime.now(tz).date()
+    # Fallback bounds (06:00 → 20:00 local) → UTC datetimes.
+    fb_dawn = datetime.combine(local_today, dtime(6, 0)).replace(tzinfo=tz).astimezone(timezone.utc)
+    fb_dusk = datetime.combine(local_today, dtime(20, 0)).replace(tzinfo=tz).astimezone(timezone.utc)
+
+    if _astral_sun is None or _ASTRAL_DB is None:
+        return fb_dawn, fb_dusk
+
+    tz_name = (prof.get("timezone") or "").strip() or DEFAULT_TZ
+    # Prefer the explicit override map; otherwise try the last segment.
+    candidate = _GEOCODE_OVERRIDES.get(tz_name) or tz_name.split("/")[-1].replace("_", " ")
+    try:
+        loc = _astral_lookup(candidate, _ASTRAL_DB)
+        # IMPORTANT: pass the LOCAL tz to astral so it returns local-day
+        # sunrise/sunset (not UTC-day, which wraps around midnight UTC
+        # for tz offsets >|UTC|. e.g. Sydney sunrise computed with
+        # tzinfo='UTC' returns NEXT-day's sunrise because solar noon
+        # falls into the previous UTC day). We then convert to UTC.
+        s = _astral_sun(loc.observer, date=local_today, tzinfo=tz)
+        sunrise = s.get("sunrise")
+        sunset = s.get("sunset")
+        if not sunrise or not sunset:
+            return fb_dawn, fb_dusk
+        sunrise_utc = sunrise.astimezone(timezone.utc)
+        sunset_utc = sunset.astimezone(timezone.utc)
+        if sunset_utc <= sunrise_utc:
+            # Pathological — fall back rather than return inverted bounds.
+            return fb_dawn, fb_dusk
+        return sunrise_utc, sunset_utc
+    except Exception as e:
+        logger.warning("[daylight] %s lookup failed: %s — using fallback", tz_name, e)
+        return fb_dawn, fb_dusk
+
+
+def _is_daylight_now(prof: dict) -> bool:
+    """True iff `datetime.utcnow()` falls between today's sunrise and
+    sunset for the given user's timezone. Used as the gate for the
+    multiplayer-invite broadcast push: we only ping friends who are
+    awake (i.e. in their daylight window)."""
+    try:
+        dawn, dusk = _user_daylight_today(prof)
+        now = datetime.now(timezone.utc)
+        return dawn <= now <= dusk
+    except Exception:
+        return True  # be lenient — never block a legit invite over a lookup error
 
 
 # ── Token push fan-out helper ─────────────────────────────────────────
@@ -94,28 +204,38 @@ async def _push_to_user(user_id: str, title: str, body: str, data: dict | None =
 
 
 # ── Spot-the-Object surprise slot generation ──────────────────────────
-def _generate_spot_slots(prof_tz: ZoneInfo, day: str) -> list[str]:
-    """Pick `SPOT_RANDOM_DAILY_COUNT` random datetimes inside the
-    09:00–21:00 local window for `day` (yyyy-mm-dd) and return them as a
-    sorted list of UTC iso8601 strings.
+def _generate_spot_slots_for_user(prof: dict) -> list[str]:
+    """Pick `SPOT_RANDOM_DAILY_COUNT` random datetimes inside the user's
+    sunrise→sunset window TODAY (in their local timezone), clamped by
+    SPOT_RANDOM_FALLBACK_HOUR_MIN/MAX so polar summer doesn't ping at
+    04:00. Returns sorted UTC iso8601 strings.
 
-    Slots are spaced at least 90 minutes apart so the user doesn't get a
-    burst of three pings in five minutes. We keep 30 retries; if we
-    can't satisfy the spacing constraint we still return whatever we
-    landed on (the spread is large so this rarely happens).
+    Slots are spaced at least 90 minutes apart.
     """
-    base = datetime.fromisoformat(f"{day}T00:00:00").replace(tzinfo=prof_tz)
+    tz = _user_tz(prof)
+    local_today = datetime.now(tz).date()
+    sunrise_utc, sunset_utc = _user_daylight_today(prof)
+    # Clamp to the fence so polar latitudes stay reasonable.
+    fence_min = datetime.combine(local_today, dtime(SPOT_RANDOM_FALLBACK_HOUR_MIN, 0)).replace(tzinfo=tz).astimezone(timezone.utc)
+    fence_max = datetime.combine(local_today, dtime(SPOT_RANDOM_FALLBACK_HOUR_MAX, 0)).replace(tzinfo=tz).astimezone(timezone.utc)
+    win_start = max(sunrise_utc, fence_min)
+    win_end = min(sunset_utc, fence_max)
+    if win_end - win_start < timedelta(minutes=180):
+        # Window collapsed (very high latitude winter, or geocode miss);
+        # fallback to fence so users still get pinged.
+        win_start, win_end = fence_min, fence_max
+
+    span_seconds = max(int((win_end - win_start).total_seconds()), 60)
     out: list[datetime] = []
-    for _ in range(60):
+    for _ in range(80):
         if len(out) >= SPOT_RANDOM_DAILY_COUNT:
             break
-        hour = random.randint(SPOT_RANDOM_HOUR_MIN, SPOT_RANDOM_HOUR_MAX - 1)
-        minute = random.randint(0, 59)
-        cand = base.replace(hour=hour, minute=minute)
+        offset = random.randint(0, span_seconds)
+        cand = win_start + timedelta(seconds=offset)
         if all(abs((cand - prev).total_seconds()) >= 90 * 60 for prev in out):
             out.append(cand)
     out.sort()
-    return [c.astimezone(timezone.utc).isoformat() for c in out]
+    return [c.isoformat() for c in out]
 
 
 # ── Tick: motivation ──────────────────────────────────────────────────
@@ -198,9 +318,12 @@ async def _spot_surprise_tick():
             slots = prof.get("spot_random_slots") or []
             consumed = set(prof.get("spot_random_consumed") or [])
             slots_day = prof.get("spot_random_slots_day")
-            # Re-roll the slot plan once per local day.
+            # Re-roll the slot plan once per local day. The new generator
+            # uses the user's actual sunrise→sunset window so we never
+            # ping someone in the middle of the night, and the spread
+            # auto-adjusts to long summer / short winter days.
             if slots_day != today or not slots:
-                slots = _generate_spot_slots(tz, today)
+                slots = _generate_spot_slots_for_user(prof)
                 consumed = set()
                 await _db.profile.update_one(
                     {"_id": prof["_id"]},

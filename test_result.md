@@ -105,6 +105,17 @@
 user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "Daylight-aware Spot scheduler (sunrise/sunset slots + multiplayer-broadcast night-skip + /admin/scheduler/daylight)"
+    implemented: true
+    working: true
+    file: "/app/backend/notif_scheduler.py + /app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "ENHANCED Phase 1 — replaced fixed 09:00–21:00 surprise window with REAL sunrise/sunset per user. (1) Added `astral` (no API key) — `_user_daylight_today(prof)` resolves the profile timezone via a `_GEOCODE_OVERRIDES` map (29 common tz→city pairs) plus `tz.split('/')[-1]` fallback, then `astral.sun(loc.observer, date=local_today, tzinfo=tz)` — CRUCIALLY passing the LOCAL tz (NOT 'UTC' as I first did) because passing UTC interprets the calendar date as a UTC date and wraps the sunrise to the next day for tz offsets > 0 (the bug surfaced for Sydney where sunrise UTC came back as ~12 h after sunset UTC). The result is converted to UTC. Falls back to 06:00–20:00 local if geocode fails or sunset≤sunrise (high latitude). (2) `_generate_spot_slots_for_user(prof)` now picks 3 random slots inside (max(sunrise, fence_min), min(sunset, fence_max)), where fence is 08:00–21:00 local, with ≥90 min spacing. Slot output is sorted UTC iso strings. (3) `_is_daylight_now(prof)` — boolean gate consumed by /spot/match/create's broadcast loop: only friends whose CURRENT UTC time falls inside their own sunrise→sunset are pushed. Skipped friends are logged via `[match.invite.skip_night]` so the operator can see exactly why a friend didn't get the ping. The match itself is still created (host plays solo if needed). (4) New admin diagnostic GET /admin/scheduler/daylight?target_user_id= → returns `{user_id, timezone, now_utc, sunrise_utc, sunset_utc, is_daylight_now, next_3_random_slots_utc, stored_slots, stored_slots_day, stored_consumed}` for inspection. Live smoke-tested at /tmp/daylight_test.py with 8/8 assertions passing across THREE timezones (Sydney, Tokyo, LA): sunrise<sunset always; all 3 slots fall inside the daylight window; different tz → different sunrise UTC; 403 for non-admin; match-create still 200; broadcast log confirms `pushed=0 skipped_night=1` for a Tokyo friend who happened to be 27 min past sunset at test time → CORRECT behaviour. requirements.txt now pins astral==3.2."
   - task: "Notification overhaul: APScheduler + multiplayer-invite broadcast (4× motivation/day, 3× Spot surprise/day, 2-min lobby expiry, /admin/scheduler/* diagnostics, custom Spot push sound)"
     implemented: true
     working: true
