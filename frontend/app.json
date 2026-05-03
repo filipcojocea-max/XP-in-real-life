@@ -18,12 +18,12 @@
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
         "NSCameraUsageDescription": "Take photos for profile and Spot the Object challenges",
-        "NSLocationWhenInUseUsageDescription": "Check local weather for outfit advice",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
+      "googleServicesFile": "./google-services.json",
       "versionCode": 1017,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
@@ -36,8 +36,6 @@
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.ACTIVITY_RECOGNITION",
         "android.permission.BODY_SENSORS",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.health.READ_SLEEP",
         "android.permission.health.READ_STEPS",
         "android.permission.health.READ_HEART_RATE",
@@ -64,8 +62,7 @@
       [
         "expo-notifications",
         {
-          "color": "#00FF88",
-          "sounds": ["./assets/sounds/spot_surprise.wav"]
+          "color": "#00FF88"
         }
       ],
       [
@@ -90,15 +87,6 @@
       ],
       "expo-web-browser",
       [
-        "expo-location",
-        {
-          "locationAlwaysAndWhenInUsePermission": "Check local weather for outfit advice",
-          "locationWhenInUsePermission": "Check local weather for outfit advice",
-          "isIosBackgroundLocationEnabled": false,
-          "isAndroidBackgroundLocationEnabled": false
-        }
-      ],
-      [
         "expo-camera",
         {
           "cameraPermission": "Take photos for profile and Spot the Object challenges",
@@ -106,8 +94,7 @@
           "recordAudioAndroid": false
         }
       ],
-      "react-native-health-connect",
-      "./plugins/withHealthConnectPermissions"
+      "react-native-health-connect"
     ],
     "experiments": {
       "typedRoutes": true
