@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,7 @@ import Card from '../../src/components/Card';
 import { api, Goal } from '../../src/api';
 import { colors, focusMeta, spacing, radii, FocusArea } from '../../src/theme';
 import { showAlert, showConfirm } from '../../src/uiAlert';
+import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
@@ -114,6 +115,10 @@ export default function Goals() {
       load();
     }, [load])
   );
+
+  // Reset to the top of the page every time the tab gains focus.
+  const scrollRef = useRef<ScrollView>(null);
+  useScrollToTopOnFocus(scrollRef);
 
   // Re-render every minute so countdown labels stay current.
   useTick(60_000);
@@ -220,7 +225,7 @@ export default function Goals() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {goals.length === 0 ? (
           <Card style={styles.empty}>
             <Ionicons name="flag" size={40} color={colors.textMuted} />

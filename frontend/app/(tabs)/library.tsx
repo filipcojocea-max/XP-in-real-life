@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { colors, spacing, radii, GOLD } from '../../src/theme';
 import { api } from '../../src/api';
+import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 
 type Tab = 'add' | 'mine';
 
@@ -26,6 +27,11 @@ export default function Library() {
   }, []);
   useEffect(() => { checkAdmin(); }, [checkAdmin]);
   useFocusEffect(React.useCallback(() => { checkAdmin(); }, [checkAdmin]));
+
+  // Reset Library+ to top on each focus so tapping the tab always
+  // shows the mini-app catalog header first.
+  const scrollRef = useRef<ScrollView>(null);
+  useScrollToTopOnFocus(scrollRef);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -77,6 +83,7 @@ export default function Library() {
       </View>
 
       <ScrollView
+        ref={scrollRef}
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
       >

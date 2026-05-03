@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import Ring from '../../src/components/Ring';
 import Card from '../../src/components/Card';
 import MotivationBanner from '../../src/components/MotivationBanner';
 import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
+import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 import { api, Profile, DailyStats } from '../../src/api';
 import { colors, focusMeta, spacing, radii } from '../../src/theme';
 import { scheduleMotivationalNotifications, pickMotivation } from '../../src/notifications';
@@ -70,6 +71,12 @@ export default function Home() {
     }, [load])
   );
 
+  // Reset scroll to the very top whenever the Home tab is re-focused,
+  // so tapping "Home" in the tab bar always brings the user to the top
+  // of the section (regardless of where they had scrolled previously).
+  const scrollRef = useRef<ScrollView>(null);
+  useScrollToTopOnFocus(scrollRef);
+
   if (loading || !profile || !daily) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -87,6 +94,7 @@ export default function Home() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <ScrollView
+        ref={scrollRef}
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         refreshControl={

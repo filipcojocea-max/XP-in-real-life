@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
+import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 import { useRouter, useFocusEffect } from 'expo-router';
 import Card from '../../src/components/Card';
 import Ring from '../../src/components/Ring';
@@ -45,6 +46,12 @@ export default function ProfileScreen() {
 
   useEffect(() => { load(); }, [load]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Always show the top of the Profile tab on focus so the avatar/
+  // shield/progress ring is the first thing the user sees after tapping
+  // the tab — regardless of where they'd previously scrolled to.
+  const scrollRef = useRef<ScrollView>(null);
+  useScrollToTopOnFocus(scrollRef);
 
   const saveName = async () => {
     if (!name.trim()) return;
@@ -126,7 +133,7 @@ export default function ProfileScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
           <View style={{ flex: 1 }}>
             <Text style={styles.kicker}>{profile.is_admin ? 'CREATOR · PREMIUM+' : 'Character'}</Text>

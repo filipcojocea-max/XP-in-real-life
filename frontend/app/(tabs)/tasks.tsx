@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -22,6 +22,7 @@ import Card from '../../src/components/Card';
 import { api, Task, userDate } from '../../src/api';
 import { colors, focusMeta, slotMeta, spacing, radii, FocusArea, TimeSlot } from '../../src/theme';
 import { useAuth } from '../../src/AuthContext';
+import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 import { router } from 'expo-router';
 import {
   ensureNotificationPermission,
@@ -90,6 +91,11 @@ export default function Tasks() {
       load();
     }, [load])
   );
+
+  // Scroll the Tasks feed back to the very top whenever the tab is
+  // re-focused, so the user always sees the current day first.
+  const scrollRef = useRef<ScrollView>(null);
+  useScrollToTopOnFocus(scrollRef);
 
   const showXp = (value: number) => {
     setXpFloater({ value });
@@ -244,7 +250,7 @@ export default function Tasks() {
         </Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {isAnonymous ? (
           <TouchableOpacity
             testID="anon-signin-banner"

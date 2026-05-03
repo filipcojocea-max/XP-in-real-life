@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import Card from '../../src/components/Card';
 import PointsPlusModal from '../../src/components/PointsPlusModal';
 import { api, WeeklyStats, Profile, Achievement } from '../../src/api';
 import { colors, focusMeta, spacing, radii, FocusArea } from '../../src/theme';
+import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
@@ -60,6 +61,10 @@ export default function Progress() {
     return () => clearInterval(id);
   }, [load]));
 
+  // Reset Progress scroll position to top when the tab regains focus.
+  const scrollRef = useRef<ScrollView>(null);
+  useScrollToTopOnFocus(scrollRef);
+
   if (loading || !weekly || !profile || !byArea) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -93,7 +98,7 @@ export default function Progress() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.topBar}>
           <View style={{ flex: 1 }}>
             <Text style={styles.kicker}>Progress</Text>
