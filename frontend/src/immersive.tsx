@@ -38,17 +38,22 @@ export function useImmersive() {
 }
 
 export function ImmersiveProvider({ children }: { children: React.ReactNode }) {
-  const [immersiveEnabled, setImmersiveEnabledState] = useState<boolean>(true);
+  // Default: immersive OFF (always show the navigation bar). The user's
+  // onboarding request is that a fresh install keeps the tab bar visible
+  // at all times — they can opt-IN to auto-hide via Profile → Settings.
+  const [immersiveEnabled, setImmersiveEnabledState] = useState<boolean>(false);
   // When immersive is OFF, force the bar visible at all times.
   const [tabBarVisible, setTabBarVisible] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Hydrate the persisted preference once on mount.
+  // '1' → immersive ON (auto-hide), '0' → immersive OFF (always show).
+  // Missing key → treat as default (OFF) so new installs always show.
   useEffect(() => {
     (async () => {
       try {
         const v = await AsyncStorage.getItem(PREF_KEY);
-        if (v === '0') setImmersiveEnabledState(false);
+        if (v === '1') setImmersiveEnabledState(true);
       } catch {}
     })();
   }, []);

@@ -65,7 +65,7 @@ const MOTIVATION_WINDOWS: {
   },
   {
     key: 'evening',
-    hour: 19,
+    hour: 17,
     minute: 0,
     title: 'Evening check-in',
     messages: [
@@ -77,7 +77,7 @@ const MOTIVATION_WINDOWS: {
   },
   {
     key: 'night',
-    hour: 22,
+    hour: 21,
     minute: 0,
     title: 'Last call',
     messages: [

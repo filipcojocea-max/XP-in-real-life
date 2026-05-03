@@ -81,6 +81,9 @@ export default function Focus() {
   const backgroundedSecRef = useRef<number>(0);
   const bgStartRef = useRef<number | null>(null);
   const appState = useRef<AppStateStatus>(AppState.currentState);
+  // Holds the id of the scheduled "Timer ended!" local notification so
+  // we can cancel it when the user ends the session early.
+  const endNotifIdRef = useRef<string | null>(null);
 
   // Shake animation for locked tile taps.
   const shakeX = useRef(new Animated.Value(0)).current;
@@ -184,7 +187,40 @@ export default function Focus() {
         lightColor: '#FF3B30',
         lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
       }).catch(() => {});
+      Notifications.setNotificationChannelAsync('focus_complete', {
+        name: 'Focus Mode · Session complete',
+        description: 'Celebrates when your focus timer runs out.',
+        importance: Notifications.AndroidImportance.HIGH,
+        sound: 'default',
+        vibrationPattern: [0, 150, 100, 150],
+        lightColor: '#00FF88',
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      }).catch(() => {});
     }
+    // Schedule the "Timer ended!" notification to fire exactly when the
+    // countdown will hit 0 — this works even if the user backgrounds or
+    // kills the app, because expo-notifications stores the trigger
+    // natively. We cancel it if the user ends the session early.
+    (async () => {
+      try {
+        const id = await Notifications.scheduleNotificationAsync({
+          content: {
+            title: "✅ Focus Mode complete!",
+            body: `Your ${plannedMin}-minute session is up — open the app to claim your XP bonus.`,
+            priority: Notifications.AndroidNotificationPriority.HIGH,
+            sound: 'default',
+            data: { kind: 'focus_complete', channelId: 'focus_complete' },
+          },
+          trigger: {
+            seconds: plannedMin * 60,
+            channelId: 'focus_complete',
+          } as any,
+        });
+        endNotifIdRef.current = id;
+      } catch (e) {
+        console.warn('[focus] schedule end notification failed', e);
+      }
+    })();
   };
 
   const finishSession = async (completed: boolean) => {
@@ -195,6 +231,12 @@ export default function Focus() {
       ? bgSec + Math.floor((Date.now() - bgStartRef.current) / 1000)
       : bgSec;
     bgStartRef.current = null;
+    // Cancel any pending "Timer ended" notification so an early exit
+    // doesn't lie to the user 20 minutes later.
+    if (endNotifIdRef.current) {
+      try { await Notifications.cancelScheduledNotificationAsync(endNotifIdRef.current); } catch {}
+      endNotifIdRef.current = null;
+    }
     setMode(completed ? 'done' : 'done');
     setShowWall(false);
     if (completed) {

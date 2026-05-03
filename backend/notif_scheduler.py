@@ -55,7 +55,13 @@ scheduler: Optional[AsyncIOScheduler] = None
 # ── Config ────────────────────────────────────────────────────────────
 # Fixed local-time slots for motivational pushes. We deliberately spread
 # them across waking hours so the user doesn't get bombarded.
-MOTIVATION_LOCAL_HOURS = [9, 13, 17, 20]
+# 08:00 Morning · 13:00 Afternoon · 17:00 Evening · 21:00 Night
+MOTIVATION_LOCAL_HOURS = [8, 13, 17, 21]
+# Local-time slot for the "you're about to lose your streak!" warning. A
+# single nightly check is enough — we fire only for users who still have
+# an active streak AND have done ZERO tasks today.
+STREAK_WARNING_LOCAL_HOUR = 20   # 20:00 (8pm) local — 1 hour before night roll
+STREAK_WARNING_SLOT_MINUTES = 5  # fire if we're within this many minutes
 # Spot-the-Object surprise window — the OUTER bound. The actual upper /
 # lower bound is the user's local SUNRISE & SUNSET, intersected with
 # this fence so we don't ping someone at 04:00 in arctic summer.
@@ -372,6 +378,82 @@ async def _spot_surprise_tick():
             logger.warning("[spot_surprise.tick] %s: %s", prof.get("_id"), e)
 
 
+# ── Tick: streak warning ──────────────────────────────────────────
+# Runs every minute. At ~20:00 local time, for each user whose current
+# streak is positive AND who hasn't completed a single task today,
+# fire a one-time push warning them they're about to lose it. The slot
+# is dedup'd per local-day so we never double-ping.
+async def _streak_warning_tick():
+    if _db is None or _send_push is None:
+        return
+    now_utc = datetime.now(timezone.utc)
+    cur = _db.profile.find(
+        {"current_streak": {"$gt": 0}},
+        {
+            "_id": 1,
+            "timezone": 1,
+            "current_streak": 1,
+            "streak_warning_last_slot_key": 1,
+            "day_start_time": 1,
+            "wake_time": 1,
+        },
+    ).limit(5000)
+    async for prof in cur:
+        try:
+            tz = _user_tz(prof)
+            local = now_utc.astimezone(tz)
+            # Fire only within a 5-min window anchored on 20:00 local.
+            if local.hour != STREAK_WARNING_LOCAL_HOUR or local.minute >= STREAK_WARNING_SLOT_MINUTES:
+                continue
+            # Compute the user's local "today" string using their
+            # day_start_time boundary (same way server.user_today_str does)
+            # so this matches the date written on task_logs completion.
+            day_start = prof.get("day_start_time") or prof.get("wake_time") or "07:00"
+            try:
+                hh, mm = [int(x) for x in (day_start or "07:00").split(":")[:2]]
+                local_day_anchor = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if local < local_day_anchor:
+                    local_day_anchor = local_day_anchor - timedelta(days=1)
+                today_str = local_day_anchor.date().isoformat()
+            except Exception:
+                today_str = local.date().isoformat()
+            slot_key = f"streak#{today_str}"
+            if prof.get("streak_warning_last_slot_key") == slot_key:
+                continue
+            # Count completions today. ZERO → ping.
+            count = await _db.task_logs.count_documents({
+                "user_id": prof["_id"],
+                "date": today_str,
+            })
+            if count > 0:
+                # Still lock the slot so we don't keep checking for the
+                # rest of the window.
+                await _db.profile.update_one(
+                    {"_id": prof["_id"]},
+                    {"$set": {"streak_warning_last_slot_key": slot_key}},
+                )
+                continue
+            streak = int(prof.get("current_streak") or 0)
+            title = "🔥 Your streak is in danger"
+            body = (
+                f"You haven't completed a single task today. "
+                f"Complete one quest before midnight or lose your {streak}-day streak!"
+            )
+            await _push_to_user(
+                prof["_id"], title, body,
+                data={"kind": "streak_warning", "deeplink": "/tasks"},
+            )
+            await _db.profile.update_one(
+                {"_id": prof["_id"]},
+                {"$set": {
+                    "streak_warning_last_slot_key": slot_key,
+                    "streak_warning_last_sent_at": now_utc.isoformat(),
+                }},
+            )
+        except Exception as e:
+            logger.warning("[streak_warning.tick] %s: %s", prof.get("_id"), e)
+
+
 # ── Match invite expiry sweep ─────────────────────────────────────────
 # Expires lobby invites that no one accepted within the 2-minute window.
 async def _match_invite_expiry_tick():
@@ -425,10 +507,11 @@ def init_scheduler(
     # is cheap.
     sched.add_job(_motivation_tick, "interval", minutes=1, id="motivation_tick", max_instances=1, coalesce=True)
     sched.add_job(_spot_surprise_tick, "interval", minutes=1, id="spot_surprise_tick", max_instances=1, coalesce=True)
+    sched.add_job(_streak_warning_tick, "interval", minutes=1, id="streak_warning_tick", max_instances=1, coalesce=True)
     sched.add_job(_match_invite_expiry_tick, "interval", seconds=20, id="match_invite_expiry", max_instances=1, coalesce=True)
     sched.start()
     scheduler = sched
-    logger.info("[scheduler] started: motivation_tick + spot_surprise_tick + match_invite_expiry")
+    logger.info("[scheduler] started: motivation_tick + spot_surprise_tick + streak_warning_tick + match_invite_expiry")
     return sched
 
 

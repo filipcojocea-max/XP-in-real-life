@@ -105,6 +105,17 @@
 user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "Global Notification overhaul — motivation 08/13/17/21 + streak warning + focus-end + nav bar ON default"
+    implemented: true
+    working: true
+    file: "/app/backend/notif_scheduler.py + /app/frontend/{src/notifications.ts,src/immersive.tsx,app/focus.tsx}"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "FEATURE BATCH. (1) Motivation hours updated to 08/13/17/21 local (was 09/13/17/20) in BOTH the server scheduler (MOTIVATION_LOCAL_HOURS) AND the on-device expo-notifications fallback (src/notifications.ts MOTIVATION_WINDOWS). Profile screen pills now render '08:00 MORNING · 13:00 AFTERNOON · 17:00 EVENING · 21:00 NIGHT' — visually verified live. (2) NEW _streak_warning_tick registered at 1-min interval alongside the other 3 jobs. At 20:00±5 min local time, for every profile with current_streak>0, counts task_logs rows for that user's local today (computed via day_start_time anchor matching server.user_today_str). If count==0, fires push '🔥 Your streak is in danger — complete one quest before midnight or lose your N-day streak!' with deeplink '/tasks'. Dedup'd per local-day via streak_warning_last_slot_key so we never double-ping. Scheduler now logs: 'started: motivation_tick + spot_surprise_tick + streak_warning_tick + match_invite_expiry'. (3) Focus Mode end notification — on session Start we register a dedicated HIGH-importance Android channel 'focus_complete' (green light, soft vibration) and schedule a local notification via Notifications.scheduleNotificationAsync with a seconds-based trigger equal to plannedMin*60. The notification id is stashed in endNotifIdRef and cancelled in finishSession() on early exit so we don't lie to the user 20 min later. Works offline + cross-process (expo-notifications stores the trigger natively). (4) Nav bar default = ALWAYS-SHOW. Flipped immersive.tsx default from `true` to `false` and inverted the AsyncStorage hydration: missing key = OFF (default), '1' = ON (opt-in auto-hide). Fresh installs now see the bottom tab bar pinned forever until the user explicitly toggles auto-hide ON. Screenshot live-verified toggle = ON with subtitle 'Bottom tab bar is pinned and never auto-hides'. (5) DM push notifications — confirmed already wired in /messages/send at line ~5235 so no new code needed there. (6) Spot surprise pushes (solo random + friends match broadcast) — confirmed already wired from the prior daylight scheduler commit (custom sound 'spot_surprise.wav' on Android 'spot_surprise' channel + iOS sound payload). Tests: live backend logs confirm all 4 scheduler jobs tick cleanly every 1 min / 20 sec without errors; _streak_warning_tick ran immediately after restart and completed in <3 ms (no matching users because no one's in the 20:00 window right now)."
   - task: "Focus Mode — adjustable timer + commit-to-avoid gamified session (/api/focus/session)"
     implemented: true
     working: true
