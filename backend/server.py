@@ -6924,6 +6924,93 @@ async def admin_scheduler_daylight(
     }
 
 
+@api_router.post("/focus/session")
+async def focus_session_complete(
+    body: dict, user_id: str = Depends(get_user_or_legacy),
+):
+    """Record the outcome of a Focus Mode session and apply XP deltas.
+
+    Body:
+      {
+        planned_minutes: int (1..180),
+        actual_seconds: int,         # how many seconds the timer ran before stop
+        backgrounded_seconds: int,   # cumulative time the app was in background
+        completed: bool,             # True iff timer reached 0
+        committed_app_count: int,
+      }
+
+    XP rules:
+      - On COMPLETION: +1 XP per 5 planned minutes (min 1, max 30) bonus.
+      - On EARLY EXIT with background time: -2 XP per backgrounded MINUTE
+        (rounded down), capped to -50 so one bad session can't nuke a user.
+      - Finishing solidly with 0 background time → full completion bonus.
+      - Cancelling cleanly (no background time, under 60 sec in) → no XP.
+    """
+    prof = await db.profile.find_one({"_id": user_id})
+    if not prof:
+        raise HTTPException(404, "Profile not found")
+
+    try:
+        planned_min = int(body.get("planned_minutes") or 0)
+        actual_sec = int(body.get("actual_seconds") or 0)
+        bg_sec = int(body.get("backgrounded_seconds") or 0)
+        completed = bool(body.get("completed"))
+        committed_count = int(body.get("committed_app_count") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid payload")
+
+    if planned_min < 1 or planned_min > 180:
+        raise HTTPException(400, "planned_minutes must be 1..180")
+
+    bg_min = bg_sec // 60
+    delta = 0
+    reason = ""
+    if completed:
+        # Completion bonus: 1 XP per 5 min planned, min 1, max 30.
+        delta = max(1, min(30, planned_min // 5))
+        reason = "focus_complete"
+    elif bg_min > 0:
+        # Early exit with distraction: -2 XP per minute backgrounded.
+        delta = -min(50, bg_min * 2)
+        reason = "focus_distracted"
+    else:
+        reason = "focus_cancelled_clean"
+
+    # Update totals.
+    if delta != 0:
+        new_total = int(prof.get("total_xp", 0) or 0) + delta
+        if new_total < 0:
+            new_total = 0
+        new_level = level_from_xp(new_total)
+        await db.profile.update_one(
+            {"_id": user_id},
+            {"$set": {"total_xp": new_total, "level": new_level}},
+        )
+        if delta > 0:
+            await _log_xp_event(user_id, delta, int(prof.get("tz_offset_minutes") or 0))
+
+    # Log the session row for history / anti-abuse.
+    await db.focus_sessions.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "planned_minutes": planned_min,
+        "actual_seconds": actual_sec,
+        "backgrounded_seconds": bg_sec,
+        "committed_app_count": committed_count,
+        "completed": completed,
+        "xp_delta": delta,
+        "reason": reason,
+        "created_at": now_iso(),
+    })
+
+    prof = await db.profile.find_one({"_id": user_id})
+    return {
+        "xp_delta": delta,
+        "reason": reason,
+        "profile": serialize_profile(prof),
+    }
+
+
 # Final include for any endpoints declared AFTER the previous includes —
 # specifically the /admin/scheduler/* diagnostic endpoints above.
 app.include_router(api_router)

@@ -105,6 +105,17 @@
 user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "Focus Mode — adjustable timer + commit-to-avoid gamified session (/api/focus/session)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py + /app/frontend/app/focus.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "FEATURE — rewrote the previously fixed-5-min Focus Mode into a fully adjustable, gamified distraction-penalty session. FRONTEND (/app/frontend/app/focus.tsx): (1) Adjustable timer 1..180 min via ± chips OR 9 quick-select chips (5/10/15/20/25/30/45/60/90). Default 25 min (Pomodoro). (2) 'Commit to Avoiding' picker with 12 curated apps (YouTube, Instagram, TikTok, X, Facebook, Snapchat, Reddit, Discord, WhatsApp, Games, Netflix, Spotify) rendered as a 3-column tile grid with proper logo icons + platform tint. Default pre-committed: YouTube/Instagram/TikTok. (3) On Start, AppState listener tracks when app goes to background — at that moment we fire an expo-notifications HIGH-priority local notification ('🚨 Focus Mode breach — X min left — get back in and save your XP!') on a dedicated Android channel 'focus_breach' (MAX importance, lock-screen visibility, red vibration pattern). Accumulates `backgroundedSec`. (4) On foreground-return mid-session we show a Focus Wall modal: locked-app gallery with #777 greyed icons + blue LOCK_BLUE lock-badge on each tile + the running countdown. (5) Session-active taps on locked tiles trigger a 6px shake + warning haptic — 'can't open this now'. (6) On completion or End Early (with confirm dialog) we POST the session summary to /api/focus/session and show a Done screen with the XP delta (+5 for complete, −8 for 4min distracted, etc). BACKEND (/api/focus/session POST {planned_minutes, actual_seconds, backgrounded_seconds, completed, committed_app_count}): rule table — completed → +1 XP per 5 planned minutes (clamp 1..30); early exit with bg_min>0 → −2 XP per backgrounded minute (capped at −50 so one bad session can't nuke a user); clean cancel → 0 XP. Updates profile.total_xp + recomputes level, logs xp_events on +delta for leaderboard, writes a row to db.focus_sessions for history/anti-abuse. Smoke tested live at /tmp/focus_test.py — 5/5 assertions PASS (25-min complete=+5, 4-min bg=−8, clean cancel=0, 300-min rejected=400, 10-hour bg capped at −50)."
   - task: "Daylight-aware Spot scheduler (sunrise/sunset slots + multiplayer-broadcast night-skip + /admin/scheduler/daylight)"
     implemented: true
     working: true

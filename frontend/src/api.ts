@@ -556,6 +556,19 @@ export const api = {
       hint: string;
     }>(`/confidence/weather?lat=${lat}&lon=${lon}`),
 
+  // ─── Focus Mode ──────────────────────────────────────────────────
+  focusSession: (payload: {
+    planned_minutes: number;
+    actual_seconds: number;
+    backgrounded_seconds: number;
+    completed: boolean;
+    committed_app_count: number;
+  }) =>
+    req<{ xp_delta: number; reason: string; profile: any }>('/focus/session', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   // ─── Spot the Object — Multiplayer/Lobby (Phase 2) ──────────────
   spotMatchCreate: (friend_ids: string[]) =>
     req<{ match: SpotMatch }>('/spot/match/create', {
