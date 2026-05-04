@@ -2,7 +2,7 @@
   "expo": {
     "name": "XP in Real Life",
     "slug": "xp-confidence",
-    "version": "1.0.17",
+    "version": "1.0.18",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "xpconfidence",
@@ -24,7 +24,7 @@
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 1017,
+      "versionCode": 1018,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"
@@ -40,6 +40,9 @@
         "android.permission.health.READ_STEPS",
         "android.permission.health.READ_HEART_RATE",
         "android.permission.health.READ_OXYGEN_SATURATION",
+        "android.permission.health.READ_EXERCISE",
+        "android.permission.health.READ_ACTIVE_CALORIES_BURNED",
+        "android.permission.health.READ_TOTAL_CALORIES_BURNED",
         "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
       ]
     },
@@ -62,7 +65,8 @@
       [
         "expo-notifications",
         {
-          "color": "#00FF88"
+          "color": "#00FF88",
+          "sounds": ["./assets/sounds/spot_surprise.wav"]
         }
       ],
       [
@@ -70,6 +74,15 @@
         {
           "photosPermission": "Upload a profile photo to personalize your account",
           "cameraPermission": "Take a profile photo to personalize your account"
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Check local weather for outfit advice",
+          "locationWhenInUsePermission": "Check local weather for outfit advice",
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false
         }
       ],
       "@react-native-community/datetimepicker",
@@ -94,7 +107,8 @@
           "recordAudioAndroid": false
         }
       ],
-      "react-native-health-connect"
+      "react-native-health-connect",
+      "./plugins/withHealthConnectPermissions"
     ],
     "experiments": {
       "typedRoutes": true
