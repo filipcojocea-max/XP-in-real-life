@@ -1881,7 +1881,6 @@ async def stats_daily(date: Optional[str] = None, user_id: str = Depends(get_use
 
 
 @api_router.get("/stats/weekly")
-@api_router.get("/stats/weekly")
 async def stats_weekly(user_id: str = Depends(get_user_or_legacy)):
     today_d = datetime.now(timezone.utc).date()
     days = []
@@ -1950,6 +1949,9 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
             "tasks": len(logs),
         })
     return {"days": days}
+
+
+@api_router.get("/stats/by-area")
 async def stats_by_area(user_id: str = Depends(get_user_or_legacy)):
     """Total XP earned per focus area (all time)."""
     logs = await db.task_logs.find({}, {"_id": 0}).to_list(10000)
@@ -6972,16 +6974,24 @@ async def focus_session_complete(
         planned_minutes: int (1..180),
         actual_seconds: int,         # how many seconds the timer ran before stop
         backgrounded_seconds: int,   # cumulative time the app was in background
+        locked_app_seconds: int,     # cumulative time the user was inside a
+                                     #  locked-blocklist app (Android only;
+                                     #  detected via UsageStatsManager).
         completed: bool,             # True iff timer reached 0
         committed_app_count: int,
       }
 
     XP rules:
-      - On COMPLETION: +1 XP per 5 planned minutes (min 1, max 30) bonus.
-      - On EARLY EXIT with background time: -2 XP per backgrounded MINUTE
-        (rounded down), capped to -50 so one bad session can't nuke a user.
-      - Finishing solidly with 0 background time → full completion bonus.
-      - Cancelling cleanly (no background time, under 60 sec in) → no XP.
+      - On COMPLETION (with no locked-app time):
+          +1 XP per 5 planned minutes (min 1, max 30) bonus.
+      - PENALTY: -15 XP per MINUTE the user spent inside a locked app
+        (rounded down). This applies whether or not the session
+        completed — opening a locked app is the violation.
+      - Backwards compat: if no `locked_app_seconds` is sent (older builds
+        / iOS), fall back to the legacy -2 XP/min on `backgrounded_seconds`
+        for early exits so iOS users still get a softer accountability hit.
+      - Total penalty capped to -300 XP so a single bad session can hurt
+        but won't permanently devastate progress.
     """
     prof = await db.profile.find_one({"_id": user_id})
     if not prof:
@@ -6991,6 +7001,8 @@ async def focus_session_complete(
         planned_min = int(body.get("planned_minutes") or 0)
         actual_sec = int(body.get("actual_seconds") or 0)
         bg_sec = int(body.get("backgrounded_seconds") or 0)
+        # NEW: only Android sends this. Default 0 keeps iOS behaviour intact.
+        locked_sec = int(body.get("locked_app_seconds") or 0)
         completed = bool(body.get("completed"))
         committed_count = int(body.get("committed_app_count") or 0)
     except (TypeError, ValueError):
@@ -7000,14 +7012,24 @@ async def focus_session_complete(
         raise HTTPException(400, "planned_minutes must be 1..180")
 
     bg_min = bg_sec // 60
+    locked_min = locked_sec // 60
     delta = 0
     reason = ""
+
+    # Compute the locked-app penalty FIRST — it always applies, even
+    # if the session completed (opening a blocked app is the violation).
+    locked_penalty = min(300, locked_min * 15) if locked_min > 0 else 0
+
     if completed:
-        # Completion bonus: 1 XP per 5 min planned, min 1, max 30.
-        delta = max(1, min(30, planned_min // 5))
-        reason = "focus_complete"
+        bonus = max(1, min(30, planned_min // 5))
+        delta = bonus - locked_penalty
+        reason = "focus_complete_with_penalty" if locked_penalty > 0 else "focus_complete"
+    elif locked_min > 0:
+        # Early exit AND opened locked apps → full -15/min hit.
+        delta = -locked_penalty
+        reason = "focus_distracted_locked_apps"
     elif bg_min > 0:
-        # Early exit with distraction: -2 XP per minute backgrounded.
+        # Legacy fallback (iOS / no usage-stats permission). -2 XP/min.
         delta = -min(50, bg_min * 2)
         reason = "focus_distracted"
     else:
@@ -7033,6 +7055,7 @@ async def focus_session_complete(
         "planned_minutes": planned_min,
         "actual_seconds": actual_sec,
         "backgrounded_seconds": bg_sec,
+        "locked_app_seconds": locked_sec,
         "committed_app_count": committed_count,
         "completed": completed,
         "xp_delta": delta,

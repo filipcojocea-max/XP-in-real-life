@@ -24,7 +24,7 @@
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 1018,
+      "versionCode": 109,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"
@@ -36,6 +36,9 @@
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.ACTIVITY_RECOGNITION",
         "android.permission.BODY_SENSORS",
+        "android.permission.PACKAGE_USAGE_STATS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
         "android.permission.health.READ_SLEEP",
         "android.permission.health.READ_STEPS",
         "android.permission.health.READ_HEART_RATE",

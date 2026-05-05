@@ -561,6 +561,10 @@ export const api = {
     planned_minutes: number;
     actual_seconds: number;
     backgrounded_seconds: number;
+    /** Android-only: cumulative seconds the user spent inside a locked
+     *  blocklist app, detected via UsageStatsManager. iOS / older
+     *  builds simply omit it (defaults to 0 server-side). */
+    locked_app_seconds?: number;
     completed: boolean;
     committed_app_count: number;
   }) =>

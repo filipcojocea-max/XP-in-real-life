@@ -1,0 +1,8 @@
+{
+  "name": "app-blocker",
+  "version": "1.0.0",
+  "description": "Local Expo module — Android UsageStatsManager based app-blocker for Focus Mode.",
+  "main": "index.ts",
+  "private": true,
+  "platforms": ["android"]
+}

@@ -7,18 +7,30 @@
  *  1. User picks a duration (quick-select chips 5/10/…/90, or scrolls to a
  *     custom minute count).
  *  2. User toggles which curated "distracting apps" they are committing to
- *     not open during the session. (Icons + name; purely a commitment /
- *     accountability device — we can't actually block other OS apps from
- *     an Expo sandbox.)
+ *     not open during the session.
  *  3. Session starts → big countdown ring, green until time's up.
- *  4. If the user backgrounds the app we:
- *       - Fire a HIGH-PRIORITY local push ("You're losing focus!").
- *       - Accumulate `backgroundedSec` while the app is out of foreground.
- *       - When they return, show a full-screen "Focus Wall — Session in
- *         Progress" with the locked app gallery (grayed out + blue lock).
- *  5. Completion → bonus XP. Early exit with distraction → XP PENALTY
- *     of –2 XP per backgrounded minute (server-authoritative via
- *     POST /api/focus/session).
+ *  4. ANDROID NATIVE BLOCKER: if the OS-level UsageStatsManager
+ *     permission has been granted, our local Expo module spins up a
+ *     foreground service that polls the foreground app every 2 sec.
+ *     The instant a locked app's package is detected:
+ *       • A high-priority "Exit this app now or lose 15 XP/min" push
+ *         appears on top of the locked app (not us).
+ *       • A running "locked-app seconds" counter is incremented.
+ *  5. Backgrounding the app (without opening a locked app) still fires
+ *     the legacy "left focus" nudge.
+ *  6. Completion → bonus XP. Any locked-app time always costs −15 XP/min
+ *     server-authoritative via POST /api/focus/session.
+ *
+ * Wall-clock countdown
+ * ─────────────────────
+ * The countdown is anchored to `endAtMsRef = Date.now() + plannedMin*60_000`
+ * rather than a `setInterval` decrement. This means:
+ *   • Backgrounding the app for 5 min and coming back → the timer
+ *     correctly shows 5 min less, not the same value frozen in time.
+ *   • Killing the app and reopening → still works (timer recomputed
+ *     from the wall clock + the persisted endAt).
+ *   • The visible tick interval still uses requestAnimationFrame /
+ *     setInterval but it only refreshes the displayed mm:ss string.
  */
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
@@ -32,6 +44,7 @@ import {
   Modal,
   ScrollView,
   Platform,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -42,26 +55,34 @@ import Ring from '../src/components/Ring';
 import { colors, spacing, radii } from '../src/theme';
 import { api } from '../src/api';
 import { showAlert } from '../src/uiAlert';
+import AppBlocker from '../modules/app-blocker';
 
 type Mode = 'idle' | 'running' | 'done';
 
 const PRESETS = [5, 10, 15, 20, 25, 30, 45, 60, 90] as const;
 
-// Curated distracting-app list. Icons use Ionicons for cross-platform
-// consistency — they are visual commitment devices, not real app links.
-const DISTRACTING_APPS: { id: string; label: string; icon: React.ComponentProps<typeof Ionicons>['name']; tint: string }[] = [
-  { id: 'youtube',   label: 'YouTube',   icon: 'logo-youtube',   tint: '#FF0000' },
-  { id: 'instagram', label: 'Instagram', icon: 'logo-instagram', tint: '#E1306C' },
-  { id: 'tiktok',    label: 'TikTok',    icon: 'logo-tiktok',    tint: '#FFFFFF' },
-  { id: 'twitter',   label: 'X',         icon: 'logo-twitter',   tint: '#1DA1F2' },
-  { id: 'facebook',  label: 'Facebook',  icon: 'logo-facebook',  tint: '#1877F2' },
-  { id: 'snapchat',  label: 'Snapchat',  icon: 'logo-snapchat',  tint: '#FFFC00' },
-  { id: 'reddit',    label: 'Reddit',    icon: 'logo-reddit',    tint: '#FF4500' },
-  { id: 'discord',   label: 'Discord',   icon: 'logo-discord',   tint: '#5865F2' },
-  { id: 'whatsapp',  label: 'WhatsApp',  icon: 'logo-whatsapp',  tint: '#25D366' },
-  { id: 'games',     label: 'Games',     icon: 'game-controller',tint: '#A855F7' },
-  { id: 'netflix',   label: 'Netflix',   icon: 'film',           tint: '#E50914' },
-  { id: 'music',     label: 'Spotify',   icon: 'musical-notes',  tint: '#1DB954' },
+// Curated distracting-app list. Each row carries the canonical Android
+// package name(s) the native UsageStatsManager will look for. iOS
+// users see the same list as a "commitment device" — no detection.
+const DISTRACTING_APPS: {
+  id: string;
+  label: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  tint: string;
+  packages: string[];
+}[] = [
+  { id: 'youtube',   label: 'YouTube',   icon: 'logo-youtube',   tint: '#FF0000', packages: ['com.google.android.youtube', 'com.google.android.apps.youtube.music', 'com.google.android.youtube.tv'] },
+  { id: 'instagram', label: 'Instagram', icon: 'logo-instagram', tint: '#E1306C', packages: ['com.instagram.android', 'com.instagram.lite'] },
+  { id: 'tiktok',    label: 'TikTok',    icon: 'logo-tiktok',    tint: '#FFFFFF', packages: ['com.zhiliaoapp.musically', 'com.ss.android.ugc.trill', 'com.tiktok.tv'] },
+  { id: 'twitter',   label: 'X',         icon: 'logo-twitter',   tint: '#1DA1F2', packages: ['com.twitter.android'] },
+  { id: 'facebook',  label: 'Facebook',  icon: 'logo-facebook',  tint: '#1877F2', packages: ['com.facebook.katana', 'com.facebook.lite'] },
+  { id: 'snapchat',  label: 'Snapchat',  icon: 'logo-snapchat',  tint: '#FFFC00', packages: ['com.snapchat.android'] },
+  { id: 'reddit',    label: 'Reddit',    icon: 'logo-reddit',    tint: '#FF4500', packages: ['com.reddit.frontpage'] },
+  { id: 'discord',   label: 'Discord',   icon: 'logo-discord',   tint: '#5865F2', packages: ['com.discord'] },
+  { id: 'whatsapp',  label: 'WhatsApp',  icon: 'logo-whatsapp',  tint: '#25D366', packages: ['com.whatsapp', 'com.whatsapp.w4b'] },
+  { id: 'games',     label: 'Games',     icon: 'game-controller',tint: '#A855F7', packages: ['com.supercell.clashofclans', 'com.supercell.clashroyale', 'com.king.candycrushsaga', 'com.mojang.minecraftpe', 'com.roblox.client'] },
+  { id: 'netflix',   label: 'Netflix',   icon: 'film',           tint: '#E50914', packages: ['com.netflix.mediaclient'] },
+  { id: 'music',     label: 'Spotify',   icon: 'musical-notes',  tint: '#1DB954', packages: ['com.spotify.music'] },
 ];
 
 const LOCK_BLUE = '#2F7BFF';
@@ -76,14 +97,21 @@ export default function Focus() {
   );
   const [showWall, setShowWall] = useState(false);
   const [xpSummary, setXpSummary] = useState<{ delta: number; reason: string } | null>(null);
+  // Live counter of locked-app seconds (Android-only). Used both for the
+  // pre-end UI ("you've already cost yourself 30 XP") and for the
+  // backend penalty payload.
+  const [lockedAppSec, setLockedAppSec] = useState<number>(0);
+  const [hasUsageAccess, setHasUsageAccess] = useState<boolean>(false);
 
-  // Background tracking (persists across the running state).
+  // Wall-clock anchor — the source of truth for the countdown.
+  const endAtMsRef = useRef<number | null>(null);
+  // Background tracking (legacy "left the app" detection — still used
+  // on iOS / when usage-stats is denied).
   const backgroundedSecRef = useRef<number>(0);
   const bgStartRef = useRef<number | null>(null);
   const appState = useRef<AppStateStatus>(AppState.currentState);
-  // Holds the id of the scheduled "Timer ended!" local notification so
-  // we can cancel it when the user ends the session early.
   const endNotifIdRef = useRef<string | null>(null);
+  const lockedListenerRef = useRef<{ remove: () => void } | null>(null);
 
   // Shake animation for locked tile taps.
   const shakeX = useRef(new Animated.Value(0)).current;
@@ -98,31 +126,51 @@ export default function Focus() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
   };
 
+  // Check Usage Access permission on mount + on resume so we can
+  // surface the "Grant access" CTA accurately.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      if (!AppBlocker.isSupported) {
+        if (!cancelled) setHasUsageAccess(false);
+        return;
+      }
+      const ok = await AppBlocker.hasUsageAccessPermission();
+      if (!cancelled) setHasUsageAccess(ok);
+    };
+    check();
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') check();
+    });
+    return () => { cancelled = true; sub.remove(); };
+  }, []);
+
   // When duration picker changes while idle, reset the visible countdown.
   useEffect(() => {
     if (mode === 'idle') setSecondsLeft(plannedMin * 60);
   }, [plannedMin, mode]);
 
-  // ── Countdown tick ──────────────────────────────────────────────────
+  // ── Wall-clock-driven countdown tick ───────────────────────────────
+  // We intentionally don't decrement a JS counter — we recompute from
+  // `endAtMsRef` every tick. This means a setInterval missing while the
+  // app is backgrounded does not corrupt the displayed time.
   useEffect(() => {
-    if (mode !== 'running') return;
-    const id = setInterval(() => {
-      setSecondsLeft((s) => {
-        if (s <= 1) {
-          clearInterval(id);
-          finishSession(true);
-          return 0;
-        }
-        return s - 1;
-      });
-    }, 1000);
+    if (mode !== 'running' || endAtMsRef.current == null) return;
+    const tick = () => {
+      const remaining = Math.max(0, Math.ceil((endAtMsRef.current! - Date.now()) / 1000));
+      setSecondsLeft(remaining);
+      if (remaining <= 0) {
+        clearInterval(id);
+        finishSession(true);
+      }
+    };
+    tick(); // run immediately so resume → instant catch-up
+    const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-    // finishSession captured via closure; keep deps narrow so the timer
-    // doesn't restart on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  // ── AppState tracking — the gamified "stay focused" detector ──────
+  // ── AppState tracking ─────────────────────────────────────────────
   useEffect(() => {
     const sub = AppState.addEventListener('change', handleAppStateChange);
     return () => sub.remove();
@@ -134,20 +182,34 @@ export default function Focus() {
     appState.current = next;
     if (mode !== 'running') return;
     if ((prev === 'active' || prev === 'inactive') && next === 'background') {
-      // User just left the app. Start counting background time and fire a
-      // high-priority local notification as a nudge.
       bgStartRef.current = Date.now();
-      fireFocusBreachNotification();
+      // Only fire the soft "left focus" nudge when we DON'T have
+      // native blocker coverage — the blocker will fire its own,
+      // far more contextual, "Exit YouTube now" alert.
+      if (!hasUsageAccess) {
+        fireFocusBreachNotification();
+      }
     } else if (prev === 'background' && next === 'active') {
-      // User came back. Accumulate the background span, open the Focus
-      // Wall so they see the commitment visually enforced.
       if (bgStartRef.current != null) {
         backgroundedSecRef.current += Math.floor((Date.now() - bgStartRef.current) / 1000);
         bgStartRef.current = null;
       }
-      setShowWall(true);
+      // Recompute now to instantly reflect the time that passed.
+      if (endAtMsRef.current != null) {
+        const remaining = Math.max(0, Math.ceil((endAtMsRef.current - Date.now()) / 1000));
+        setSecondsLeft(remaining);
+        if (remaining <= 0) {
+          finishSession(true);
+          return;
+        }
+      }
+      // Show the wall only if we actually have a real penalty to show
+      // (legacy bg time OR locked-app time on Android).
+      if (lockedAppSec > 0 || backgroundedSecRef.current > 0) {
+        setShowWall(true);
+      }
     }
-  }, [mode]);
+  }, [mode, hasUsageAccess, lockedAppSec]);
 
   const fireFocusBreachNotification = async () => {
     try {
@@ -163,20 +225,57 @@ export default function Focus() {
         trigger: null, // fire immediately
       });
     } catch (e) {
-      // Silent — notifications might be denied, not blocking.
       console.warn('[focus] notification fire failed', e);
     }
   };
 
+  // Convert the user's committed `id` set into a flat list of Android
+  // package names for the native blocker.
+  const lockedPackages = useMemo(() => {
+    const pkgs: string[] = [];
+    for (const app of DISTRACTING_APPS) {
+      if (committed.has(app.id)) pkgs.push(...app.packages);
+    }
+    return pkgs;
+  }, [committed]);
+
+  /**
+   * Try to begin native-side monitoring. Returns:
+   *   • 'started'        — service running, detection active.
+   *   • 'no-permission'  — user must grant Usage Access first; we already
+   *                         opened the Settings page for them.
+   *   • 'unsupported'    — iOS / web — caller should fall back silently.
+   *   • 'no-apps'        — user committed to no apps, nothing to track.
+   */
+  const beginBlocker = async (): Promise<'started' | 'no-permission' | 'unsupported' | 'no-apps'> => {
+    if (!AppBlocker.isSupported) return 'unsupported';
+    if (lockedPackages.length === 0) return 'no-apps';
+    const ok = await AppBlocker.hasUsageAccessPermission();
+    if (!ok) {
+      await AppBlocker.requestUsageAccessPermission();
+      return 'no-permission';
+    }
+    setLockedAppSec(0);
+    // Subscribe BEFORE starting so we don't miss the first tick.
+    lockedListenerRef.current?.remove?.();
+    lockedListenerRef.current = AppBlocker.addLockedAppListener((e) => {
+      setLockedAppSec(e.totalSeconds);
+    });
+    await AppBlocker.startMonitoring(lockedPackages);
+    return 'started';
+  };
+
   // ── Session lifecycle ──────────────────────────────────────────────
-  const startSession = () => {
+  const startSession = async () => {
     backgroundedSecRef.current = 0;
     bgStartRef.current = null;
+    setLockedAppSec(0);
+    endAtMsRef.current = Date.now() + plannedMin * 60 * 1000;
     setSecondsLeft(plannedMin * 60);
     setMode('running');
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
-    // Pre-register the Android channel for the breach notification so
-    // lock-screen priority is honoured in EAS builds.
+
+    // Pre-register Android channels for breach notifications.
     if (Platform.OS === 'android') {
       Notifications.setNotificationChannelAsync('focus_breach', {
         name: 'Focus Mode · Breach alerts',
@@ -197,6 +296,7 @@ export default function Focus() {
         lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
       }).catch(() => {});
     }
+
     // Schedule the "Timer ended!" notification to fire exactly when the
     // countdown will hit 0 — this works even if the user backgrounds or
     // kills the app, because expo-notifications stores the trigger
@@ -221,50 +321,77 @@ export default function Focus() {
         console.warn('[focus] schedule end notification failed', e);
       }
     })();
+
+    // Kick off the native blocker (Android only). Failure modes are
+    // surfaced as a one-shot inline banner — we don't block session
+    // start so iOS / un-permissioned Android users still flow through.
+    const r = await beginBlocker();
+    if (r === 'no-permission') {
+      showAlert(
+        'Grant Usage Access',
+        'To enforce the app blocker and detect when you open YouTube, Instagram, etc., enable "Usage access" for XP in Real Life in the Settings page that just opened. Then come back and start your session.',
+        [
+          { text: 'Open Settings again', onPress: () => AppBlocker.requestUsageAccessPermission() },
+          { text: 'Continue without blocker', style: 'cancel' },
+        ],
+      );
+    }
   };
 
   const finishSession = async (completed: boolean) => {
-    const ran = plannedMin * 60 - secondsLeft;
+    const ran = endAtMsRef.current != null
+      ? Math.max(0, Math.floor((Date.now() - (endAtMsRef.current - plannedMin * 60 * 1000)) / 1000))
+      : plannedMin * 60 - secondsLeft;
+    endAtMsRef.current = null;
     const bgSec = backgroundedSecRef.current;
-    // Flush an in-progress background span if we're finishing mid-flight.
     const finalBgSec = bgStartRef.current != null
       ? bgSec + Math.floor((Date.now() - bgStartRef.current) / 1000)
       : bgSec;
     bgStartRef.current = null;
-    // Cancel any pending "Timer ended" notification so an early exit
-    // doesn't lie to the user 20 minutes later.
+
+    // Cancel the pending "Timer ended" notification on early-exit.
     if (endNotifIdRef.current) {
       try { await Notifications.cancelScheduledNotificationAsync(endNotifIdRef.current); } catch {}
       endNotifIdRef.current = null;
     }
-    setMode(completed ? 'done' : 'done');
+
+    // Stop the Android blocker FIRST so we read its final counter.
+    let lockedSeconds = lockedAppSec;
+    if (AppBlocker.isSupported) {
+      try {
+        const r = await AppBlocker.stopMonitoring();
+        // Native total wins over the JS event counter (events can be
+        // lost if the JS thread was suspended for the entire session).
+        if (r.totalSeconds > lockedSeconds) lockedSeconds = r.totalSeconds;
+      } catch {}
+    }
+    lockedListenerRef.current?.remove?.();
+    lockedListenerRef.current = null;
+
+    setMode('done');
     setShowWall(false);
     if (completed) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     }
-    // Call backend to apply XP delta.
     try {
       const r = await api.focusSession({
         planned_minutes: plannedMin,
         actual_seconds: ran,
         backgrounded_seconds: finalBgSec,
+        locked_app_seconds: lockedSeconds,
         completed,
         committed_app_count: committed.size,
       });
       setXpSummary({ delta: r.xp_delta, reason: r.reason });
     } catch (e: any) {
-      // Still show local summary even if XP save failed.
       setXpSummary({ delta: 0, reason: 'save_failed' });
     }
   };
 
   const cancelSession = () => {
-    // Give the user one chance to confirm — most "cancel" taps are
-    // accidental. If they confirm, we still apply the background-time
-    // penalty (if any) so leaving early doesn't come for free.
     showAlert(
       'End Focus Session?',
-      'You\'ll lose your completion bonus. Any background time is still penalized.',
+      "You'll lose your completion bonus. Any time spent in blocked apps is still penalized at −15 XP/min.",
       [
         { text: 'Keep Going', style: 'cancel' },
         {
@@ -339,6 +466,8 @@ export default function Focus() {
     const delta = xpSummary?.delta ?? 0;
     const positive = delta > 0;
     const zero = delta === 0;
+    const lockedMin = Math.floor(lockedAppSec / 60);
+    const bgMin = Math.round(backgroundedSecRef.current / 60);
     return (
       <SafeAreaView style={styles.safe}>
         <View style={[styles.content, { justifyContent: 'center' }]}>
@@ -356,7 +485,9 @@ export default function Focus() {
                 ? `+${delta} XP earned`
                 : zero
                   ? 'No XP awarded'
-                  : `${delta} XP — distracted for ${Math.round(backgroundedSecRef.current / 60)} min`}
+                  : lockedMin > 0
+                    ? `${delta} XP — ${lockedMin} min in blocked apps × −15`
+                    : `${delta} XP — distracted for ${bgMin} min`}
             </Text>
           </View>
           <TouchableOpacity
@@ -366,6 +497,7 @@ export default function Focus() {
               setXpSummary(null);
               setSecondsLeft(plannedMin * 60);
               backgroundedSecRef.current = 0;
+              setLockedAppSec(0);
             }}
           >
             <Ionicons name="reload" size={18} color={colors.bg} />
@@ -458,13 +590,46 @@ export default function Focus() {
               <Ionicons name="lock-closed" size={18} color={colors.bg} />
               <Text style={styles.startText}>Start {plannedMin}-min Session</Text>
             </TouchableOpacity>
+            {/* Android-only: surface the Usage Access CTA so users know
+                why blocking won't fire until they grant the permission. */}
+            {AppBlocker.isSupported && !hasUsageAccess ? (
+              <TouchableOpacity
+                style={styles.usageBanner}
+                onPress={async () => {
+                  await AppBlocker.requestUsageAccessPermission();
+                }}
+                testID="focus-usage-cta"
+                activeOpacity={0.85}
+              >
+                <Ionicons name="shield-half" size={16} color={LOCK_BLUE} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.usageBannerTitle}>Enable real app blocking</Text>
+                  <Text style={styles.usageBannerSub}>
+                    Grant Usage Access to detect blocked apps and apply the −15 XP/min penalty.
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : null}
             <Text style={styles.disclaimer}>
-              Leaving the app during a session costs −2 XP per minute. Completing earns a bonus.
+              {AppBlocker.isSupported && hasUsageAccess
+                ? 'Opening a blocked app costs −15 XP per minute. Completing the timer earns a bonus.'
+                : Platform.OS === 'ios'
+                  ? 'Leaving the app during a session costs −2 XP per minute (iOS limitation). Completing earns a bonus.'
+                  : 'Without Usage Access, leaving the app costs −2 XP per minute. Completing earns a bonus.'}
             </Text>
           </>
         ) : (
           <>
-            {/* RUNNING state: show locked-app wall */}
+            {/* RUNNING state: show locked-app wall + live penalty pill. */}
+            {lockedAppSec > 0 ? (
+              <View style={styles.livePenaltyPill} testID="focus-live-penalty">
+                <Ionicons name="alert-circle" size={14} color="#FF3B30" />
+                <Text style={styles.livePenaltyText}>
+                  −{Math.floor(lockedAppSec / 60) * 15} XP locked-app penalty
+                </Text>
+              </View>
+            ) : null}
             <Text style={styles.sectionLabel}>Locked Apps</Text>
             <View style={styles.appGrid}>
               {DISTRACTING_APPS.filter(a => committed.has(a.id)).map((a) => renderLockedApp(a, true))}
@@ -491,7 +656,9 @@ export default function Focus() {
             <Text style={styles.wallTitle}>Session in Progress</Text>
             <Text style={styles.wallTimer}>{mm}:{ss}</Text>
             <Text style={styles.wallSubtitle}>
-              You lost −2 XP per minute while away. Stay put.
+              {lockedAppSec > 0
+                ? `You've already lost −${Math.floor(lockedAppSec / 60) * 15} XP for ${Math.floor(lockedAppSec / 60)} min in blocked apps.`
+                : 'You lost −2 XP per minute while away. Stay put.'}
             </Text>
             <View style={styles.appGrid}>
               {DISTRACTING_APPS.filter(a => committed.has(a.id)).map((a) => (

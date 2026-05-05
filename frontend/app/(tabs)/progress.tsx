@@ -19,8 +19,19 @@ import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
+/**
+ * View mode for the XP charts. Both modes share the same SVG render
+ * pipeline because the backend returns identical-shaped `{date, day,
+ * xp, gifted_xp, tasks}` objects — only the array length and label
+ * formatting differ. Cycling stays inside the chart card so the rest
+ * of the screen (totals, by-area, achievements) remains stable.
+ */
+type ChartView = 'weekly' | 'monthly';
+
 export default function Progress() {
   const [weekly, setWeekly] = useState<WeeklyStats | null>(null);
+  const [monthly, setMonthly] = useState<WeeklyStats | null>(null);
+  const [view, setView] = useState<ChartView>('weekly');
   const [profile, setProfile] = useState<Profile | null>(null);
   const [byArea, setByArea] = useState<Record<FocusArea, number> | null>(null);
   const [achievements, setAchievements] = useState<Achievement[]>([]);
@@ -29,13 +40,18 @@ export default function Progress() {
 
   const load = useCallback(async () => {
     try {
-      const [w, p, a, ach] = await Promise.all([
+      // Fetch both windows in parallel — monthly is small enough
+      // (30 rows) that pre-fetching is cheaper than refetching when
+      // the user toggles. Keeps the toggle instantaneous.
+      const [w, m, p, a, ach] = await Promise.all([
         api.statsWeekly(),
+        api.statsMonthly(),
         api.getProfile(),
         api.statsByArea(),
         api.achievements(),
       ]);
       setWeekly(w);
+      setMonthly(m);
       setProfile(p);
       setByArea(a.by_area);
       setAchievements(ach.achievements);
@@ -65,7 +81,7 @@ export default function Progress() {
   const scrollRef = useRef<ScrollView>(null);
   useScrollToTopOnFocus(scrollRef);
 
-  if (loading || !weekly || !profile || !byArea) {
+  if (loading || !weekly || !monthly || !profile || !byArea) {
     return (
       <SafeAreaView style={styles.safe}>
         <View style={styles.loading}>
@@ -75,24 +91,34 @@ export default function Progress() {
     );
   }
 
-  const maxXp = Math.max(1, ...weekly.days.map((d) => d.xp + (d.gifted_xp || 0)));
-  const chartW = 320;
+  // ── Active dataset selection ────────────────────────────────────────
+  // Both endpoints return the same shape; we just swap the source array
+  // based on the current toggle. Monthly is a 30-row window labelled by
+  // day-of-month, weekly is 7-row by weekday abbreviation.
+  const activeStats: WeeklyStats = view === 'monthly' ? monthly : weekly;
+  const days = activeStats.days;
+  const maxXp = Math.max(1, ...days.map((d) => d.xp + (d.gifted_xp || 0)));
+  // Wider chart for the monthly view so 30 bars don't overlap. Ensures
+  // each bar still has at least ~3px of breathing room.
+  const chartW = view === 'monthly' ? 720 : 320;
   const chartH = 160;
   const pad = 24;
-  const barW = (chartW - pad * 2) / weekly.days.length - 6;
-  const totalWeekXp = weekly.days.reduce((s, d) => s + d.xp, 0);
+  const barW = Math.max(2, (chartW - pad * 2) / days.length - 4);
+  const totalWindowXp = days.reduce((s, d) => s + d.xp, 0);
   const totalAreaXp = Object.values(byArea).reduce((s, v) => s + v, 0);
 
-  // Today is the LAST day in the weekly array (server orders oldest→newest).
-  const todayIdx = weekly.days.length - 1;
-  // Pre-computed coordinates so we can share them between the bars,
-  // their value labels, and the overlay line graph.
-  const segmentW = (chartW - pad * 2) / weekly.days.length;
-  const xCenters = weekly.days.map((_, i) => pad + i * segmentW + segmentW / 2);
+  // Today is always the LAST day in the array (server orders oldest→newest).
+  const todayIdx = days.length - 1;
+  const segmentW = (chartW - pad * 2) / days.length;
+  const xCenters = days.map((_, i) => pad + i * segmentW + segmentW / 2);
   const yForXp = (xp: number) => chartH - pad - ((chartH - pad * 2) * xp) / maxXp;
-  const linePoints = weekly.days
+  const linePoints = days
     .map((d, i) => `${xCenters[i]},${yForXp(d.xp)}`)
     .join(' ');
+
+  // Show value labels on every weekly bar but only every 5th monthly bar
+  // — 30 stacked labels at 10px wide is unreadable.
+  const showLabelEveryN = view === 'monthly' ? 5 : 1;
 
   const unlockedCount = achievements.filter((a) => a.unlocked).length;
 
@@ -137,12 +163,49 @@ export default function Progress() {
           </Card>
         </View>
 
-        {/* Weekly XP — bar chart with per-day XP labels on top */}
+        {/* Weekly/Monthly toggle pill — single source of truth for both
+            the bar and line graphs below. Tapping the same option is a
+            no-op so it's safe to spam. */}
+        <View style={styles.viewToggle} testID="chart-view-toggle">
+          {(['weekly', 'monthly'] as ChartView[]).map((v) => {
+            const active = view === v;
+            return (
+              <TouchableOpacity
+                key={v}
+                onPress={() => setView(v)}
+                style={[styles.viewToggleBtn, active && styles.viewToggleBtnActive]}
+                testID={`chart-view-${v}`}
+                activeOpacity={0.85}
+              >
+                <Ionicons
+                  name={v === 'weekly' ? 'calendar-outline' : 'calendar-number-outline'}
+                  size={13}
+                  color={active ? colors.bg : colors.textMuted}
+                />
+                <Text style={[styles.viewToggleText, active && { color: colors.bg }]}>
+                  {v === 'weekly' ? 'Weekly' : 'Monthly'}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {/* XP — bar chart with per-day XP labels on top. The monthly view
+            uses a horizontal ScrollView because 30 bars don't fit on
+            one mobile width; weekly stays static so the layout is
+            unchanged for that path. */}
         <Card style={styles.chartCard}>
           <View style={styles.chartHead}>
-            <Text style={styles.sectionTitle}>Weekly XP</Text>
-            <Text style={styles.chartTotal}>+{totalWeekXp} XP</Text>
+            <Text style={styles.sectionTitle}>
+              {view === 'monthly' ? 'Monthly XP' : 'Weekly XP'}
+            </Text>
+            <Text style={styles.chartTotal}>+{totalWindowXp} XP</Text>
           </View>
+          <ScrollView
+            horizontal={view === 'monthly'}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={view === 'monthly' ? { paddingHorizontal: 4 } : undefined}
+          >
           <Svg width={chartW} height={chartH}>
             <Line
               x1={pad}
@@ -152,17 +215,19 @@ export default function Progress() {
               stroke={colors.border}
               strokeWidth={1}
             />
-            {weekly.days.map((d, i) => {
+            {days.map((d, i) => {
               const earnedXp = d.xp;
               const giftedXp = d.gifted_xp || 0;
               const totalXp = earnedXp + giftedXp;
               const totalH = ((chartH - pad * 2) * totalXp) / maxXp;
               const earnedH = ((chartH - pad * 2) * earnedXp) / maxXp;
               const giftedH = ((chartH - pad * 2) * giftedXp) / maxXp;
-              const x = pad + i * segmentW + 3;
+              const x = pad + i * segmentW + (segmentW - barW) / 2;
               const yEarnedTop = chartH - pad - earnedH;
               const yGiftedTop = chartH - pad - earnedH - giftedH;
               const isToday = i === todayIdx;
+              const showLabel = totalXp > 0 && (i % showLabelEveryN === 0 || isToday);
+              const showAxisLabel = i % showLabelEveryN === 0 || isToday || i === 0;
               return (
                 <React.Fragment key={d.date}>
                   {earnedXp > 0 ? (
@@ -201,7 +266,7 @@ export default function Progress() {
                     />
                   ) : null}
                   {/* Total XP value above each bar (earned + gifted) */}
-                  {totalXp > 0 ? (
+                  {showLabel ? (
                     <SvgText
                       x={x + barW / 2}
                       y={Math.max(yGiftedTop, yEarnedTop) - 4}
@@ -213,6 +278,7 @@ export default function Progress() {
                       {totalXp}
                     </SvgText>
                   ) : null}
+                  {showAxisLabel ? (
                   <SvgText
                     x={x + barW / 2}
                     y={chartH - pad + 14}
@@ -223,19 +289,28 @@ export default function Progress() {
                   >
                     {d.day}
                   </SvgText>
+                  ) : null}
                 </React.Fragment>
               );
             })}
           </Svg>
+          </ScrollView>
         </Card>
 
-        {/* Weekly XP — companion line graph showing the same data as the
+        {/* XP — companion line graph showing the same data as the
             bar chart so users can read the trend at a glance. */}
         <Card style={[styles.chartCard, { marginTop: spacing.md }]}>
           <View style={styles.chartHead}>
-            <Text style={styles.sectionTitle}>Weekly XP — Trend</Text>
+            <Text style={styles.sectionTitle}>
+              {view === 'monthly' ? 'Monthly XP — Trend' : 'Weekly XP — Trend'}
+            </Text>
             <Text style={[styles.chartTotal, { color: colors.cyan }]}>Line view</Text>
           </View>
+          <ScrollView
+            horizontal={view === 'monthly'}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={view === 'monthly' ? { paddingHorizontal: 4 } : undefined}
+          >
           <Svg width={chartW} height={chartH}>
             <Line
               x1={pad}
@@ -265,21 +340,23 @@ export default function Progress() {
               strokeLinejoin="round"
               strokeLinecap="round"
             />
-            {weekly.days.map((d, i) => {
+            {days.map((d, i) => {
               const cx = xCenters[i];
               const cy = yForXp(d.xp);
               const isToday = i === todayIdx;
+              const showLabel = d.xp > 0 && (i % showLabelEveryN === 0 || isToday);
+              const showAxisLabel = i % showLabelEveryN === 0 || isToday || i === 0;
               return (
                 <React.Fragment key={`pt-${d.date}`}>
                   <Circle
                     cx={cx}
                     cy={cy}
-                    r={isToday ? 5 : 3.5}
+                    r={isToday ? 5 : view === 'monthly' ? 2.5 : 3.5}
                     fill={isToday ? colors.cyan : colors.green}
                     stroke={colors.bg}
                     strokeWidth={1.5}
                   />
-                  {d.xp > 0 ? (
+                  {showLabel ? (
                     <SvgText
                       x={cx}
                       y={cy - 8}
@@ -291,6 +368,7 @@ export default function Progress() {
                       {d.xp}
                     </SvgText>
                   ) : null}
+                  {showAxisLabel ? (
                   <SvgText
                     x={cx}
                     y={chartH - pad + 14}
@@ -301,10 +379,12 @@ export default function Progress() {
                   >
                     {d.day}
                   </SvgText>
+                  ) : null}
                 </React.Fragment>
               );
             })}
           </Svg>
+          </ScrollView>
         </Card>
 
         {/* Confidence metric / by area */}
@@ -422,6 +502,28 @@ const styles = StyleSheet.create({
   chartCard: { marginTop: spacing.md, alignItems: 'center' },
   chartHead: { flexDirection: 'row', justifyContent: 'space-between', alignSelf: 'stretch', alignItems: 'center', marginBottom: spacing.sm },
   chartTotal: { color: colors.green, fontSize: 14, fontWeight: '800' },
+  // Weekly/Monthly toggle pill
+  viewToggle: {
+    flexDirection: 'row',
+    alignSelf: 'center',
+    marginTop: spacing.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 999,
+    padding: 3,
+    gap: 2,
+  },
+  viewToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  viewToggleBtnActive: { backgroundColor: colors.cyan },
+  viewToggleText: { color: colors.textMuted, fontSize: 12, fontWeight: '800', letterSpacing: 0.3 },
   sectionTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
   sectionSub: { color: colors.textMuted, fontSize: 12, marginTop: 2, marginBottom: spacing.sm },
   areaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.sm },

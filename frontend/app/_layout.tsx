@@ -1,7 +1,8 @@
 import React, { useEffect } from 'react';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { View, ActivityIndicator, AppState } from 'react-native';
+import { View, ActivityIndicator, AppState, Text } from 'react-native';
+import * as SplashScreen from 'expo-splash-screen';
 import { colors, applyAdminTheme, clearAdminTheme } from '../src/theme';
 import { AuthProvider, useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
@@ -14,6 +15,19 @@ import { NotificationDeepLinker } from '../src/NotificationDeepLinker';
 import { enableAndroidImmersive, reassertAndroidImmersive } from '../src/androidImmersive';
 import { SuspensionAlertModal } from '../src/components/SuspensionAlertModal';
 import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
+
+// Keep the splash screen visible only until the JS bundle has finished
+// evaluating the root component. Without this we can't predictably
+// dismiss it ourselves and users on slow devices see a too-long splash
+// while AuthContext bootstraps.
+//
+// `.catch(() => {})` swallows the (harmless) "already-prevented" race
+// in fast-refresh / dev-client reloads.
+SplashScreen.preventAutoHideAsync().catch(() => {});
+// Hard timeout: if anything hangs, kill the splash after 1.5s no matter
+// what — better to drop the user into the auth-gate skeleton than to
+// stare at a frozen logo. This is the "font loading timeout" fix.
+const SPLASH_HARD_TIMEOUT_MS = 1500;
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const { loading, token, anonymousId } = useAuth();
@@ -88,6 +102,9 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg }}>
         <ActivityIndicator size="large" color={colors.green} />
+        <Text style={{ color: colors.textMuted, marginTop: 12, fontSize: 12, fontWeight: '700', letterSpacing: 1.5 }}>
+          LOADING
+        </Text>
       </View>
     );
   }
@@ -95,6 +112,19 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 }
 
 export default function RootLayout() {
+  // Hide the splash screen as soon as React has mounted the root tree,
+  // and ALSO after a hard timeout so a wedged init never traps the
+  // user behind the splash (the bug the user described as "font
+  // loading timeout"). Both calls are idempotent — whichever fires
+  // first wins and the second one's a no-op.
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+    const t = setTimeout(() => {
+      SplashScreen.hideAsync().catch(() => {});
+    }, SPLASH_HARD_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, []);
+
   // Hide the Samsung 3-button (or pill) navigation bar on Android the
   // moment the app boots, and re-assert hidden state when the OS gives
   // it back to us (e.g. after a permission dialog or returning from

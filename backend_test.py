@@ -1,683 +1,345 @@
-"""Backend regression + new-feature test harness.
-
-Covers the 5 new/modified capabilities from the 2026-04-29 review request:
-  1. Spot Photo Editing (/spot/edit/preview, /spot/edit/save)
-  2. Spot Vision Check optimized latency (regression)
-  3. Leaderboard Admin Display (is_admin_view + level=999 sentinel)
-  4. Push Token Registration (loud logging + extended response body)
-  5. Debug endpoint /api/debug/health-connect-error
-
-Plus targeted regression smoke:
-  /api/auth/register, /api/auth/login, /api/profile, /api/spot/feed,
-  /api/friends/list.
 """
-
+Backend tests for:
+(1) GET /api/stats/monthly  — NEW
+(2) GET /api/stats/by-area  — RESTORED
+(3) POST /api/focus/session — NEW locked_app_seconds field with -15 XP/min penalty
+(4) Quick regression smoke (profile/register/tasks/weekly).
+"""
+from __future__ import annotations
+import json
+import os
 import sys
 import uuid
-import base64
-import io
-import traceback
-import urllib.request
-import ssl
-
+from datetime import datetime, timezone
 import requests
 
-BASE = "https://xp-confidence.preview.emergentagent.com/api"
-ADMIN_EMAIL = "filip.cojocea122@gmail.com"
-ADMIN_PASSWORD = "XL98CZW5599"
-
-PASSES = 0
-FAILS = 0
-
-
-def ok(msg):
-    global PASSES
-    PASSES += 1
-    print(f"  ✅ {msg}")
-
-
-def bad(msg):
-    global FAILS
-    FAILS += 1
-    print(f"  ❌ {msg}")
-
-
-def section(title):
-    print(f"\n=== {title} ===")
-
-
-def h(token=None, anon=None):
-    out = {"Content-Type": "application/json"}
-    if token:
-        out["Authorization"] = f"Bearer {token}"
-    if anon:
-        out["X-Anonymous-Id"] = anon
-    return out
-
-
-def register(full_name, email, password):
-    r = requests.post(f"{BASE}/auth/register", json={
-        "full_name": full_name, "email": email, "password": password,
-    }, timeout=30)
-    r.raise_for_status()
-    d = r.json()
-    return d["token"], d["user"]
-
-
-def login(email, password):
-    r = requests.post(f"{BASE}/auth/login", json={
-        "email": email, "password": password,
-    }, timeout=30)
-    r.raise_for_status()
-    d = r.json()
-    return d["token"], d["user"]
-
-
-def fresh_email(tag):
-    return f"sdet_{tag}_{uuid.uuid4().hex[:10]}@gmail.com"
-
-
-def download_loremflickr(keyword="leaf", w=320, h=240):
-    url = f"https://loremflickr.com/{w}/{h}/{keyword}"
-    ctx = ssl.create_default_context()
-    req = urllib.request.Request(url, headers={"User-Agent": "sdet/1.0"})
-    with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-        data = resp.read()
-    return base64.b64encode(data).decode("ascii")
-
-
-def make_tiny_jpeg_b64():
-    from PIL import Image
-    im = Image.new("RGB", (200, 160), (80, 140, 60))
-    for x in range(0, 200, 10):
-        for y in range(0, 160, 10):
-            im.putpixel((x, y), (200, 80, 60))
-    buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=82)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def is_valid_jpeg_b64(b64):
-    try:
-        raw = base64.b64decode(b64)
-        if raw[:3] != b"\xff\xd8\xff":
-            return False
-        from PIL import Image
-        Image.open(io.BytesIO(raw)).verify()
-        return True
-    except Exception:
-        return False
-
-
-section("0. Admin login")
-admin_token, admin_user = None, None
-try:
-    admin_token, admin_user = login(ADMIN_EMAIL, ADMIN_PASSWORD)
-    ok(f"Admin login → 200, admin_id={admin_user['id']}")
-except Exception as e:
-    bad(f"Admin login failed: {e}")
-
-ADMIN_ID = admin_user["id"] if admin_user else None
-
-# ══════════════════════════════════════════════════════════════════
-# 1. SPOT PHOTO EDITING (HIGHEST PRIORITY)
-# ══════════════════════════════════════════════════════════════════
-section("1. Spot Photo Editing — /spot/edit/preview & /spot/edit/save")
-
-owner_email = fresh_email("owner")
-other_email = fresh_email("other")
-owner_token = other_token = None
-owner_id = other_id = None
-
-try:
-    owner_token, ouser = register("Maya Patel", owner_email, "StrongPass99!")
-    owner_id = ouser["id"]
-    ok(f"Owner registered id={owner_id}")
-except Exception as e:
-    bad(f"Owner register failed: {e}")
-
-try:
-    other_token, xuser = register("Ryan Chen", other_email, "AnotherPwd88!")
-    other_id = xuser["id"]
-    ok(f"Other registered id={other_id}")
-except Exception as e:
-    bad(f"Other register failed: {e}")
-
-entry_id = None
-target = "leaf"
-if owner_token:
-    try:
-        r = requests.get(f"{BASE}/spot/object", headers=h(owner_token), timeout=30)
-        if r.status_code == 200:
-            target = r.json().get("object") or "leaf"
-            ok(f"/spot/object → 200 target={target!r}")
-        else:
-            bad(f"/spot/object → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"/spot/object failed: {e}")
-
-    try:
-        photo = make_tiny_jpeg_b64()
-        r = requests.post(f"{BASE}/spot/complete", headers=h(owner_token), json={
-            "target_object": target,
-            "photo_base64": photo,
-            "success": True,
-            "remaining_seconds": 0,
-            "mode": "solo_constant",
-        }, timeout=30)
-        if r.status_code == 200:
-            d = r.json()
-            entry_id = (d.get("entry") or {}).get("id")
-            if entry_id:
-                ok(f"/spot/complete → 200 entry_id={entry_id}")
-            else:
-                bad(f"/spot/complete 200 but no entry_id: {d}")
-        else:
-            bad(f"/spot/complete → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"/spot/complete failed: {e}")
-        traceback.print_exc()
-
-preview_results = {}
-if entry_id and owner_token:
-    for flt in ["painting", "bw", "auto"]:
-        try:
-            r = requests.post(f"{BASE}/spot/edit/preview", headers=h(owner_token), json={
-                "entry_id": entry_id, "filter": flt,
-            }, timeout=60)
-            if r.status_code != 200:
-                bad(f"/spot/edit/preview {flt} → {r.status_code} {r.text[:200]}")
-                continue
-            b64 = r.json().get("edited_base64")
-            if not b64:
-                bad(f"/spot/edit/preview {flt}: no edited_base64")
-                continue
-            if is_valid_jpeg_b64(b64):
-                ok(f"/spot/edit/preview filter={flt} → valid JPEG ({len(b64)} b64 chars)")
-                preview_results[flt] = b64
-            else:
-                bad(f"/spot/edit/preview {flt}: base64 not a valid JPEG")
-        except Exception as e:
-            bad(f"/spot/edit/preview {flt} failed: {e}")
-
-if entry_id and owner_token and "auto" in preview_results:
-    saved_b64 = preview_results["auto"]
-    try:
-        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
-            "entry_id": entry_id, "edited_base64": saved_b64,
-        }, timeout=30)
-        if r.status_code == 200 and r.json().get("ok") is True:
-            ok("/spot/edit/save owner → 200 {ok:true}")
-        else:
-            bad(f"/spot/edit/save → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"/spot/edit/save failed: {e}")
-
-    try:
-        r = requests.get(f"{BASE}/spot/{entry_id}", headers=h(owner_token), timeout=30)
-        if r.status_code == 200:
-            d = r.json()
-            if d.get("photo_base64") == saved_b64:
-                ok("GET /spot/{id}.photo_base64 == saved edited_base64")
-            else:
-                bad(f"photo_base64 mismatch (stored_len={len(d.get('photo_base64') or '')}, saved_len={len(saved_b64)})")
-            if d.get("edited_at"):
-                ok(f"GET /spot/{{id}}.edited_at set ({d['edited_at']})")
-            else:
-                bad("GET /spot/{id}.edited_at NOT set")
-        else:
-            bad(f"GET /spot/{{id}} → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"GET /spot/{{id}} failed: {e}")
-
-# 1e: Other cannot preview → 403
-if entry_id and other_token:
-    try:
-        r = requests.post(f"{BASE}/spot/edit/preview", headers=h(other_token), json={
-            "entry_id": entry_id, "filter": "bw",
-        }, timeout=30)
-        if r.status_code == 403:
-            ok("Other /spot/edit/preview on owner entry → 403")
-        else:
-            bad(f"Other preview → {r.status_code} expected 403")
-    except Exception as e:
-        bad(f"Other preview failed: {e}")
-
-# 1f: Other cannot save → 403
-if entry_id and other_token and "bw" in preview_results:
-    try:
-        r = requests.post(f"{BASE}/spot/edit/save", headers=h(other_token), json={
-            "entry_id": entry_id, "edited_base64": preview_results["bw"],
-        }, timeout=30)
-        if r.status_code == 403:
-            ok("Other /spot/edit/save on owner entry → 403")
-        else:
-            bad(f"Other save → {r.status_code} expected 403")
-    except Exception as e:
-        bad(f"Other save failed: {e}")
-
-# 1g: Bogus id preview → 404
-if owner_token:
-    try:
-        r = requests.post(f"{BASE}/spot/edit/preview", headers=h(owner_token), json={
-            "entry_id": "does-not-exist", "filter": "painting",
-        }, timeout=30)
-        if r.status_code == 404:
-            ok("/spot/edit/preview bogus id → 404")
-        else:
-            bad(f"/spot/edit/preview bogus → {r.status_code} expected 404")
-    except Exception as e:
-        bad(f"bogus preview failed: {e}")
-
-# 1h: Bogus id save → 404
-if owner_token:
-    try:
-        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
-            "entry_id": "does-not-exist", "edited_base64": "xxx",
-        }, timeout=30)
-        if r.status_code == 404:
-            ok("/spot/edit/save bogus id → 404")
-        else:
-            bad(f"/spot/edit/save bogus → {r.status_code} expected 404")
-    except Exception as e:
-        bad(f"bogus save failed: {e}")
-
-# 1i: Invalid filter → 422
-if owner_token and entry_id:
-    try:
-        r = requests.post(f"{BASE}/spot/edit/preview", headers=h(owner_token), json={
-            "entry_id": entry_id, "filter": "sepia",
-        }, timeout=30)
-        if r.status_code == 422:
-            ok("/spot/edit/preview filter='sepia' → 422 (Pydantic Literal)")
-        else:
-            bad(f"/spot/edit/preview filter=sepia → {r.status_code} expected 422")
-    except Exception as e:
-        bad(f"invalid filter failed: {e}")
-
-# 1j: Empty save → 400
-if owner_token and entry_id:
-    try:
-        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
-            "entry_id": entry_id, "edited_base64": "",
-        }, timeout=30)
-        if r.status_code == 400:
-            ok("/spot/edit/save empty → 400")
-        else:
-            bad(f"/spot/edit/save empty → {r.status_code} expected 400")
-    except Exception as e:
-        bad(f"empty save failed: {e}")
-
-# 1k: >12M save → 400
-if owner_token and entry_id:
-    try:
-        big = "A" * 12_000_001
-        r = requests.post(f"{BASE}/spot/edit/save", headers=h(owner_token), json={
-            "entry_id": entry_id, "edited_base64": big,
-        }, timeout=60)
-        if r.status_code == 400:
-            ok("/spot/edit/save >12M → 400")
-        else:
-            bad(f"/spot/edit/save >12M → {r.status_code} expected 400")
-    except Exception as e:
-        bad(f"big save failed: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════
-# 2. SPOT VISION CHECK regression
-# ══════════════════════════════════════════════════════════════════
-section("2. Spot Vision Check — /spot/object + /spot/check regression")
-
-if owner_token:
-    try:
-        r = requests.get(f"{BASE}/spot/object", headers=h(owner_token), timeout=30)
-        if r.status_code == 200 and r.json().get("object") and r.json().get("challenge_id"):
-            ok("/spot/object → 200 with {object, challenge_id}")
-        else:
-            bad(f"/spot/object → {r.status_code}")
-    except Exception as e:
-        bad(f"/spot/object failed: {e}")
-
-    try:
-        r = requests.post(f"{BASE}/spot/check", headers=h(owner_token), json={
-            "target_object": "leaf", "photo_base64": "",
-        }, timeout=30)
-        if r.status_code == 400:
-            ok("/spot/check empty photo → 400")
-        else:
-            bad(f"/spot/check empty → {r.status_code} expected 400")
-    except Exception as e:
-        bad(f"/spot/check empty failed: {e}")
-
-    try:
-        leaf_b64 = download_loremflickr("leaf", 320, 240)
-        r = requests.post(f"{BASE}/spot/check", headers=h(owner_token), json={
-            "target_object": "leaf", "photo_base64": leaf_b64,
-        }, timeout=60)
-        if r.status_code == 200:
-            d = r.json()
-            required = {"detected", "confidence", "reason", "distance", "can_capture"}
-            if required.issubset(d.keys()):
-                ok(f"/spot/check leaf/leaf → shape OK detected={d['detected']} conf={d['confidence']}")
-            else:
-                bad(f"/spot/check leaf keys missing: {list(d.keys())}")
-            if bool(d.get("can_capture")) == bool(d.get("detected") and d.get("confidence", 0) >= 0.55):
-                ok("/spot/check can_capture invariant holds")
-            else:
-                bad(f"/spot/check invariant BROKEN: {d}")
-        else:
-            bad(f"/spot/check → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"/spot/check leaf failed: {e}")
-
-    try:
-        leaf_b64 = download_loremflickr("leaf", 320, 240)
-        r = requests.post(f"{BASE}/spot/check", headers=h(owner_token), json={
-            "target_object": "chair", "photo_base64": leaf_b64,
-        }, timeout=60)
-        if r.status_code == 200:
-            d = r.json()
-            if {"detected", "confidence", "can_capture"}.issubset(d.keys()):
-                ok(f"/spot/check chair/leaf shape OK detected={d['detected']} conf={d['confidence']}")
-            else:
-                bad(f"/spot/check chair/leaf shape bad: {d}")
-        else:
-            bad(f"/spot/check chair/leaf → {r.status_code}")
-    except Exception as e:
-        bad(f"/spot/check chair/leaf failed: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════
-# 3. LEADERBOARD ADMIN DISPLAY
-# ══════════════════════════════════════════════════════════════════
-section("3. Leaderboard Admin Display (is_admin_view / level=999)")
-
-B_email = fresh_email("lbB")
-B_token = None
-B_id = None
-try:
-    B_token, B_u = register("Priya Sharma", B_email, "LeaderboardB22!")
-    B_id = B_u["id"]
-    ok(f"B registered id={B_id}")
-except Exception as e:
-    bad(f"B register failed: {e}")
-
-if B_token and ADMIN_ID and admin_token:
-    try:
-        r = requests.post(f"{BASE}/friends/request", headers=h(B_token), json={"user_id": ADMIN_ID}, timeout=30)
-        if r.status_code == 200:
-            ok("B→admin /friends/request → 200")
-        else:
-            bad(f"B→admin request → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"friend request failed: {e}")
-
-    try:
-        r = requests.post(f"{BASE}/friends/accept", headers=h(admin_token), json={"user_id": B_id}, timeout=30)
-        if r.status_code == 200:
-            ok("admin accepts B → 200")
-        else:
-            bad(f"admin accept → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"accept failed: {e}")
-
-if B_token:
-    try:
-        r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h(B_token), timeout=30)
-        if r.status_code == 200:
-            d = r.json()
-            rows = d.get("rows", [])
-            if len(rows) >= 2:
-                ok(f"B leaderboard rows={len(rows)}")
-            else:
-                bad(f"B leaderboard rows={len(rows)} (expected >=2)")
-
-            admin_row = next((x for x in rows if x.get("user_id") == ADMIN_ID), None)
-            self_row = next((x for x in rows if x.get("user_id") == B_id), None)
-
-            if admin_row:
-                if admin_row.get("name") == "Admin · Creator":
-                    ok("Admin row name == 'Admin · Creator'")
-                else:
-                    bad(f"Admin row name → {admin_row.get('name')!r}")
-                if admin_row.get("level") == 999:
-                    ok("Admin row level == 999")
-                else:
-                    bad(f"Admin row level → {admin_row.get('level')}")
-                if admin_row.get("total_xp") == -1:
-                    ok("Admin row total_xp == -1")
-                else:
-                    bad(f"Admin row total_xp → {admin_row.get('total_xp')}")
-                if admin_row.get("is_admin") is True:
-                    ok("Admin row is_admin=true")
-                else:
-                    bad(f"Admin row is_admin → {admin_row.get('is_admin')}")
-                if admin_row.get("is_admin_view") is True:
-                    ok("Admin row is_admin_view=true")
-                else:
-                    bad(f"Admin row is_admin_view → {admin_row.get('is_admin_view')}")
-            else:
-                bad(f"Admin row missing from B lb; ids={[x.get('user_id') for x in rows]}")
-
-            if self_row:
-                if self_row.get("is_admin") is False:
-                    ok("B self is_admin=false")
-                else:
-                    bad(f"B self is_admin → {self_row.get('is_admin')}")
-                if self_row.get("is_admin_view") is False:
-                    ok("B self is_admin_view=false")
-                else:
-                    bad(f"B self is_admin_view → {self_row.get('is_admin_view')}")
-                if isinstance(self_row.get("level"), int) and self_row.get("level") < 999:
-                    ok(f"B self level is real ({self_row.get('level')})")
-                else:
-                    bad(f"B self level → {self_row.get('level')}")
-            else:
-                bad("B self row missing")
-        else:
-            bad(f"B leaderboard → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"B leaderboard failed: {e}")
-
-if admin_token:
-    try:
-        r = requests.get(f"{BASE}/friends/leaderboard?tz=0", headers=h(admin_token), timeout=30)
-        if r.status_code == 200:
-            rows = r.json().get("rows", [])
-            admin_self = next((x for x in rows if x.get("user_id") == ADMIN_ID), None)
-            if admin_self:
-                if admin_self.get("is_admin_view") is False:
-                    ok("Admin self-view is_admin_view=false")
-                else:
-                    bad(f"Admin self-view is_admin_view → {admin_self.get('is_admin_view')}")
-                if admin_self.get("level") != 999:
-                    ok(f"Admin self-view level is real ({admin_self.get('level')})")
-                else:
-                    bad("Admin self-view level == 999 (should be real)")
-                if admin_self.get("total_xp") != -1:
-                    ok(f"Admin self-view total_xp real ({admin_self.get('total_xp')})")
-                else:
-                    bad("Admin self-view total_xp == -1")
-                ok(f"Admin self-view name={admin_self.get('name')!r}")
-            else:
-                bad("Admin self row missing from admin lb")
-        else:
-            bad(f"Admin lb → {r.status_code}")
-    except Exception as e:
-        bad(f"Admin lb failed: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════
-# 4. PUSH TOKEN
-# ══════════════════════════════════════════════════════════════════
-section("4. /push/register-token")
-
-if owner_token:
-    token_str = "ExponentPushToken[testtest]"
-    try:
-        r = requests.post(f"{BASE}/push/register-token", headers=h(owner_token), json={
-            "token": token_str, "platform": "android",
-        }, timeout=30)
-        if r.status_code == 200:
-            d = r.json()
-            if d.get("ok") is True:
-                ok("/push/register-token first → 200 ok:true")
-            else:
-                bad(f"/push/register-token first missing ok: {d}")
-            for key in ("matched", "modified", "upserted"):
-                if key in d:
-                    ok(f"response has {key}={d[key]}")
-                else:
-                    bad(f"response missing {key}")
-        else:
-            bad(f"/push/register-token first → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"push first failed: {e}")
-
-    try:
-        r = requests.post(f"{BASE}/push/register-token", headers=h(owner_token), json={
-            "token": token_str, "platform": "android",
-        }, timeout=30)
-        if r.status_code == 200:
-            d = r.json()
-            if d.get("upserted") is False:
-                ok("2nd call upserted=false")
-            else:
-                bad(f"2nd call upserted → {d.get('upserted')}")
-            if d.get("matched", 0) >= 1:
-                ok(f"2nd call matched={d.get('matched')}")
-            else:
-                bad(f"2nd call matched → {d.get('matched')}")
-        else:
-            bad(f"2nd call → {r.status_code}")
-    except Exception as e:
-        bad(f"push 2nd failed: {e}")
-
-    try:
-        r = requests.post(f"{BASE}/push/register-token", headers=h(owner_token), json={
-            "token": "", "platform": "android",
-        }, timeout=30)
-        if r.status_code == 400:
-            ok("/push/register-token empty → 400")
-        else:
-            bad(f"/push/register-token empty → {r.status_code}")
-    except Exception as e:
-        bad(f"empty push failed: {e}")
-
-try:
-    r = requests.post(f"{BASE}/push/register-token", json={
-        "token": "ExponentPushToken[anonanon]", "platform": "ios",
-    }, headers={"Content-Type": "application/json"}, timeout=30)
-    if r.status_code == 200 and r.json().get("ok") is True:
-        ok("/push/register-token anonymous → 200 (legacy main)")
-    else:
-        bad(f"anon push → {r.status_code} {r.text[:200]}")
-except Exception as e:
-    bad(f"anon push failed: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════
-# 5. DEBUG ENDPOINT
-# ══════════════════════════════════════════════════════════════════
-section("5. /debug/health-connect-error")
-
-if owner_token:
-    try:
-        r = requests.post(f"{BASE}/debug/health-connect-error", headers=h(owner_token), json={
-            "stage": "initialize", "message": "test", "platform": "android", "os_version": "35",
-        }, timeout=30)
-        if r.status_code == 200 and r.json().get("ok") is True:
-            ok("/debug/health-connect-error authed → 200 ok:true")
-        else:
-            bad(f"HC authed → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"HC authed failed: {e}")
-
-    try:
-        r = requests.post(f"{BASE}/debug/health-connect-error", headers=h(owner_token), json={
-            "stage": "availability",
-        }, timeout=30)
-        if r.status_code == 200:
-            ok("HC (only stage, no extra) → 200")
-        else:
-            bad(f"HC minimal → {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        bad(f"HC minimal failed: {e}")
-
-try:
-    r = requests.post(f"{BASE}/debug/health-connect-error", headers={"Content-Type": "application/json"}, json={
-        "stage": "anon_check", "message": "hello",
-    }, timeout=30)
-    if r.status_code == 200 and r.json().get("ok") is True:
-        ok("HC anonymous → 200 ok:true")
-    else:
-        bad(f"HC anon → {r.status_code} {r.text[:200]}")
-except Exception as e:
-    bad(f"HC anon failed: {e}")
-
-
-# ══════════════════════════════════════════════════════════════════
-# REGRESSION
-# ══════════════════════════════════════════════════════════════════
-section("R. Regression smoke")
-
-reg_email = fresh_email("reg")
-try:
-    r = requests.post(f"{BASE}/auth/register", json={
-        "full_name": "Regression Rita", "email": reg_email, "password": "RegPass1234!",
-    }, timeout=30)
-    if r.status_code == 200 and r.json().get("token"):
-        ok("/auth/register (gmail) → 200 + token")
-    else:
-        bad(f"/auth/register → {r.status_code}")
-except Exception as e:
-    bad(f"auth/register regression failed: {e}")
-
-try:
-    r = requests.post(f"{BASE}/auth/login", json={
-        "email": ADMIN_EMAIL, "password": ADMIN_PASSWORD,
-    }, timeout=30)
-    if r.status_code == 200 and r.json().get("token"):
-        ok("/auth/login admin → 200")
-    else:
-        bad(f"/auth/login admin → {r.status_code}")
-except Exception as e:
-    bad(f"admin login regression failed: {e}")
-
-if owner_token:
-    try:
-        r = requests.get(f"{BASE}/profile", headers=h(owner_token), timeout=30)
-        if r.status_code == 200 and r.json().get("name"):
-            ok("/profile (JWT) → 200")
-        else:
-            bad(f"/profile → {r.status_code}")
-    except Exception as e:
-        bad(f"/profile failed: {e}")
-
-if owner_token:
-    try:
-        r = requests.get(f"{BASE}/spot/feed?limit=50", headers=h(owner_token), timeout=30)
-        if r.status_code == 200 and "entries" in r.json():
-            ok(f"/spot/feed → 200 entries={len(r.json()['entries'])}")
-        else:
-            bad(f"/spot/feed → {r.status_code}")
-    except Exception as e:
-        bad(f"/spot/feed failed: {e}")
-
-if B_token:
-    try:
-        r = requests.get(f"{BASE}/friends/list", headers=h(B_token), timeout=30)
-        if r.status_code == 200:
-            body = r.json()
-            if isinstance(body, list) or (isinstance(body, dict) and isinstance(body.get("friends"), list)):
-                ok("/friends/list → 200 (list)")
-            else:
-                bad(f"/friends/list shape unexpected: {type(body).__name__}")
-        else:
-            bad(f"/friends/list → {r.status_code}")
-    except Exception as e:
-        bad(f"/friends/list failed: {e}")
-
-
-print(f"\n==================== {PASSES} passed / {FAILS} failed ====================")
-sys.exit(0 if FAILS == 0 else 1)
+BASE = os.environ.get("BACKEND_BASE") or "https://xp-confidence.preview.emergentagent.com/api"
+
+PASS = []
+FAIL = []
+
+
+def _log(ok: bool, msg: str, extra: str = ""):
+    line = f"{'PASS' if ok else 'FAIL'}: {msg}"
+    if extra and not ok:
+        line += f"\n        {extra}"
+    print(line)
+    (PASS if ok else FAIL).append(line)
+
+
+def _assert(cond: bool, msg: str, extra: str = ""):
+    _log(bool(cond), msg, extra)
+
+
+def _post(path, body=None, headers=None):
+    r = requests.post(f"{BASE}{path}", json=(body or {}), headers=(headers or {}), timeout=30)
+    return r
+
+
+def _get(path, headers=None, params=None):
+    r = requests.get(f"{BASE}{path}", headers=(headers or {}), params=params, timeout=30)
+    return r
+
+
+def register_user():
+    email = f"maya.patel.{uuid.uuid4().hex[:10]}@gmail.com"
+    body = {"full_name": "Maya Patel", "email": email, "password": "Sapphire!Galaxy7392"}
+    r = _post("/auth/register", body)
+    _assert(r.status_code == 200, "register fresh gmail user → 200",
+            extra=f"status={r.status_code} body={r.text[:300]}")
+    js = r.json()
+    token = js.get("token") or js.get("access_token")
+    user = js.get("user") or {}
+    uid = user.get("id") or user.get("user_id")
+    _assert(bool(token), "register returns JWT")
+    _assert(bool(uid), "register returns user.id")
+    return email, body["password"], token, uid
+
+
+def auth_headers(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ---------- (1) stats/monthly ----------
+def test_stats_monthly(token, default_tasks):
+    H = auth_headers(token)
+    r = _get("/stats/monthly", headers=H)
+    _assert(r.status_code == 200, "GET /stats/monthly → 200",
+            extra=f"status={r.status_code} body={r.text[:300]}")
+    if r.status_code != 200:
+        return None
+    js = r.json()
+    days = js.get("days")
+    _assert(isinstance(days, list), "monthly.days is list")
+    _assert(isinstance(days, list) and len(days) == 30,
+            f"monthly.days length = 30 (got {len(days) if isinstance(days, list) else 'N/A'})")
+    if not (isinstance(days, list) and len(days) == 30):
+        return None
+
+    _assert(days[0]["date"] < days[29]["date"],
+            f"monthly oldest→newest (first={days[0]['date']} last={days[29]['date']})")
+
+    required_keys = {"date", "day", "xp", "gifted_xp", "tasks"}
+    all_ok = all(required_keys.issubset(set(d.keys())) for d in days)
+    _assert(all_ok, "every day has {date, day, xp, gifted_xp, tasks}")
+
+    d0 = days[0]
+    is_dom = d0["day"].isdigit() and 1 <= int(d0["day"]) <= 31
+    is_weekday = d0["day"] in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+    _assert(is_dom and not is_weekday,
+            f"day is day-of-month string (got '{d0['day']}'), NOT weekday")
+
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    _assert(days[29]["date"] == today_utc,
+            f"days[29].date == today UTC ({today_utc}), got {days[29]['date']}")
+
+    # complete a default task → days[29].xp increases
+    today = today_utc
+    target = next((t for t in default_tasks
+                   if t.get("title") == "Morning reflection (5 min)"),
+                  default_tasks[0] if default_tasks else None)
+    _assert(target is not None, "have a default task to complete")
+    if not target:
+        return None
+    pre_xp = days[29]["xp"]
+    cr = _post(f"/tasks/{target['id']}/complete", {"date": today}, H)
+    _assert(cr.status_code == 200,
+            f"complete default task '{target['title']}' → 200",
+            extra=f"status={cr.status_code} body={cr.text[:300]}")
+    r2 = _get("/stats/monthly", headers=H)
+    _assert(r2.status_code == 200, "GET /stats/monthly post-complete → 200")
+    if r2.status_code == 200:
+        d2 = r2.json().get("days", [])
+        if len(d2) == 30:
+            _assert(d2[29]["xp"] > pre_xp,
+                    f"days[29].xp increased after complete (pre={pre_xp}, post={d2[29]['xp']})")
+    return target
+
+
+# ---------- (2) stats/by-area ----------
+def test_stats_by_area(token):
+    H = auth_headers(token)
+    r = _get("/stats/by-area", headers=H)
+    _assert(r.status_code == 200, "GET /stats/by-area → 200 (NOT 404)",
+            extra=f"status={r.status_code} body={r.text[:300]}")
+    if r.status_code != 200:
+        return
+    js = r.json()
+    by_area = js.get("by_area")
+    _assert(isinstance(by_area, dict), "stats/by-area returns by_area dict")
+    expected = {"social", "fitness", "appearance", "mindset"}
+    _assert(set(by_area.keys()) >= expected,
+            f"by_area has all 4 focus areas (got {list(by_area.keys())})")
+    for k in expected:
+        _assert(isinstance(by_area.get(k), int), f"by_area.{k} is int")
+
+    pre = int(by_area.get("mindset") or 0)
+    today = datetime.now(timezone.utc).date().isoformat()
+    tr = _get("/tasks", headers=H)
+    tasks = tr.json().get("tasks", []) if tr.status_code == 200 else []
+    mindset_task = None
+    for t in tasks:
+        if (t.get("focus_area") == "mindset" and t.get("is_default")
+                and not t.get("completed")):
+            mindset_task = t
+            break
+    _assert(mindset_task is not None, "have a mindset default task uncompleted")
+    if not mindset_task:
+        return
+    cr = _post(f"/tasks/{mindset_task['id']}/complete", {"date": today}, H)
+    _assert(cr.status_code == 200, "complete mindset task → 200",
+            extra=f"status={cr.status_code} body={cr.text[:300]}")
+    r2 = _get("/stats/by-area", headers=H)
+    _assert(r2.status_code == 200, "GET /stats/by-area post-complete → 200")
+    if r2.status_code == 200:
+        post = int(r2.json().get("by_area", {}).get("mindset") or 0)
+        _assert(post > pre,
+                f"by_area.mindset increased (pre={pre}, post={post})")
+
+
+# ---------- (3) focus/session ----------
+def get_total_xp(token):
+    r = _get("/profile", headers=auth_headers(token))
+    if r.status_code != 200:
+        return None
+    return int(r.json().get("total_xp") or 0)
+
+
+def run_focus(token, label, body, expected_delta, expected_reason, prev_xp):
+    H = auth_headers(token)
+    r = _post("/focus/session", body, H)
+    if expected_delta == "400":
+        _assert(r.status_code == 400, f"[{label}] returns 400",
+                extra=f"status={r.status_code} body={r.text[:300]} req={json.dumps(body)}")
+        return prev_xp
+    if r.status_code != 200:
+        _log(False, f"[{label}] expected 200 got {r.status_code}",
+             extra=f"req={json.dumps(body)} resp={r.text[:300]}")
+        return prev_xp
+    js = r.json()
+    actual_delta = int(js.get("xp_delta", -99999))
+    actual_reason = js.get("reason", "")
+    new_total = int((js.get("profile") or {}).get("total_xp") or 0)
+
+    _assert(actual_delta == expected_delta,
+            f"[{label}] xp_delta == {expected_delta}",
+            extra=f"got xp_delta={actual_delta} reason={actual_reason} req={json.dumps(body)} resp={r.text[:400]}")
+    _assert(actual_reason == expected_reason,
+            f"[{label}] reason == '{expected_reason}'",
+            extra=f"got reason='{actual_reason}' req={json.dumps(body)} resp={r.text[:400]}")
+
+    expected_total = max(0, prev_xp + expected_delta)
+    _assert(new_total == expected_total,
+            f"[{label}] profile.total_xp = max(0, prev+delta) = {expected_total}",
+            extra=f"got new_total={new_total} prev={prev_xp} delta={expected_delta}")
+    _assert(new_total >= 0, f"[{label}] total_xp >= 0 (got {new_total})")
+
+    rp = _get("/profile", headers=H)
+    if rp.status_code == 200:
+        pt = int(rp.json().get("total_xp") or 0)
+        _assert(pt == new_total, f"[{label}] /profile re-fetch matches session resp",
+                extra=f"refetch={pt} session_resp={new_total}")
+    return new_total
+
+
+def test_focus_session(token):
+    H = auth_headers(token)
+    total = get_total_xp(token)
+    _assert(total is not None, "fetch starting total_xp")
+    print(f"  [focus] starting total_xp = {total}")
+
+    total = run_focus(token, "A complete clean",
+                      {"planned_minutes": 25, "actual_seconds": 1500,
+                       "backgrounded_seconds": 0, "locked_app_seconds": 0,
+                       "completed": True, "committed_app_count": 3},
+                      5, "focus_complete", total)
+
+    total = run_focus(token, "B early-exit locked 4min",
+                      {"planned_minutes": 30, "actual_seconds": 300,
+                       "backgrounded_seconds": 0, "locked_app_seconds": 240,
+                       "completed": False, "committed_app_count": 2},
+                      -60, "focus_distracted_locked_apps", total)
+
+    total = run_focus(token, "C complete with penalty",
+                      {"planned_minutes": 60, "actual_seconds": 3600,
+                       "backgrounded_seconds": 0, "locked_app_seconds": 120,
+                       "completed": True, "committed_app_count": 1},
+                      -18, "focus_complete_with_penalty", total)
+
+    total = run_focus(token, "D penalty cap",
+                      {"planned_minutes": 60, "actual_seconds": 3600,
+                       "backgrounded_seconds": 0, "locked_app_seconds": 1320,
+                       "completed": True, "committed_app_count": 1},
+                      -288, "focus_complete_with_penalty", total)
+
+    # E — legacy iOS, omit locked_app_seconds entirely
+    total = run_focus(token, "E legacy iOS bg only",
+                      {"planned_minutes": 30, "actual_seconds": 600,
+                       "backgrounded_seconds": 120, "completed": False,
+                       "committed_app_count": 1},
+                      -4, "focus_distracted", total)
+
+    # F — validation
+    rF1 = _post("/focus/session",
+                {"planned_minutes": 0, "actual_seconds": 0,
+                 "backgrounded_seconds": 0, "locked_app_seconds": 0,
+                 "completed": False, "committed_app_count": 0}, H)
+    _assert(rF1.status_code == 400, "[F] planned_minutes=0 → 400",
+            extra=f"status={rF1.status_code} body={rF1.text[:200]}")
+    rF2 = _post("/focus/session",
+                {"planned_minutes": 200, "actual_seconds": 0,
+                 "backgrounded_seconds": 0, "locked_app_seconds": 0,
+                 "completed": False, "committed_app_count": 0}, H)
+    _assert(rF2.status_code == 400, "[F] planned_minutes=200 → 400",
+            extra=f"status={rF2.status_code} body={rF2.text[:200]}")
+
+    total = run_focus(token, "G clean cancel",
+                      {"planned_minutes": 25, "actual_seconds": 30,
+                       "backgrounded_seconds": 0, "locked_app_seconds": 0,
+                       "completed": False, "committed_app_count": 0},
+                      0, "focus_cancelled_clean", total)
+
+    final = get_total_xp(token)
+    _assert(final is not None and final >= 0,
+            f"[final] total_xp >= 0 after all scenarios (got {final})")
+
+
+# ---------- (4) regression smoke ----------
+def test_regression():
+    email = f"ryan.chen.{uuid.uuid4().hex[:10]}@gmail.com"
+    rr = _post("/auth/register", {"full_name": "Ryan Chen", "email": email,
+                                   "password": "Marigold!Mountain8821"})
+    _assert(rr.status_code == 200, "[regression] /auth/register (gmail.com) → 200",
+            extra=f"status={rr.status_code} body={rr.text[:300]}")
+    if rr.status_code != 200:
+        return
+    js = rr.json()
+    token = js.get("token") or js.get("access_token")
+    _assert(bool(token), "[regression] register returns JWT")
+
+    rp = _get("/profile", headers=auth_headers(token))
+    _assert(rp.status_code == 200, "[regression] /profile via JWT → 200",
+            extra=f"status={rp.status_code} body={rp.text[:200]}")
+
+    anon_id = f"device-{uuid.uuid4().hex}"
+    ra = _get("/profile", headers={"X-Anonymous-Id": anon_id})
+    _assert(ra.status_code == 200, "[regression] /profile via X-Anonymous-Id → 200",
+            extra=f"status={ra.status_code} body={ra.text[:200]}")
+
+    rt = _get("/tasks", headers=auth_headers(token))
+    _assert(rt.status_code == 200, "[regression] /tasks GET → 200")
+    tasks = rt.json().get("tasks", []) if rt.status_code == 200 else []
+    defaults = [t for t in tasks if t.get("is_default")]
+    _assert(len(defaults) >= 5,
+            f"[regression] /tasks returns seeded defaults (got {len(defaults)})")
+
+    rw = _get("/stats/weekly", headers=auth_headers(token))
+    _assert(rw.status_code == 200, "[regression] /stats/weekly → 200")
+    if rw.status_code == 200:
+        days = rw.json().get("days", [])
+        _assert(len(days) == 7,
+                f"[regression] /stats/weekly days length = 7 (got {len(days)})")
+        if days:
+            wd_ok = days[0]["day"] in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+            _assert(wd_ok, f"[regression] weekly day is weekday (got '{days[0]['day']}')")
+
+
+def main():
+    print(f"==> testing against {BASE}")
+    email, pw, token, uid = register_user()
+    if not token:
+        print("FATAL: cannot continue without token")
+        sys.exit(1)
+    H = auth_headers(token)
+
+    rt = _get("/tasks", headers=H)
+    tasks = rt.json().get("tasks", []) if rt.status_code == 200 else []
+    default_tasks = [t for t in tasks if t.get("is_default")]
+    _assert(len(default_tasks) >= 5,
+            f"fresh user has seeded default tasks (got {len(default_tasks)})")
+
+    print("\n--- (1) /stats/monthly ---")
+    test_stats_monthly(token, default_tasks)
+
+    print("\n--- (2) /stats/by-area ---")
+    test_stats_by_area(token)
+
+    print("\n--- (3) /focus/session ---")
+    test_focus_session(token)
+
+    print("\n--- (4) regression smoke ---")
+    test_regression()
+
+    print("\n" + "=" * 60)
+    print(f"PASSED: {len(PASS)}")
+    print(f"FAILED: {len(FAIL)}")
+    if FAIL:
+        print("\nFAILURES:")
+        for f in FAIL:
+            print(f"  - {f}")
+    print("=" * 60)
+    sys.exit(0 if not FAIL else 1)
+
+
+if __name__ == "__main__":
+    main()
