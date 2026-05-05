@@ -1953,8 +1953,8 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.get("/stats/by-area")
 async def stats_by_area(user_id: str = Depends(get_user_or_legacy)):
-    """Total XP earned per focus area (all time)."""
-    logs = await db.task_logs.find({}, {"_id": 0}).to_list(10000)
+    """Total XP earned per focus area (all time) — scoped to caller."""
+    logs = await db.task_logs.find({"user_id": user_id}, {"_id": 0}).to_list(10000)
     result = {area: 0 for area in FOCUS_AREAS}
     for entry in logs:
         area = entry.get("focus_area")
