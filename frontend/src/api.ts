@@ -740,6 +740,7 @@ export const api = {
   statsDaily: (date?: string) =>
     req<DailyStats>(`/stats/daily${date ? `?date=${date}` : ''}`),
   statsWeekly: () => req<WeeklyStats>('/stats/weekly'),
+  statsMonthly: () => req<WeeklyStats>('/stats/monthly'),
   statsByArea: () =>
     req<{ by_area: Record<FocusArea, number> }>('/stats/by-area'),
 

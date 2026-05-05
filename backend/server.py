@@ -1912,7 +1912,44 @@ async def stats_weekly(user_id: str = Depends(get_user_or_legacy)):
     return {"days": days}
 
 
-@api_router.get("/stats/by-area")
+@api_router.get("/stats/monthly")
+async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
+    """Last 30 days of XP, oldest→newest. Same shape as /stats/weekly so
+    the front-end can swap in the new dataset without re-doing layout —
+    `day` is the 'd' (day-of-month, e.g. '15') for compact x-axis labels
+    instead of the weekday abbrev.
+    """
+    today_d = datetime.now(timezone.utc).date()
+    days: list[dict] = []
+    # Pre-aggregate gifted XP per day-string for fast lookup, exactly like
+    # the weekly endpoint above.
+    gift_cur = db.gifts.find(
+        {"to_user_id": user_id, "kind": "xp"},
+        {"_id": 0, "created_at": 1, "amount": 1},
+    )
+    gifted_by_day: dict[str, int] = {}
+    async for g in gift_cur:
+        dt = (g.get("created_at") or "")[:10]
+        if dt:
+            gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
+    # 30-day window — covers a calendar month at the visual level even
+    # though we don't anchor on the 1st.
+    for i in range(29, -1, -1):
+        d = today_d - timedelta(days=i)
+        d_str = d.isoformat()
+        logs = await db.task_logs.find(
+            {"user_id": user_id, "date": d_str}, {"_id": 0}
+        ).to_list(1000)
+        xp = sum(entry["xp_awarded"] for entry in logs)
+        gifted_xp = int(gifted_by_day.get(d_str, 0))
+        days.append({
+            "date": d_str,
+            "day": d.strftime("%-d"),  # day-of-month for compact axis
+            "xp": xp,
+            "gifted_xp": gifted_xp,
+            "tasks": len(logs),
+        })
+    return {"days": days}
 async def stats_by_area(user_id: str = Depends(get_user_or_legacy)):
     """Total XP earned per focus area (all time)."""
     logs = await db.task_logs.find({}, {"_id": 0}).to_list(10000)
