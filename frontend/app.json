@@ -23,7 +23,7 @@
     },
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
-      "googleServicesFile": "GOOGLE_SERVICES_JSON",
+      "googleServicesFile": "./google-services.json",
       "versionCode": 109,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",

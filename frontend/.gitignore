@@ -41,7 +41,13 @@ app-example
 # Firebase service-account credentials — NEVER commit. These grant
 # admin-level access to the Firebase project. Upload to EAS via
 # `npx eas credentials` and keep the JSON outside source control.
+#
+# NOTE: `google-services.json` is INTENTIONALLY tracked in git. It is
+# not a secret — it ships embedded in every public APK/AAB and the
+# API keys inside it are restricted by Firebase using the Android
+# signing fingerprint. The Emergent deployer pipeline only uploads
+# git-tracked files to the EAS build server, so excluding this file
+# breaks the build with `EAS_BUILD_MISSING_GOOGLE_SERVICES_JSON_ERROR`.
 firebase-service-account*.json
-google-services.json
 GoogleService-Info.plist
 *-firebase-adminsdk-*.json
