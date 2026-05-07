@@ -25,15 +25,33 @@
 // android.googleServicesFile path.
 module.exports = ({ config }) => {
   const android = config.android || {};
+
+  // 1. Highest priority: EAS-injected file path (real build).
+  // 2. If app.json has a placeholder secret-name string (no slash / dot),
+  //    treat it as "use the secret" and fall back to the on-disk file
+  //    when the env var isn't set (e.g. running `expo prebuild` locally
+  //    without `eas` invoking us). This keeps local Android prebuild
+  //    working even if someone forgets to export the env var.
+  // 3. Otherwise honour the literal path declared in app.json.
+  const declared = android.googleServicesFile;
+  const looksLikeSecretName =
+    typeof declared === 'string' &&
+    !declared.includes('/') &&
+    !declared.includes('.') &&
+    declared === declared.toUpperCase();
+
+  let resolved = declared;
+  if (process.env.GOOGLE_SERVICES_JSON) {
+    resolved = process.env.GOOGLE_SERVICES_JSON;
+  } else if (looksLikeSecretName) {
+    resolved = './google-services.json';
+  }
+
   return {
     ...config,
     android: {
       ...android,
-      // EAS sets GOOGLE_SERVICES_JSON to the temporary file path of the
-      // uploaded EAS secret. Local dev (`expo start`) leaves it unset,
-      // so we fall back to the path declared in app.json.
-      googleServicesFile:
-        process.env.GOOGLE_SERVICES_JSON || android.googleServicesFile,
+      googleServicesFile: resolved,
     },
   };
 };
