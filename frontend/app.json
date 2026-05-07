@@ -46,7 +46,11 @@
         "android.permission.health.READ_EXERCISE",
         "android.permission.health.READ_ACTIVE_CALORIES_BURNED",
         "android.permission.health.READ_TOTAL_CALORIES_BURNED",
-        "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
+        "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.CAMERA"
       ]
     },
     "web": {
@@ -69,7 +73,9 @@
         "expo-notifications",
         {
           "color": "#00FF88",
-          "sounds": ["./assets/sounds/spot_surprise.wav"]
+          "sounds": [
+            "./assets/sounds/spot_surprise.wav"
+          ]
         }
       ],
       [
@@ -118,9 +124,10 @@
     },
     "extra": {
       "eas": {
-        "projectId": "01d15a73-3ec3-4943-b480-c44fedeb05c1"
-      }
+        "projectId": "382f4294-8e88-460c-8e1f-9513a2ae347d"
+      },
+      "router": {}
     },
-    "owner": "emergent"
+    "owner": "filipisaman"
   }
 }
