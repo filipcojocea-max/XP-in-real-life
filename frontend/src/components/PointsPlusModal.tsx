@@ -13,9 +13,17 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { api, Profile, BoostInventoryItem } from '../api';
+import { api, Profile, BoostInventoryItem, type LibraryAppPricing } from '../api';
 import { showAlert, showConfirm } from '../uiAlert';
 import { colors, spacing, radii } from '../theme';
+import {
+  PricingBadge,
+  CreatorPricingMenu,
+  SetPriceModal,
+  SetDiscountModal,
+  BuyAppModal,
+  type BoostId,
+} from './LibraryPricing';
 
 type BoostType = 'triple_day' | 'double_week' | 'double_month';
 type TabKey = 'topup' | 'available';
@@ -100,6 +108,57 @@ export default function PointsPlusModal({
   const [submitting, setSubmitting] = useState(false);
   const [claimingType, setClaimingType] = useState<BoostType | null>(null);
   const [activatingId, setActivatingId] = useState<string | null>(null);
+
+  // ── Pricing state (for the new $price tag on each boost) ──────
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pricing, setPricing] = useState<Record<BoostId, LibraryAppPricing | null>>({
+    triple_day: null,
+    double_week: null,
+    double_month: null,
+  });
+  const [currencies, setCurrencies] = useState<string[]>([
+    'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'JPY', 'INR', 'RON', 'CHF', 'BRL',
+  ]);
+  const [creatorMenuFor, setCreatorMenuFor] = useState<BoostId | null>(null);
+  const [setPriceFor, setSetPriceFor] = useState<BoostId | null>(null);
+  const [setDiscountFor, setSetDiscountFor] = useState<BoostId | null>(null);
+  const [buyFor, setBuyFor] = useState<BoostId | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    let alive = true;
+    (async () => {
+      try {
+        const me = await api.getProfile();
+        if (!alive) return;
+        setIsAdmin(!!(me as any)?.is_admin);
+      } catch {}
+      try {
+        const r = await api.boostsPricing();
+        if (!alive) return;
+        setPricing({
+          triple_day: r.pricing.triple_day,
+          double_week: r.pricing.double_week,
+          double_month: r.pricing.double_month,
+        });
+        if (Array.isArray(r.currencies) && r.currencies.length) setCurrencies(r.currencies);
+      } catch (e) {
+        console.log('[boost-pricing] load', e);
+      }
+    })();
+    return () => { alive = false; };
+  }, [visible]);
+
+  const onPricingSaved = (next: LibraryAppPricing) => {
+    setPricing((prev) => ({ ...prev, [next.app_id as BoostId]: next }));
+  };
+  const onBoostPurchased = async () => {
+    // Refresh profile so the new boost shows up under Available Bonuses.
+    try {
+      const me = await api.getProfile();
+      onProfileUpdate(me);
+    } catch {}
+  };
 
   // Force a tick every second so the countdown stays live
   const [, setTick] = useState(0);
@@ -256,6 +315,10 @@ export default function PointsPlusModal({
                   onSubmitCode={onSubmitCode}
                   claimingType={claimingType}
                   onClaim={onClaim}
+                  isAdmin={isAdmin}
+                  pricing={pricing}
+                  setCreatorMenuFor={setCreatorMenuFor}
+                  setBuyFor={setBuyFor}
                 />
               ) : (
                 <AvailableTab
@@ -270,6 +333,57 @@ export default function PointsPlusModal({
           </SafeAreaView>
         </KeyboardAvoidingView>
       </View>
+
+      {/* Creator-only pricing modals + buyer modal — placed at the
+          PointsPlusModal level so they render above the Points+ sheet
+          and own the kind="boost" branch. */}
+      <CreatorPricingMenu
+        visible={creatorMenuFor !== null}
+        appId={creatorMenuFor}
+        pricing={creatorMenuFor ? pricing[creatorMenuFor] : null}
+        onClose={() => setCreatorMenuFor(null)}
+        onChoose={(which) => {
+          const id = creatorMenuFor;
+          setCreatorMenuFor(null);
+          if (which === 'price') setSetPriceFor(id);
+          else setSetDiscountFor(id);
+        }}
+        kind="boost"
+      />
+      <SetPriceModal
+        visible={setPriceFor !== null}
+        appId={setPriceFor}
+        initial={setPriceFor ? pricing[setPriceFor] : null}
+        currencies={currencies}
+        onClose={() => setSetPriceFor(null)}
+        onSaved={onPricingSaved}
+        kind="boost"
+      />
+      <SetDiscountModal
+        visible={setDiscountFor !== null}
+        appId={setDiscountFor}
+        initial={setDiscountFor ? pricing[setDiscountFor] : null}
+        onClose={() => setSetDiscountFor(null)}
+        onSaved={onPricingSaved}
+        kind="boost"
+      />
+      <BuyAppModal
+        visible={buyFor !== null}
+        appId={buyFor}
+        pricing={buyFor ? pricing[buyFor] : null}
+        description={
+          buyFor === 'triple_day'
+            ? 'Triple every point you earn for the next 24 hours.'
+            : buyFor === 'double_week'
+              ? 'Double every point you earn for the next 7 days.'
+              : buyFor === 'double_month'
+                ? 'Double every point you earn for the next 30 days.'
+                : ''
+        }
+        onClose={() => setBuyFor(null)}
+        onPurchased={onBoostPurchased}
+        kind="boost"
+      />
     </Modal>
   );
 }
@@ -292,6 +406,7 @@ function TabButton({ label, active, onPress, testID }: { label: string; active: 
 
 function TopUpTab({
   unlocked, code, setCode, submitting, onSubmitCode, claimingType, onClaim,
+  isAdmin, pricing, setCreatorMenuFor, setBuyFor,
 }: {
   unlocked: boolean;
   code: string;
@@ -300,6 +415,10 @@ function TopUpTab({
   onSubmitCode: () => void;
   claimingType: BoostType | null;
   onClaim: (b: BoostOption) => void;
+  isAdmin: boolean;
+  pricing: Record<BoostId, LibraryAppPricing | null>;
+  setCreatorMenuFor: (id: BoostId | null) => void;
+  setBuyFor: (id: BoostId | null) => void;
 }) {
   return (
     <View>
@@ -352,40 +471,67 @@ function TopUpTab({
       {/* Boost options */}
       {BOOSTS.map((b) => {
         const isClaiming = claimingType === b.type;
-        const locked = !unlocked;
+        const bp = pricing[b.type as BoostId];
+        const isPriced = !!bp && !bp.is_free;
+        // Non-admin gating:
+        //  • Free boost → must enter unlock code (legacy `unlocked` flag)
+        //  • Priced boost → tap opens BuyAppModal (no unlock code needed)
+        const locked = !isAdmin && !isPriced && !unlocked;
+        const handleCardTap = () => {
+          if (isPriced && !isAdmin) {
+            setBuyFor(b.type as BoostId);
+            return;
+          }
+          onClaim(b);
+        };
         return (
-          <TouchableOpacity
-            key={b.type}
-            testID={`boost-claim-${b.type}`}
-            activeOpacity={0.85}
-            disabled={locked || isClaiming}
-            onPress={() => onClaim(b)}
-            style={[
-              styles.boostCard,
-              { borderColor: locked ? colors.border : b.accent + '88' },
-              locked && styles.boostCardLocked,
-            ]}
-          >
-            <View style={[styles.boostIcon, { backgroundColor: b.accent + '22', borderColor: b.accent + '77' }]}>
-              <Text style={[styles.boostIconText, { color: b.iconColor }]}>{b.icon}</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.boostTitle, locked && { color: colors.textMuted }]}>
-                {b.title}
-              </Text>
-              <Text style={styles.boostSubtitle}>{b.subtitle}</Text>
-            </View>
-            {isClaiming ? (
-              <ActivityIndicator color={colors.cyan} />
-            ) : locked ? (
-              <Ionicons name="lock-closed" size={18} color={colors.textMuted} />
-            ) : (
-              <View style={[styles.claimPill, { borderColor: b.accent, backgroundColor: b.accent + '22' }]}>
-                <Ionicons name="add-circle" size={12} color={b.accent} />
-                <Text style={[styles.claimPillText, { color: b.accent }]}>Claim</Text>
+          <View key={b.type}>
+            <TouchableOpacity
+              testID={`boost-claim-${b.type}`}
+              activeOpacity={0.85}
+              disabled={locked || isClaiming}
+              onPress={handleCardTap}
+              style={[
+                styles.boostCard,
+                { borderColor: locked ? colors.border : b.accent + '88' },
+                locked && styles.boostCardLocked,
+              ]}
+            >
+              <View style={[styles.boostIcon, { backgroundColor: b.accent + '22', borderColor: b.accent + '77' }]}>
+                <Text style={[styles.boostIconText, { color: b.iconColor }]}>{b.icon}</Text>
               </View>
-            )}
-          </TouchableOpacity>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.boostTitle, locked && { color: colors.textMuted }]}>
+                  {b.title}
+                </Text>
+                <Text style={styles.boostSubtitle}>{b.subtitle}</Text>
+              </View>
+              {isClaiming ? (
+                <ActivityIndicator color={colors.cyan} />
+              ) : locked ? (
+                <Ionicons name="lock-closed" size={18} color={colors.textMuted} />
+              ) : isPriced && !isAdmin ? (
+                <View style={[styles.claimPill, { borderColor: '#FFD700', backgroundColor: '#FFD70022' }]}>
+                  <Ionicons name="card" size={12} color={'#FFD700'} />
+                  <Text style={[styles.claimPillText, { color: '#FFD700' }]}>Buy</Text>
+                </View>
+              ) : (
+                <View style={[styles.claimPill, { borderColor: b.accent, backgroundColor: b.accent + '22' }]}>
+                  <Ionicons name="add-circle" size={12} color={b.accent} />
+                  <Text style={[styles.claimPillText, { color: b.accent }]}>Claim</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+            {/* Bottom-left price badge — Creator can tap to edit pricing */}
+            <View style={styles.boostPriceCorner} pointerEvents="box-none">
+              <PricingBadge
+                pricing={bp}
+                isAdmin={isAdmin}
+                onCreatorTap={() => setCreatorMenuFor(b.type as BoostId)}
+                testID={`boost-pricing-${b.type}`}
+              />
+            </View>
+          </View>
         );
       })}
 
@@ -606,8 +752,7 @@ const styles = StyleSheet.create({
   codeBtnText: { color: colors.bg, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
   codeHint: { color: colors.textSecondary, fontSize: 12, marginTop: 4 },
 
-  boostCard: {
-    flexDirection: 'row',
+  boostCard: {    flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     backgroundColor: colors.surfaceGlass,
@@ -617,6 +762,13 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   boostCardLocked: { opacity: 0.7 },
+  boostPriceCorner: {
+    marginTop: -spacing.sm,
+    marginBottom: spacing.sm,
+    paddingHorizontal: 6,
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+  },
   boostIcon: {
     width: 48,
     height: 48,

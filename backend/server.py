@@ -7189,6 +7189,14 @@ async def library_ratings_post(
 DEFAULT_PRICE_CURRENCY = "USD"
 SUPPORTED_PRICE_CURRENCIES = ["USD", "EUR", "GBP", "AUD", "CAD", "JPY", "INR", "RON", "CHF", "BRL"]
 
+# Boost IDs that the Creator can price in Points+ section (Progress tab).
+BOOST_IDS = ["triple_day", "double_week", "double_month"]
+BOOST_PRETTY = {
+    "triple_day": "Triple your points today!",
+    "double_week": "Double your points for 7 days!",
+    "double_month": "Double your points for 1 month!",
+}
+
 
 def _pricing_doc_to_pub(doc: dict | None, app_id: str, purchased: bool) -> dict:
     """Translate the stored pricing doc into the public payload the
@@ -7480,21 +7488,32 @@ async def stripe_create_payment_intent(
     `initPaymentSheet({ paymentIntentClientSecret, customerId,
     customerEphemeralKeySecret, publishableKey })` needs.
 
-    Server-side amount lookup: like create-checkout, the user can NEVER
-    tamper with price/currency — they're read from db.library_pricing.
+    Body: { app_id, kind?:'library'|'boost' } — if kind='boost', the
+    app_id is treated as a BOOST_ID (`triple_day` etc.) and the price
+    is read from db.boost_pricing instead of db.library_pricing.
+    Server-side amount lookup so the user can NEVER tamper with price.
     """
     if not _stripe_secret:
         raise HTTPException(503, "Stripe not configured.")
-    app_id = (body.get("app_id") or "").strip()
-    if app_id not in LIBRARY_APP_IDS:
-        raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
-    pricing_doc = await db.library_pricing.find_one({"app_id": app_id}, {"_id": 0})
-    pub = _pricing_doc_to_pub(pricing_doc, app_id, False)
+    kind = (body.get("kind") or "library").strip().lower()
+    item_id = (body.get("app_id") or body.get("boost_id") or "").strip()
+    if kind == "boost":
+        if item_id not in BOOST_IDS:
+            raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
+        pricing_doc = await db.boost_pricing.find_one({"boost_id": item_id}, {"_id": 0})
+        pretty = BOOST_PRETTY.get(item_id, item_id)
+    else:
+        if item_id not in LIBRARY_APP_IDS:
+            raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
+        pricing_doc = await db.library_pricing.find_one({"app_id": item_id}, {"_id": 0})
+        pretty = APP_PRETTY.get(item_id, item_id)
+    pub = _pricing_doc_to_pub(pricing_doc, item_id, False)
     if pub["is_free"] or pub["effective_price"] <= 0:
-        raise HTTPException(400, "This app is free — no checkout needed.")
-    owns = await db.library_purchases.find_one({"user_id": user_id, "app_id": app_id})
-    if owns:
-        raise HTTPException(409, "You already own this mini-app.")
+        raise HTTPException(400, "This item is free — no checkout needed.")
+    if kind == "library":
+        owns = await db.library_purchases.find_one({"user_id": user_id, "app_id": item_id})
+        if owns:
+            raise HTTPException(409, "You already own this mini-app.")
     currency = pub["currency"]
     amount = _stripe_amount(pub["effective_price"], currency)
 
@@ -7502,10 +7521,6 @@ async def stripe_create_payment_intent(
     prof_doc = await db.profile.find_one({"_id": user_id}) or {}
     customer_email = user_doc.get("email") or None
     customer_name = prof_doc.get("full_name") or prof_doc.get("name") or None
-
-    # Re-use a Stripe Customer per local user so PaymentSheet can show
-    # saved cards on subsequent purchases. Stash the Stripe ID on the
-    # users doc once created.
     stripe_customer_id = user_doc.get("stripe_customer_id")
     try:
         if not stripe_customer_id:
@@ -7530,11 +7545,13 @@ async def stripe_create_payment_intent(
             automatic_payment_methods={"enabled": True},
             metadata={
                 "user_id": user_id,
-                "app_id": app_id,
+                "kind": kind,
+                "app_id": item_id if kind == "library" else "",
+                "boost_id": item_id if kind == "boost" else "",
                 "currency": currency,
                 "price": str(pub["effective_price"]),
             },
-            description=f"{APP_PRETTY.get(app_id, app_id)} — Library+ Premium",
+            description=f"{pretty} — {'Library+' if kind == 'library' else 'Points+ Boost'}",
         )
     except Exception as e:
         logger.error("[stripe] create payment intent failed: %s", e)
@@ -7549,7 +7566,8 @@ async def stripe_create_payment_intent(
         "amount": amount,
         "currency": currency,
         "effective_price": pub["effective_price"],
-        "app_id": app_id,
+        "app_id": item_id,
+        "kind": kind,
         "payment_intent_id": intent.id,
     }
 
@@ -7667,16 +7685,39 @@ async def stripe_webhook(request: Request):
             )
     elif etype == "payment_intent.succeeded":
         # PaymentSheet flow — Stripe fires this when the in-app
-        # PaymentIntent is captured. Reuses the same idempotent insert.
+        # PaymentIntent is captured. Reuses the same idempotent insert
+        # for library purchases, OR grants a boost when kind='boost'.
         md = obj.get("metadata") or {}
-        await _stripe_record_purchase(
-            user_id=md.get("user_id", ""),
-            app_id=md.get("app_id", ""),
-            session_id=obj.get("id", ""),  # fallback id; intent id is the dedupe key
-            payment_intent=obj.get("id"),
-            amount=obj.get("amount_received", 0) or obj.get("amount", 0) or 0,
-            currency=(obj.get("currency") or "USD").upper(),
-        )
+        kind = (md.get("kind") or "library").lower()
+        if kind == "boost":
+            boost_id = md.get("boost_id") or ""
+            user = md.get("user_id") or ""
+            if user and boost_id in BOOST_IDS:
+                # Idempotency: dedupe by stripe payment_intent.id stored
+                # alongside the boost_inventory entry.
+                pi_id = obj.get("id") or ""
+                already = await db.profile.find_one({
+                    "_id": user,
+                    "boost_inventory.stripe_payment_intent": pi_id,
+                })
+                if not already and pi_id:
+                    entry = _make_inventory_entry(boost_id, source="purchase")
+                    entry["stripe_payment_intent"] = pi_id
+                    await db.profile.update_one(
+                        {"_id": user},
+                        {"$push": {"boost_inventory": entry}, "$set": {"boosts_unlocked": True}},
+                        upsert=True,
+                    )
+                    logger.info("[stripe] boost granted user=%s boost=%s pi=%s", user, boost_id, pi_id)
+        else:
+            await _stripe_record_purchase(
+                user_id=md.get("user_id", ""),
+                app_id=md.get("app_id", ""),
+                session_id=obj.get("id", ""),
+                payment_intent=obj.get("id"),
+                amount=obj.get("amount_received", 0) or obj.get("amount", 0) or 0,
+                currency=(obj.get("currency") or "USD").upper(),
+            )
     return {"received": True, "type": etype}
 
 
@@ -7755,6 +7796,149 @@ async def stripe_return(status: str = "success", session_id: str = ""):
 </body></html>"""
     from fastapi.responses import HTMLResponse
     return HTMLResponse(content=body)
+
+
+# ═══════════════════ Boost Pricing & Purchases (Points+) ═════════════
+# Mirrors library pricing but for the 3 XP boosts in Points+ tab.
+# Storage: db.boost_pricing — {boost_id, price, currency, purchase_url,
+#   discount_percent, discount_starts_at, discount_ends_at, updated_at}.
+# After payment, the boost is added to the user's `profile.boost_inventory`
+# (un-activated; user activates manually). NOT permanent — once activated
+# and consumed it's gone, but the user can re-buy (unlike library apps).
+
+
+@api_router.get("/boosts/pricing")
+async def boost_pricing_get(user_id: str = Depends(get_user_or_legacy)):
+    rows = await db.boost_pricing.find({}, {"_id": 0}).to_list(100)
+    by_id = {r.get("boost_id"): r for r in rows if r.get("boost_id") in BOOST_IDS}
+    out = {}
+    for bid in BOOST_IDS:
+        # Boosts are NEVER "purchased forever" — re-purchasable per session.
+        # `purchased=false` always so the Buy modal stays accessible.
+        out[bid] = _pricing_doc_to_pub(by_id.get(bid), bid, False)
+    return {"pricing": out, "currencies": SUPPORTED_PRICE_CURRENCIES}
+
+
+@api_router.post("/boosts/pricing/{boost_id}")
+async def boost_pricing_set(
+    boost_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    if boost_id not in BOOST_IDS:
+        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator only.")
+    try:
+        price = float(body.get("price") if body.get("price") is not None else 0.0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "price must be a number")
+    if price < 0 or price > 100000:
+        raise HTTPException(400, "price out of range (0..100000)")
+    currency = (body.get("currency") or DEFAULT_PRICE_CURRENCY).upper()
+    if currency not in SUPPORTED_PRICE_CURRENCIES:
+        raise HTTPException(400, f"currency must be one of {SUPPORTED_PRICE_CURRENCIES}")
+    purchase_url = (body.get("purchase_url") or "").strip()[:500]
+    if purchase_url and not (purchase_url.startswith("http://") or purchase_url.startswith("https://")):
+        raise HTTPException(400, "purchase_url must start with http:// or https://")
+    await db.boost_pricing.update_one(
+        {"boost_id": boost_id},
+        {
+            "$set": {
+                "boost_id": boost_id,
+                "price": round(price, 2),
+                "currency": currency,
+                "purchase_url": purchase_url,
+                "updated_at": now_iso(),
+            },
+            "$setOnInsert": {"_id": str(uuid.uuid4())},
+        },
+        upsert=True,
+    )
+    doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
+    pub = _pricing_doc_to_pub(doc, boost_id, False)
+    return {"saved": True, "pricing": pub}
+
+
+@api_router.post("/boosts/pricing/{boost_id}/discount")
+async def boost_pricing_discount(
+    boost_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    if boost_id not in BOOST_IDS:
+        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator only.")
+    try:
+        pct = int(body.get("percent") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "percent must be 0..99")
+    if pct < 0 or pct > 99:
+        raise HTTPException(400, "percent must be 0..99")
+    set_doc: dict = {"boost_id": boost_id, "updated_at": now_iso()}
+    if pct == 0:
+        set_doc.update({"discount_percent": 0, "discount_starts_at": None, "discount_ends_at": None})
+    else:
+        try:
+            dur_val = int(body.get("duration_value") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "duration_value must be a positive integer")
+        if dur_val <= 0 or dur_val > 1000:
+            raise HTTPException(400, "duration_value must be 1..1000")
+        unit = (body.get("duration_unit") or "days").lower().strip()
+        if unit not in ("days", "weeks", "months"):
+            raise HTTPException(400, "duration_unit must be days|weeks|months")
+        days = {"days": 1, "weeks": 7, "months": 30}[unit] * dur_val
+        now = datetime.utcnow()
+        set_doc.update({
+            "discount_percent": pct,
+            "discount_starts_at": now.isoformat(),
+            "discount_ends_at": (now + timedelta(days=days)).isoformat(),
+        })
+    await db.boost_pricing.update_one(
+        {"boost_id": boost_id},
+        {"$set": set_doc, "$setOnInsert": {"_id": str(uuid.uuid4())}},
+        upsert=True,
+    )
+    doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
+    return {"saved": True, "pricing": _pricing_doc_to_pub(doc, boost_id, False)}
+
+
+async def _grant_boost_to_inventory(user_id: str, boost_id: str, source: str = "stripe"):
+    """Adds a boost to the user's inventory (idempotent per Stripe txn)."""
+    if boost_id not in BOOST_DEFS:
+        return False
+    entry = _make_inventory_entry(boost_id, source=source)
+    await db.profile.update_one(
+        {"_id": user_id},
+        {
+            "$push": {"boost_inventory": entry},
+            "$set": {"boosts_unlocked": True},
+        },
+        upsert=True,
+    )
+    return True
+
+
+@api_router.post("/boosts/purchase")
+async def boost_purchase_record(
+    body: dict = Body(default=None),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Trust-based fallback after returning from external Stripe checkout.
+    For paid boosts, grants the boost into inventory. Free boosts no-op."""
+    body = body or {}
+    boost_id = (body.get("boost_id") or "").strip()
+    if boost_id not in BOOST_IDS:
+        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
+    pricing_doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
+    pub = _pricing_doc_to_pub(pricing_doc, boost_id, False)
+    if pub["is_free"]:
+        return {"saved": False, "is_free": True, "message": "This boost is free — use the unlock code instead."}
+    await _grant_boost_to_inventory(user_id, boost_id, source="purchase")
+    prof = await db.profile.find_one({"_id": user_id})
+    return {"saved": True, "is_free": False, "profile": serialize_profile(prof) if prof else None}
 
 
 # ════════════════════════════════════════════════════════════════════

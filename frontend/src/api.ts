@@ -810,7 +810,8 @@ export const api = {
   // payment form (card field is a Stripe-controlled native component
   // so we never see the raw PAN — PCI-DSS compliant).
   paymentsCreatePaymentIntent: (
-    app_id: 'sleep' | 'challenges' | 'spot' | 'confidence',
+    app_id: string,
+    kind: 'library' | 'boost' = 'library',
   ) =>
     req<{
       payment_intent_client_secret: string;
@@ -821,10 +822,11 @@ export const api = {
       currency: string;
       effective_price: number;
       app_id: string;
+      kind: string;
       payment_intent_id: string;
     }>('/payments/create-payment-intent', {
       method: 'POST',
-      body: JSON.stringify({ app_id }),
+      body: JSON.stringify({ app_id, kind }),
     }),
 
   // Polled after returning from Stripe — finalises OWNED state if the
@@ -863,6 +865,40 @@ export const api = {
       `/library/purchase/${app_id}`,
       { method: 'POST' },
     ),
+
+  // ──────── Boost Pricing & Purchases (Points+ Boosts) ────────
+  // Same shape as libraryPricing — re-uses the LibraryAppPricing type
+  // (app_id is the boost_id like 'triple_day').
+  boostsPricing: () =>
+    req<{
+      pricing: Record<'triple_day' | 'double_week' | 'double_month', LibraryAppPricing>;
+      currencies: string[];
+    }>('/boosts/pricing'),
+
+  boostsPricingSet: (
+    boost_id: 'triple_day' | 'double_week' | 'double_month',
+    payload: { price: number; currency: string; purchase_url?: string },
+  ) =>
+    req<{ saved: boolean; pricing: LibraryAppPricing }>(`/boosts/pricing/${boost_id}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  boostsPricingDiscount: (
+    boost_id: 'triple_day' | 'double_week' | 'double_month',
+    payload: { percent: number; duration_value?: number; duration_unit?: 'days' | 'weeks' | 'months' },
+  ) =>
+    req<{ saved: boolean; pricing: LibraryAppPricing }>(`/boosts/pricing/${boost_id}/discount`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // Trust-based fallback after returning from external Stripe checkout.
+  boostsPurchase: (boost_id: 'triple_day' | 'double_week' | 'double_month') =>
+    req<{ saved: boolean; is_free: boolean; profile?: any }>('/boosts/purchase', {
+      method: 'POST',
+      body: JSON.stringify({ boost_id }),
+    }),
 
   // ──────── In-app feedback + Level-up review prompts ────────
   // POST /feedback — store the user's rating + free-text. Used both

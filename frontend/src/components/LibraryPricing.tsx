@@ -51,6 +51,8 @@ import { api, type LibraryAppPricing } from '../api';
 import { presentNativePaymentSheet } from '../PaymentSheetNative';
 
 export type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence';
+export type BoostId = 'triple_day' | 'double_week' | 'double_month';
+export type PricingKind = 'library' | 'boost';
 
 const APP_LABELS: Record<MiniAppId, string> = {
   sleep: 'Improve Sleeping',
@@ -58,6 +60,34 @@ const APP_LABELS: Record<MiniAppId, string> = {
   spot: 'Spot the Object',
   confidence: 'Build Self-Confidence',
 };
+
+const BOOST_LABELS: Record<BoostId, string> = {
+  triple_day: 'Triple your points today!',
+  double_week: 'Double your points for 7 days!',
+  double_month: 'Double your points for 1 month!',
+};
+
+function labelFor(kind: PricingKind, id: string): string {
+  if (kind === 'boost') return BOOST_LABELS[id as BoostId] || id;
+  return APP_LABELS[id as MiniAppId] || id;
+}
+
+// Stripe-side API calls vary by kind — pick the right ones up-front
+// so the rest of the modal code doesn't have to branch.
+function apiFor(kind: PricingKind) {
+  if (kind === 'boost') {
+    return {
+      pricingSet: api.boostsPricingSet as any,
+      pricingDiscount: api.boostsPricingDiscount as any,
+      purchase: api.boostsPurchase as any,
+    };
+  }
+  return {
+    pricingSet: api.libraryPricingSet as any,
+    pricingDiscount: api.libraryPricingDiscount as any,
+    purchase: api.libraryPurchase as any,
+  };
+}
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
   USD: '$',
@@ -203,12 +233,14 @@ export function CreatorPricingMenu({
   pricing,
   onClose,
   onChoose,
+  kind = 'library',
 }: {
   visible: boolean;
-  appId: MiniAppId | null;
+  appId: MiniAppId | BoostId | null;
   pricing: LibraryAppPricing | null;
   onClose: () => void;
   onChoose: (which: 'price' | 'discount') => void;
+  kind?: PricingKind;
 }) {
   if (!appId) return null;
   return (
@@ -217,7 +249,7 @@ export function CreatorPricingMenu({
         <TouchableOpacity activeOpacity={1} onPress={(e) => e.stopPropagation && e.stopPropagation()} style={menuStyles.sheet}>
           <View style={menuStyles.handle} />
           <Text style={menuStyles.kicker}>CREATOR · PRICING</Text>
-          <Text style={menuStyles.title}>{APP_LABELS[appId]}</Text>
+          <Text style={menuStyles.title}>{labelFor(kind, appId)}</Text>
           {pricing ? (
             <Text style={menuStyles.sub}>
               Currently:{' '}
@@ -301,13 +333,15 @@ export function SetPriceModal({
   currencies,
   onClose,
   onSaved,
+  kind = 'library',
 }: {
   visible: boolean;
-  appId: MiniAppId | null;
+  appId: MiniAppId | BoostId | null;
   initial: LibraryAppPricing | null;
   currencies: string[];
   onClose: () => void;
   onSaved: (next: LibraryAppPricing) => void;
+  kind?: PricingKind;
 }) {
   const [price, setPrice] = useState<string>('0');
   const [currency, setCurrency] = useState<string>('USD');
@@ -343,7 +377,8 @@ export function SetPriceModal({
     setErr(null);
     setSubmitting(true);
     try {
-      const r = await api.libraryPricingSet(appId, {
+      const a = apiFor(kind);
+      const r = await a.pricingSet(appId as any, {
         price: n,
         currency,
         purchase_url: purchaseUrl.trim(),
@@ -365,7 +400,7 @@ export function SetPriceModal({
         <ScrollView contentContainerStyle={priceStyles.scroll} keyboardShouldPersistTaps="handled">
           <View style={priceStyles.card} testID="set-price-modal">
             <Text style={priceStyles.kicker}>CREATOR · CHANGE PRICE</Text>
-            <Text style={priceStyles.title}>{APP_LABELS[appId]}</Text>
+            <Text style={priceStyles.title}>{labelFor(kind, appId)}</Text>
 
             <Text style={priceStyles.label}>How much?</Text>
             <View style={priceStyles.priceRow}>
@@ -482,12 +517,14 @@ export function SetDiscountModal({
   initial,
   onClose,
   onSaved,
+  kind = 'library',
 }: {
   visible: boolean;
-  appId: MiniAppId | null;
+  appId: MiniAppId | BoostId | null;
   initial: LibraryAppPricing | null;
   onClose: () => void;
   onSaved: (next: LibraryAppPricing) => void;
+  kind?: PricingKind;
 }) {
   const [percent, setPercent] = useState<number>(20);
   const [durationVal, setDurationVal] = useState<string>('7');
@@ -513,8 +550,9 @@ export function SetDiscountModal({
     setSubmitting(true);
     setErr(null);
     try {
+      const a = apiFor(kind);
       if (clear) {
-        const r = await api.libraryPricingDiscount(appId, { percent: 0 });
+        const r = await a.pricingDiscount(appId as any, { percent: 0 });
         onSaved(r.pricing);
         onClose();
         return;
@@ -530,7 +568,7 @@ export function SetDiscountModal({
         setSubmitting(false);
         return;
       }
-      const r = await api.libraryPricingDiscount(appId, {
+      const r = await a.pricingDiscount(appId as any, {
         percent,
         duration_value: dv,
         duration_unit: unit,
@@ -553,7 +591,7 @@ export function SetDiscountModal({
         <ScrollView contentContainerStyle={discStyles.scroll} keyboardShouldPersistTaps="handled">
           <View style={discStyles.card} testID="set-discount-modal">
             <Text style={discStyles.kicker}>CREATOR · ADD DISCOUNT</Text>
-            <Text style={discStyles.title}>{APP_LABELS[appId]}</Text>
+            <Text style={discStyles.title}>{labelFor(kind, appId)}</Text>
             {initial && initial.price > 0 ? (
               <Text style={discStyles.sub}>
                 Original price: {formatPrice(initial.price, initial.currency)}
@@ -744,13 +782,15 @@ export function BuyAppModal({
   description,
   onClose,
   onPurchased,
+  kind = 'library',
 }: {
   visible: boolean;
-  appId: MiniAppId | null;
+  appId: MiniAppId | BoostId | null;
   pricing: LibraryAppPricing | null;
   description?: string;
   onClose: () => void;
   onPurchased: () => void;
+  kind?: PricingKind;
 }) {
   const [redirecting, setRedirecting] = useState(false);
   const [redirectError, setRedirectError] = useState<string | null>(null);
@@ -790,8 +830,9 @@ export function BuyAppModal({
     // ── Native (iOS / Android) → PaymentSheet (in-app, PCI-safe).
     if (Platform.OS !== 'web') {
       try {
-        const intent = await api.paymentsCreatePaymentIntent(appId);
-        // Briefly show the premium spinner so the modal feels intentional
+        // Pass kind to backend so it knows whether to read price from
+        // library_pricing or boost_pricing.
+        const intent = await api.paymentsCreatePaymentIntent(appId as any, kind);
         await new Promise((res) => setTimeout(res, 450));
         const r = await presentNativePaymentSheet({
           publishableKey: intent.publishable_key,
@@ -803,21 +844,14 @@ export function BuyAppModal({
         setRedirecting(false);
 
         if ((r as any).unsupported) {
-          // Shouldn't happen on native — fall through to Checkout fallback.
         } else if ((r as any).ok === true) {
-          // PaymentSheet completed → Stripe webhook (payment_intent.succeeded)
-          // will mark OWNED. To make the UX instant we *also* eagerly mark
-          // it here via the trust-based /library/purchase endpoint so the
-          // user sees green confirmation immediately.
-          try { await api.libraryPurchase(appId); } catch {}
+          try { await apiFor(kind).purchase(appId as any); } catch {}
           finishWithSuccess();
           return;
         } else if ((r as any).canceled) {
-          // User dismissed sheet — silent, leave them on the Buy modal.
           return;
         } else {
           const message = (r as any).error || 'Payment failed.';
-          // Stripe error wording → friendlier copy when card details bad.
           const friendly = /declined|incorrect|invalid|cvc|expir/i.test(message)
             ? 'Incorrect details — please double-check your card and try again.'
             : message;
@@ -827,14 +861,22 @@ export function BuyAppModal({
       } catch (e: any) {
         setRedirecting(false);
         const msg = String(e?.message || e);
-        setRedirectError(msg.includes('already own') ? 'You already own this mini-app.' : msg);
+        setRedirectError(msg.includes('already own') ? 'You already own this item.' : msg);
         return;
       }
     }
 
     // ── Web fallback → hosted Stripe Checkout in a browser tab.
+    // Only Library mini-apps support this fallback (Checkout Sessions
+    // backend currently doesn't have boost variant). For boosts on web
+    // we surface a message asking to use the mobile app.
+    if (kind === 'boost') {
+      setRedirecting(false);
+      setRedirectError('Boost purchases are available in the mobile app. Open the app on your phone to complete checkout.');
+      return;
+    }
     try {
-      const r = await api.paymentsCreateCheckout(appId);
+      const r = await api.paymentsCreateCheckout(appId as MiniAppId);
       setPendingSessionId(r.session_id);
       await new Promise((res) => setTimeout(res, 500));
       const ok = await Linking.openURL(r.checkout_url).then(() => true).catch(() => false);
@@ -867,7 +909,7 @@ export function BuyAppModal({
         } catch {}
       }
       // Fallback: trust-based purchase record.
-      await api.libraryPurchase(appId);
+      await apiFor(kind).purchase(appId as any);
       finishWithSuccess();
     } catch (e: any) {
       setErr(String(e?.message || e));
@@ -914,7 +956,7 @@ export function BuyAppModal({
               <Ionicons name="lock-closed" size={36} color="#FFD700" />
             </View>
             <Text style={buyStyles.kicker}>PREMIUM MINI-APP</Text>
-            <Text style={buyStyles.title}>{APP_LABELS[appId]}</Text>
+            <Text style={buyStyles.title}>{labelFor(kind, appId)}</Text>
             {description ? <Text style={buyStyles.desc}>{description}</Text> : null}
 
             <View style={buyStyles.priceBox}>
