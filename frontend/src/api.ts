@@ -805,6 +805,28 @@ export const api = {
       body: JSON.stringify({ app_id }),
     }),
 
+  // Native PaymentSheet flow (mobile only) — returns the secrets
+  // PaymentSheet's initPaymentSheet() needs to render an in-app
+  // payment form (card field is a Stripe-controlled native component
+  // so we never see the raw PAN — PCI-DSS compliant).
+  paymentsCreatePaymentIntent: (
+    app_id: 'sleep' | 'challenges' | 'spot' | 'confidence',
+  ) =>
+    req<{
+      payment_intent_client_secret: string;
+      ephemeral_key_secret: string;
+      customer_id: string;
+      publishable_key: string;
+      amount: number;
+      currency: string;
+      effective_price: number;
+      app_id: string;
+      payment_intent_id: string;
+    }>('/payments/create-payment-intent', {
+      method: 'POST',
+      body: JSON.stringify({ app_id }),
+    }),
+
   // Polled after returning from Stripe — finalises OWNED state if the
   // webhook hasn't arrived yet (e.g. whsec not configured locally).
   paymentsVerifySession: (session_id: string) =>

@@ -6919,6 +6919,12 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
 # Composite uniqueness: (user_id, app_id). We enforce it via upsert.
 
 LIBRARY_APP_IDS = ["sleep", "challenges", "spot", "confidence"]
+APP_PRETTY = {
+    "sleep": "Improve Sleeping",
+    "challenges": "Challenge Tasks",
+    "spot": "Spot the Object",
+    "confidence": "Build Self-Confidence",
+}
 
 
 # ═════════════════════ User Feedback (in-app survey) ═════════════════
@@ -7464,6 +7470,90 @@ async def _stripe_record_purchase(
     return True
 
 
+@api_router.post("/payments/create-payment-intent")
+async def stripe_create_payment_intent(
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Creates a Stripe PaymentIntent + ephemeral key for the in-app
+    PaymentSheet (mobile native). Returns everything PaymentSheet's
+    `initPaymentSheet({ paymentIntentClientSecret, customerId,
+    customerEphemeralKeySecret, publishableKey })` needs.
+
+    Server-side amount lookup: like create-checkout, the user can NEVER
+    tamper with price/currency — they're read from db.library_pricing.
+    """
+    if not _stripe_secret:
+        raise HTTPException(503, "Stripe not configured.")
+    app_id = (body.get("app_id") or "").strip()
+    if app_id not in LIBRARY_APP_IDS:
+        raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
+    pricing_doc = await db.library_pricing.find_one({"app_id": app_id}, {"_id": 0})
+    pub = _pricing_doc_to_pub(pricing_doc, app_id, False)
+    if pub["is_free"] or pub["effective_price"] <= 0:
+        raise HTTPException(400, "This app is free — no checkout needed.")
+    owns = await db.library_purchases.find_one({"user_id": user_id, "app_id": app_id})
+    if owns:
+        raise HTTPException(409, "You already own this mini-app.")
+    currency = pub["currency"]
+    amount = _stripe_amount(pub["effective_price"], currency)
+
+    user_doc = await db.users.find_one({"_id": user_id}) or {}
+    prof_doc = await db.profile.find_one({"_id": user_id}) or {}
+    customer_email = user_doc.get("email") or None
+    customer_name = prof_doc.get("full_name") or prof_doc.get("name") or None
+
+    # Re-use a Stripe Customer per local user so PaymentSheet can show
+    # saved cards on subsequent purchases. Stash the Stripe ID on the
+    # users doc once created.
+    stripe_customer_id = user_doc.get("stripe_customer_id")
+    try:
+        if not stripe_customer_id:
+            cust = _stripe_mod.Customer.create(
+                email=customer_email,
+                name=customer_name,
+                metadata={"user_id": user_id},
+            )
+            stripe_customer_id = cust.id
+            await db.users.update_one(
+                {"_id": user_id},
+                {"$set": {"stripe_customer_id": stripe_customer_id}},
+            )
+        ephemeral_key = _stripe_mod.EphemeralKey.create(
+            customer=stripe_customer_id,
+            stripe_version="2024-06-20",
+        )
+        intent = _stripe_mod.PaymentIntent.create(
+            amount=amount,
+            currency=currency.lower(),
+            customer=stripe_customer_id,
+            automatic_payment_methods={"enabled": True},
+            metadata={
+                "user_id": user_id,
+                "app_id": app_id,
+                "currency": currency,
+                "price": str(pub["effective_price"]),
+            },
+            description=f"{APP_PRETTY.get(app_id, app_id)} — Library+ Premium",
+        )
+    except Exception as e:
+        logger.error("[stripe] create payment intent failed: %s", e)
+        raise HTTPException(502, f"Stripe error: {e}")
+
+    pk = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
+    return {
+        "payment_intent_client_secret": intent.client_secret,
+        "ephemeral_key_secret": ephemeral_key.secret,
+        "customer_id": stripe_customer_id,
+        "publishable_key": pk,
+        "amount": amount,
+        "currency": currency,
+        "effective_price": pub["effective_price"],
+        "app_id": app_id,
+        "payment_intent_id": intent.id,
+    }
+
+
 @api_router.post("/payments/create-checkout")
 async def stripe_create_checkout(
     body: dict = Body(...),
@@ -7575,6 +7665,18 @@ async def stripe_webhook(request: Request):
                 amount=obj.get("amount_total", 0) or 0,
                 currency=(obj.get("currency") or "USD").upper(),
             )
+    elif etype == "payment_intent.succeeded":
+        # PaymentSheet flow — Stripe fires this when the in-app
+        # PaymentIntent is captured. Reuses the same idempotent insert.
+        md = obj.get("metadata") or {}
+        await _stripe_record_purchase(
+            user_id=md.get("user_id", ""),
+            app_id=md.get("app_id", ""),
+            session_id=obj.get("id", ""),  # fallback id; intent id is the dedupe key
+            payment_intent=obj.get("id"),
+            amount=obj.get("amount_received", 0) or obj.get("amount", 0) or 0,
+            currency=(obj.get("currency") or "USD").upper(),
+        )
     return {"received": True, "type": etype}
 
 

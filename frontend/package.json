@@ -21,6 +21,7 @@
     "@react-navigation/elements": "^2.3.8",
     "@react-navigation/native": "^7.1.6",
     "@react-navigation/native-stack": "^7.3.10",
+    "@stripe/stripe-react-native": "^0.65.0",
     "expo": "~54.0.34",
     "expo-blur": "~15.0.8",
     "expo-build-properties": "~1.0.10",

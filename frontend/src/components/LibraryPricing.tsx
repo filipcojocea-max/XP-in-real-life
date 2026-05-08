@@ -48,6 +48,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { colors, spacing, radii } from '../theme';
 import { api, type LibraryAppPricing } from '../api';
+import { presentNativePaymentSheet } from '../PaymentSheetNative';
 
 export type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence';
 
@@ -757,6 +758,7 @@ export function BuyAppModal({
   const [openedCheckout, setOpenedCheckout] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [successView, setSuccessView] = useState(false);
 
   useEffect(() => {
     if (!visible) {
@@ -765,24 +767,76 @@ export function BuyAppModal({
       setRedirecting(false);
       setRedirectError(null);
       setPendingSessionId(null);
+      setSuccessView(false);
     }
   }, [visible]);
 
   if (!appId || !pricing) return null;
+
+  const finishWithSuccess = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    setSuccessView(true);
+    // Refresh OWNED state in parent immediately so subsequent taps
+    // open the mini-app instead of the Buy modal.
+    onPurchased();
+  };
 
   const openCheckout = async () => {
     Haptics.selectionAsync().catch(() => {});
     setRedirecting(true);
     setRedirectError(null);
     setErr(null);
+
+    // ── Native (iOS / Android) → PaymentSheet (in-app, PCI-safe).
+    if (Platform.OS !== 'web') {
+      try {
+        const intent = await api.paymentsCreatePaymentIntent(appId);
+        // Briefly show the premium spinner so the modal feels intentional
+        await new Promise((res) => setTimeout(res, 450));
+        const r = await presentNativePaymentSheet({
+          publishableKey: intent.publishable_key,
+          paymentIntentClientSecret: intent.payment_intent_client_secret,
+          customerId: intent.customer_id,
+          customerEphemeralKeySecret: intent.ephemeral_key_secret,
+          merchantDisplayName: 'XP in Real Life',
+        });
+        setRedirecting(false);
+
+        if ((r as any).unsupported) {
+          // Shouldn't happen on native — fall through to Checkout fallback.
+        } else if ((r as any).ok === true) {
+          // PaymentSheet completed → Stripe webhook (payment_intent.succeeded)
+          // will mark OWNED. To make the UX instant we *also* eagerly mark
+          // it here via the trust-based /library/purchase endpoint so the
+          // user sees green confirmation immediately.
+          try { await api.libraryPurchase(appId); } catch {}
+          finishWithSuccess();
+          return;
+        } else if ((r as any).canceled) {
+          // User dismissed sheet — silent, leave them on the Buy modal.
+          return;
+        } else {
+          const message = (r as any).error || 'Payment failed.';
+          // Stripe error wording → friendlier copy when card details bad.
+          const friendly = /declined|incorrect|invalid|cvc|expir/i.test(message)
+            ? 'Incorrect details — please double-check your card and try again.'
+            : message;
+          setRedirectError(friendly);
+          return;
+        }
+      } catch (e: any) {
+        setRedirecting(false);
+        const msg = String(e?.message || e);
+        setRedirectError(msg.includes('already own') ? 'You already own this mini-app.' : msg);
+        return;
+      }
+    }
+
+    // ── Web fallback → hosted Stripe Checkout in a browser tab.
     try {
-      // Server-side Stripe Checkout Session — server reads the price
-      // from library_pricing so the user can never tamper with it.
       const r = await api.paymentsCreateCheckout(appId);
       setPendingSessionId(r.session_id);
-      // Tiny artificial delay so the "Redirecting" overlay reads as
-      // intentional and premium rather than a flash of UI.
-      await new Promise((res) => setTimeout(res, 700));
+      await new Promise((res) => setTimeout(res, 500));
       const ok = await Linking.openURL(r.checkout_url).then(() => true).catch(() => false);
       if (!ok) {
         setRedirectError('Could not open the secure checkout window. Please try again.');
@@ -795,13 +849,6 @@ export function BuyAppModal({
       setRedirecting(false);
       const msg = String(e?.message || e);
       setRedirectError(msg.includes('already own') ? 'You already own this mini-app.' : msg);
-      // If pricing.purchase_url is set as a Ko-fi fallback, allow that path too:
-      if (pricing.purchase_url) {
-        try {
-          await Linking.openURL(pricing.purchase_url);
-          setOpenedCheckout(true);
-        } catch {}
-      }
     }
   };
 
@@ -809,25 +856,19 @@ export function BuyAppModal({
     setConfirming(true);
     setErr(null);
     try {
-      // First: try to verify the Stripe session directly (catches the
-      // case where the webhook hasn't been set up yet — paid sessions
-      // get inserted into library_purchases here).
       if (pendingSessionId) {
         try {
           const v = await api.paymentsVerifySession(pendingSessionId);
           if (v.paid) {
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-            onPurchased();
-            onClose();
+            try { await api.libraryPurchase(appId); } catch {}
+            finishWithSuccess();
             return;
           }
         } catch {}
       }
-      // Fallback: trust-based purchase record (legacy Ko-fi flow).
+      // Fallback: trust-based purchase record.
       await api.libraryPurchase(appId);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-      onPurchased();
-      onClose();
+      finishWithSuccess();
     } catch (e: any) {
       setErr(String(e?.message || e));
     } finally {
@@ -839,6 +880,35 @@ export function BuyAppModal({
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={buyStyles.backdrop}>
         <ScrollView contentContainerStyle={buyStyles.scroll} keyboardShouldPersistTaps="handled">
+          {successView ? (
+            <View style={buyStyles.successCard} testID="buy-success">
+              <View style={buyStyles.successIcon}>
+                <Ionicons name="checkmark-circle" size={56} color={colors.green} />
+              </View>
+              <Text style={buyStyles.successHead}>
+                Payment successful! <Text style={buyStyles.successCheck}>✓</Text>
+              </Text>
+              <Text style={buyStyles.successBody}>
+                You now have access to this feature!
+              </Text>
+              <Text style={buyStyles.successThanks}>Thank you 🎉</Text>
+              <View style={buyStyles.successDivider} />
+              <Text style={buyStyles.successFoot}>
+                A receipt has been sent to your email.{'\n'}
+                Enjoy your new mini-app — it's yours forever.
+              </Text>
+              <TouchableOpacity
+                onPress={() => { onClose(); }}
+                style={[buyStyles.btn, buyStyles.btnConfirm]}
+                activeOpacity={0.85}
+                testID="buy-success-open"
+              >
+                <Ionicons name="rocket" size={18} color={colors.bg} />
+                <Text style={buyStyles.btnPrimaryText}>Open it now</Text>
+                <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+              </TouchableOpacity>
+            </View>
+          ) : (
           <View style={buyStyles.card} testID="buy-app-modal">
             <View style={buyStyles.heroIcon}>
               <Ionicons name="lock-closed" size={36} color="#FFD700" />
@@ -912,6 +982,7 @@ export function BuyAppModal({
               <Text style={buyStyles.cancelText}>Maybe later</Text>
             </TouchableOpacity>
           </View>
+          )}
         </ScrollView>
 
         {/* ────── Premium Redirecting overlay ────── */}
@@ -1029,6 +1100,60 @@ const buyStyles = StyleSheet.create({
   errText: { color: colors.red, fontSize: 12, marginTop: 8, textAlign: 'center' },
   cancel: { paddingVertical: 12, alignItems: 'center', marginTop: spacing.sm },
   cancelText: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
+
+  // ── Success state — shown after PaymentSheet (or fallback) confirms ──
+  successCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
+    borderWidth: 2,
+    borderColor: colors.green,
+    padding: spacing.lg,
+    paddingTop: spacing.xl,
+    alignItems: 'center',
+    gap: 6,
+  },
+  successIcon: {
+    width: 88, height: 88, borderRadius: 44,
+    backgroundColor: colors.green + '22',
+    borderWidth: 2, borderColor: colors.green,
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: spacing.sm,
+  },
+  successHead: {
+    color: colors.green,
+    fontSize: 22,
+    fontWeight: '900',
+    textAlign: 'center',
+    letterSpacing: -0.3,
+  },
+  successCheck: { color: colors.green, fontSize: 26, fontWeight: '900' },
+  successBody: {
+    color: colors.green,
+    fontSize: 15,
+    fontWeight: '900',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  successThanks: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  successDivider: {
+    width: '100%',
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.md,
+  },
+  successFoot: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 17,
+    marginBottom: spacing.md,
+  },
 });
 
 // ════════════════════ Redirecting overlay styles ═══════════════════

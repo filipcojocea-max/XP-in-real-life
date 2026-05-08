@@ -98,6 +98,13 @@
       "expo-secure-store",
       "expo-dev-client",
       [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.com.xpconfidence.app",
+          "enableGooglePay": true
+        }
+      ],
+      [
         "expo-build-properties",
         {
           "android": {
