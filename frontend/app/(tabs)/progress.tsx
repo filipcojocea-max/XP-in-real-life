@@ -97,14 +97,21 @@ export default function Progress() {
   // day-of-month, weekly is 7-row by weekday abbreviation.
   const activeStats: WeeklyStats = view === 'monthly' ? monthly : weekly;
   const days = activeStats.days;
-  const maxXp = Math.max(1, ...days.map((d) => d.xp + (d.gifted_xp || 0)));
+  // Combined daily XP = task XP + gifted XP (Creator gifts add into the
+  // chart total per-day so users see ONE consolidated number for the
+  // day — the colour split (green/cyan vs gold) still shows them
+  // visually that part of the day's XP came from a gift.
+  const dayTotal = (d: { xp: number; gifted_xp?: number }) => d.xp + (d.gifted_xp || 0);
+  const maxXp = Math.max(1, ...days.map(dayTotal));
   // Wider chart for the monthly view so 30 bars don't overlap. Ensures
   // each bar still has at least ~3px of breathing room.
   const chartW = view === 'monthly' ? 720 : 320;
   const chartH = 160;
   const pad = 24;
   const barW = Math.max(2, (chartW - pad * 2) / days.length - 4);
-  const totalWindowXp = days.reduce((s, d) => s + d.xp, 0);
+  // Window total now sums earned + gifted XP. Matches what's shown on
+  // each individual bar so headline + per-day numbers are consistent.
+  const totalWindowXp = days.reduce((s, d) => s + dayTotal(d), 0);
   const totalAreaXp = Object.values(byArea).reduce((s, v) => s + v, 0);
 
   // Today is always the LAST day in the array (server orders oldest→newest).
@@ -112,8 +119,10 @@ export default function Progress() {
   const segmentW = (chartW - pad * 2) / days.length;
   const xCenters = days.map((_, i) => pad + i * segmentW + segmentW / 2);
   const yForXp = (xp: number) => chartH - pad - ((chartH - pad * 2) * xp) / maxXp;
+  // Line graph also tracks the COMBINED total — gifted XP needs to show
+  // up in the trend curve, not just the bar chart.
   const linePoints = days
-    .map((d, i) => `${xCenters[i]},${yForXp(d.xp)}`)
+    .map((d, i) => `${xCenters[i]},${yForXp(dayTotal(d))}`)
     .join(' ');
 
   // Show value labels on every weekly bar but only every 5th monthly bar
@@ -342,9 +351,12 @@ export default function Progress() {
             />
             {days.map((d, i) => {
               const cx = xCenters[i];
-              const cy = yForXp(d.xp);
+              // Trend dot reflects the COMBINED total (earned + gifted)
+              // so creators' XP gifts visibly bump the curve.
+              const totalXpForDay = d.xp + (d.gifted_xp || 0);
+              const cy = yForXp(totalXpForDay);
               const isToday = i === todayIdx;
-              const showLabel = d.xp > 0 && (i % showLabelEveryN === 0 || isToday);
+              const showLabel = totalXpForDay > 0 && (i % showLabelEveryN === 0 || isToday);
               const showAxisLabel = i % showLabelEveryN === 0 || isToday || i === 0;
               return (
                 <React.Fragment key={`pt-${d.date}`}>
@@ -365,7 +377,7 @@ export default function Progress() {
                       fill={isToday ? colors.cyan : colors.text}
                       textAnchor="middle"
                     >
-                      {d.xp}
+                      {totalXpForDay}
                     </SvgText>
                   ) : null}
                   {showAxisLabel ? (

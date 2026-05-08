@@ -716,7 +716,15 @@ async def update_streak(prof: dict) -> dict:
                 new_streak = max(new_streak, 1)
         except Exception:
             new_streak = 1
+    # Hard cap: 5,000 days. Anything beyond is purely cosmetic and can
+    # cause UI issues (>4-digit text overflowing the streak badge), and
+    # is functionally irrelevant — staying engaged for ~13.7 years
+    # already qualifies as a champion regardless of the displayed digit.
+    if new_streak > 5000:
+        new_streak = 5000
     longest = max(prof.get("longest_streak", 0), new_streak)
+    if longest > 5000:
+        longest = 5000
     await db.profile.update_one(
         {"_id": prof["_id"]},
         {"$set": {
@@ -729,9 +737,24 @@ async def update_streak(prof: dict) -> dict:
     prof["current_streak"] = new_streak
     prof["longest_streak"] = longest
     return prof
-    prof["current_streak"] = new_streak
-    prof["longest_streak"] = longest
-    return prof
+
+
+async def _bump_streak_for_xp(user_id: str) -> None:
+    """Mark today as an active day for streak purposes, called from every
+    code-path that grants the user POSITIVE XP (task complete, goal
+    complete, challenge complete, sleep check-in, focus session,
+    gifted XP from creator, etc.). Streaks now persist as long as the
+    user earns ANY XP that day — they are no longer task-only.
+
+    Never raises. Streak math is non-critical and must not block the
+    actual XP grant if the DB is hot or the profile doc is missing.
+    """
+    try:
+        prof = await db.profile.find_one({"_id": user_id})
+        if prof:
+            await update_streak(prof)
+    except Exception as e:
+        logger.warning("[streak] bump failed for %s: %s", user_id, e)
 
 
 # ------------------------------------------------------------------
@@ -2602,6 +2625,8 @@ async def challenge_complete(
         await db.profile.update_one(
             {"_id": user_id}, {"$inc": {"total_xp": awarded_xp}}
         )
+        # Challenge complete → keep streak alive.
+        await _bump_streak_for_xp(user_id)
     await db.challenge_state.update_one(
         {"user_id": user_id, "date": today},
         {"$set": {
@@ -2719,6 +2744,8 @@ async def challenge_past_answer(
         await db.profile.update_one(
             {"_id": user_id}, {"$inc": {"total_xp": awarded_xp}}
         )
+        # Late-answered challenge → still counts as activity for streak.
+        await _bump_streak_for_xp(user_id)
     updated = await db.challenge_completions.find_one({"id": completion_id}, {"_id": 0})
     return {"awarded_xp": awarded_xp, "completion": updated}
 
@@ -5932,6 +5959,8 @@ async def confidence_complete(
         )
         tz_off = int((await db.profile.find_one({"_id": user_id}, {"tz_offset_minutes": 1}) or {}).get("tz_offset_minutes", 0) or 0)
         await _log_xp_event(user_id, xp_gain, tz_off)
+        # Confidence track completion → keep streak alive.
+        await _bump_streak_for_xp(user_id)
     except Exception as e:
         logger.warning("[confidence] XP award failed: %s", e)
     return {"ok": True, "already_done": False, "xp_awarded": 15}
@@ -6460,6 +6489,10 @@ async def admin_gift_xp(body: AdminGiftXPBody, user_id: str = Depends(get_user_o
         {"$inc": {"total_xp": amount, "gifted_xp_total": amount}},
         upsert=True,
     )
+    # Receiving a Creator XP gift counts as activity → preserves streak.
+    # Spec: "as long as the user earns a little XP points each day,
+    # the streak will still be counted as Streak kept."
+    await _bump_streak_for_xp(body.user_id)
     sender_prof = await db.profile.find_one({"_id": user_id}) or {}
     sender_name = ADMIN_PUBLIC_DISPLAY_NAME
     gift = {
@@ -7167,6 +7200,8 @@ async def focus_session_complete(
         )
         if delta > 0:
             await _log_xp_event(user_id, delta, int(prof.get("tz_offset_minutes") or 0))
+            # Focus session bonus → keep streak alive.
+            await _bump_streak_for_xp(user_id)
 
     # Log the session row for history / anti-abuse.
     await db.focus_sessions.insert_one({

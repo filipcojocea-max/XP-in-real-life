@@ -105,6 +105,18 @@
 user_problem_statement: "Test the 4 newly-added/modified backend features: 200-level XP system (/api/levels), un-tick (uncomplete) restored, custom task XP cap = 20 (defaults unrestricted), anonymous mode via X-Anonymous-Id header."
 
 backend:
+  - task: "Streak cap (5000) + bump on gift/focus/challenge XP"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "PASS — 43/43 assertions in /app/backend_test.py (run 2026-05-08 against https://xp-confidence.preview.emergentagent.com/api). (1) Admin gift bumps streak: registered fresh gmail.com user → GET /profile shows current_streak=0 and last_active_date=null; admin (filip.cojocea122@gmail.com) POST /admin/gift/xp {user_id, amount:25, message:'test'} → 200 with body.ok=true; recipient GET /profile → current_streak=1, last_active_date='2026-05-08' (today UTC), total_xp grew exactly 0→25. (2) /stats/weekly: days length=7, days[6].date=='2026-05-08', xp=0, gifted_xp=25 (yellow stacked bar). /stats/monthly: days length=30, days[29].date=='2026-05-08' with gifted_xp=25. (3) Same-day idempotency: 2nd /admin/gift/xp same recipient → current_streak STILL 1 (not 2) — `update_streak()` short-circuits via `last == today` at server.py L701. (4) Focus session bump: fresh user POST /focus/session {planned_minutes:25, actual_seconds:1500, completed:true, locked_app_seconds:0, backgrounded_seconds:0, committed_app_count:3} → 200 with xp_delta=+5, reason='focus_complete'; subsequent /profile shows current_streak=1 (server.py L7204 `_bump_streak_for_xp` after positive delta). (5) Challenge complete bump: fresh user POST /challenge/accept → 200; POST /challenge/complete {completed:true, difficulty:'easy', rating:5, how_text, experience_text} → 200 with awarded_xp=30; /profile shows current_streak=1 (server.py L2629). (6) Streak cap @5000 (DIRECT DB SEED): registered fresh user, set profile.current_streak=5000, longest_streak=5000, last_active_date=yesterday via motor → 1 admin gift triggered _bump_streak_for_xp → update_streak computed new=5001 then HARD-CAPPED at 5000 (server.py L723-727); /profile reads current_streak=5000 (NOT 5001) AND db.profile.longest_streak=5000 (cap held on both fields). last_active_date == today UTC. (7) Regression — all common endpoints 200: /profile, /stats/daily, /stats/weekly, /stats/monthly, /stats/by-area, /library/ratings (recipient), /library/catalog (admin). No bugs found."
+
   - task: "Library+ Mini-App Ratings (GET/POST /api/library/ratings)"
     implemented: true
     working: true
@@ -550,10 +562,15 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Streak cap (5000) + bump on gift/focus/challenge XP"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+    - agent: "testing"
+      message: "Streak-cap (5000) + bump-on-gift/focus/challenge-XP — 43/43 PASS via /app/backend_test.py against https://xp-confidence.preview.emergentagent.com/api (run 2026-05-08).\n\n  ✅ (2) Admin Creator XP gift bumps recipient streak: fresh gmail.com user → /profile current_streak=0, last_active_date=null. Admin (filip.cojocea122@gmail.com) POST /admin/gift/xp {amount:25} → 200 ok=true. Recipient /profile → current_streak=1, last_active_date='2026-05-08' (today UTC), total_xp 0→25.\n\n  ✅ (5) gifted_xp shows on charts: /stats/weekly days[6] {date='2026-05-08', xp:0, gifted_xp:25}; /stats/monthly days[29] {date='2026-05-08', gifted_xp:25}.\n\n  ✅ (7) Same-day idempotency: 2nd /admin/gift/xp same recipient same day → /profile.current_streak STILL 1 (NOT 2). Short-circuits via update_streak() L701 `last == today`.\n\n  ✅ (3) Focus session bumps streak: fresh user POST /focus/session {planned:25, actual:1500, completed:true, locked_app_seconds:0, bg:0, committed_app_count:3} → xp_delta=+5; /profile.current_streak=1 after (server.py L7204).\n\n  ✅ (4) Challenge complete bumps streak: fresh user POST /challenge/accept → 200; POST /challenge/complete {completed:true, difficulty:'easy', rating:5} → 200 awarded_xp=30; /profile.current_streak=1 after (server.py L2629).\n\n  ✅ (1) Streak cap held at 5000: registered fresh user, primed db.profile.current_streak=5000, longest_streak=5000, last_active_date=yesterday via motor; admin gift triggered _bump_streak_for_xp → update_streak computed new=5001 then HARD-CAPPED at 5000. /profile.current_streak=5000 (NOT 5001) AND db.profile.longest_streak=5000 (cap held on both fields). last_active_date == today UTC. (1a/b indirect cap also covered by tests 2 + 7 above.)\n\n  ✅ (6) No regression — all common endpoints 200: /profile, /stats/daily, /stats/weekly, /stats/monthly, /stats/by-area, /library/ratings (recipient JWT), /library/catalog (admin JWT).\n\n  Marked task 'Streak cap (5000) + bump on gift/focus/challenge XP' working:true, needs_retesting:false. Added it to test_plan.current_focus. No bugs found — main agent can summarise & ship."
 
 agent_communication:
     - agent: "testing"

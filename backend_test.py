@@ -1,344 +1,327 @@
+"""Backend tests for streak-cap (5,000) and streak-bump on gift / focus / challenge XP.
+
+Reviewed behaviours (server.py):
+  1. update_streak() hard-caps current_streak/longest_streak at 5000.
+  2. _bump_streak_for_xp() is invoked on every positive-XP code-path:
+       - admin_gift_xp (POST /admin/gift/xp)
+       - focus_session_complete (POST /focus/session) when delta>0
+       - challenge_complete (POST /challenge/complete) when xp awarded
+  3. Same-day idempotency: a 2nd grant on the same UTC day does NOT re-bump.
+  4. /stats/weekly + /stats/monthly emit gifted_xp on today's last-day entry.
+  5. Regression: /profile, /stats/{daily,weekly,monthly,by-area},
+     /library/{ratings,catalog} continue to return 200.
+
+Run from /app:    python backend_test.py
 """
-Backend tests for:
-(1) GET /api/stats/monthly  — NEW
-(2) GET /api/stats/by-area  — RESTORED
-(3) POST /api/focus/session — NEW locked_app_seconds field with -15 XP/min penalty
-(4) Quick regression smoke (profile/register/tasks/weekly).
-"""
+
 from __future__ import annotations
-import json
+
+import asyncio
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
 import requests
 
-BASE = os.environ.get("BACKEND_BASE") or "https://xp-confidence.preview.emergentagent.com/api"
+BASE = os.environ.get(
+    "BACKEND_URL",
+    "https://xp-confidence.preview.emergentagent.com",
+).rstrip("/")
+API = f"{BASE}/api"
 
-PASS = []
-FAIL = []
+ADMIN_EMAIL = "filip.cojocea122@gmail.com"
+ADMIN_PASSWORD = "XL98CZW5599"
 
-
-def _log(ok: bool, msg: str, extra: str = ""):
-    line = f"{'PASS' if ok else 'FAIL'}: {msg}"
-    if extra and not ok:
-        line += f"\n        {extra}"
-    print(line)
-    (PASS if ok else FAIL).append(line)
-
-
-def _assert(cond: bool, msg: str, extra: str = ""):
-    _log(bool(cond), msg, extra)
+PASSED = 0
+FAILED: list[str] = []
 
 
-def _post(path, body=None, headers=None):
-    r = requests.post(f"{BASE}{path}", json=(body or {}), headers=(headers or {}), timeout=30)
-    return r
+def expect(cond: bool, label: str) -> bool:
+    global PASSED
+    if cond:
+        PASSED += 1
+        print(f"  PASS  {label}")
+        return True
+    FAILED.append(label)
+    print(f"  FAIL  {label}")
+    return False
 
 
-def _get(path, headers=None, params=None):
-    r = requests.get(f"{BASE}{path}", headers=(headers or {}), params=params, timeout=30)
-    return r
+def hdr(token: Optional[str] = None) -> dict:
+    h = {"Content-Type": "application/json"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
 
 
-def register_user():
-    email = f"maya.patel.{uuid.uuid4().hex[:10]}@gmail.com"
-    body = {"full_name": "Maya Patel", "email": email, "password": "Sapphire!Galaxy7392"}
-    r = _post("/auth/register", body)
-    _assert(r.status_code == 200, "register fresh gmail user → 200",
-            extra=f"status={r.status_code} body={r.text[:300]}")
-    js = r.json()
-    token = js.get("token") or js.get("access_token")
-    user = js.get("user") or {}
-    uid = user.get("id") or user.get("user_id")
-    _assert(bool(token), "register returns JWT")
-    _assert(bool(uid), "register returns user.id")
-    return email, body["password"], token, uid
+def jpost(path: str, body: dict, token: Optional[str] = None, timeout: int = 30):
+    return requests.post(f"{API}{path}", json=body, headers=hdr(token), timeout=timeout)
 
 
-def auth_headers(token):
-    return {"Authorization": f"Bearer {token}"}
+def jget(path: str, token: Optional[str] = None, timeout: int = 30):
+    return requests.get(f"{API}{path}", headers=hdr(token), timeout=timeout)
 
 
-# ---------- (1) stats/monthly ----------
-def test_stats_monthly(token, default_tasks):
-    H = auth_headers(token)
-    r = _get("/stats/monthly", headers=H)
-    _assert(r.status_code == 200, "GET /stats/monthly → 200",
-            extra=f"status={r.status_code} body={r.text[:300]}")
-    if r.status_code != 200:
-        return None
-    js = r.json()
-    days = js.get("days")
-    _assert(isinstance(days, list), "monthly.days is list")
-    _assert(isinstance(days, list) and len(days) == 30,
-            f"monthly.days length = 30 (got {len(days) if isinstance(days, list) else 'N/A'})")
-    if not (isinstance(days, list) and len(days) == 30):
-        return None
-
-    _assert(days[0]["date"] < days[29]["date"],
-            f"monthly oldest→newest (first={days[0]['date']} last={days[29]['date']})")
-
-    required_keys = {"date", "day", "xp", "gifted_xp", "tasks"}
-    all_ok = all(required_keys.issubset(set(d.keys())) for d in days)
-    _assert(all_ok, "every day has {date, day, xp, gifted_xp, tasks}")
-
-    d0 = days[0]
-    is_dom = d0["day"].isdigit() and 1 <= int(d0["day"]) <= 31
-    is_weekday = d0["day"] in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
-    _assert(is_dom and not is_weekday,
-            f"day is day-of-month string (got '{d0['day']}'), NOT weekday")
-
-    today_utc = datetime.now(timezone.utc).date().isoformat()
-    _assert(days[29]["date"] == today_utc,
-            f"days[29].date == today UTC ({today_utc}), got {days[29]['date']}")
-
-    # complete a default task → days[29].xp increases
-    today = today_utc
-    target = next((t for t in default_tasks
-                   if t.get("title") == "Morning reflection (5 min)"),
-                  default_tasks[0] if default_tasks else None)
-    _assert(target is not None, "have a default task to complete")
-    if not target:
-        return None
-    pre_xp = days[29]["xp"]
-    cr = _post(f"/tasks/{target['id']}/complete", {"date": today}, H)
-    _assert(cr.status_code == 200,
-            f"complete default task '{target['title']}' → 200",
-            extra=f"status={cr.status_code} body={cr.text[:300]}")
-    r2 = _get("/stats/monthly", headers=H)
-    _assert(r2.status_code == 200, "GET /stats/monthly post-complete → 200")
-    if r2.status_code == 200:
-        d2 = r2.json().get("days", [])
-        if len(d2) == 30:
-            _assert(d2[29]["xp"] > pre_xp,
-                    f"days[29].xp increased after complete (pre={pre_xp}, post={d2[29]['xp']})")
-    return target
+def fresh_email(prefix: str = "streak") -> str:
+    return f"{prefix}{uuid.uuid4().hex[:10]}@gmail.com"
 
 
-# ---------- (2) stats/by-area ----------
-def test_stats_by_area(token):
-    H = auth_headers(token)
-    r = _get("/stats/by-area", headers=H)
-    _assert(r.status_code == 200, "GET /stats/by-area → 200 (NOT 404)",
-            extra=f"status={r.status_code} body={r.text[:300]}")
-    if r.status_code != 200:
+def register(prefix: str) -> tuple[str, str, str]:
+    """Returns (token, user_id, full_name)."""
+    full_name = f"Test {prefix.title()} {uuid.uuid4().hex[:4]}"
+    email = fresh_email(prefix)
+    password = "TestPass!" + uuid.uuid4().hex[:8]
+    r = jpost("/auth/register", {
+        "full_name": full_name,
+        "email": email,
+        "password": password,
+    })
+    assert r.status_code == 200, f"register failed: {r.status_code} {r.text[:200]}"
+    j = r.json()
+    return j["token"], j["user"]["id"], full_name
+
+
+def admin_login() -> str:
+    r = jpost("/auth/login", {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    assert r.status_code == 200, f"admin login failed: {r.status_code} {r.text[:200]}"
+    return r.json()["token"]
+
+
+def utc_today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+# ---------------------------------------------------------------------- TESTS
+
+
+def test_2_gift_bumps_streak(admin_token: str):
+    """(2) Streak preservation on Creator XP gifts. Returns (token,uid)."""
+    print("\n[Test 2] Gift XP bumps streak from 0 to 1")
+    token, uid, name = register("gift")
+    r = jget("/profile", token=token)
+    expect(r.status_code == 200, "fresh /profile 200")
+    prof0 = r.json()
+    expect(prof0.get("current_streak") == 0, "fresh current_streak == 0")
+    expect(prof0.get("last_active_date") in (None, ""), "fresh last_active_date is null")
+    base_xp = int(prof0.get("total_xp", 0) or 0)
+
+    r = jpost("/admin/gift/xp",
+              {"user_id": uid, "amount": 25, "message": "test"},
+              token=admin_token)
+    expect(r.status_code == 200, f"/admin/gift/xp 200 (got {r.status_code} body={r.text[:120]})")
+    if r.status_code == 200:
+        gj = r.json()
+        expect(gj.get("ok") is True, "gift response ok=true")
+
+    r = jget("/profile", token=token)
+    prof1 = r.json()
+    expect(prof1.get("current_streak") == 1,
+           f"current_streak == 1 (got {prof1.get('current_streak')})")
+    expect(prof1.get("last_active_date") == utc_today(),
+           f"last_active_date == today UTC {utc_today()} (got {prof1.get('last_active_date')})")
+    expect(int(prof1.get("total_xp", 0)) == base_xp + 25,
+           f"total_xp += 25 (was {base_xp}, now {prof1.get('total_xp')})")
+    return token, uid
+
+
+def test_5_stats_show_gifted_xp(token: str):
+    """(5) /stats/weekly + /stats/monthly today entry has gifted_xp=25, xp=0."""
+    print("\n[Test 5] /stats/weekly + /stats/monthly include gifted_xp on today")
+    today = utc_today()
+    r = jget("/stats/weekly", token=token)
+    expect(r.status_code == 200, "/stats/weekly 200")
+    if r.status_code == 200:
+        days = r.json().get("days", [])
+        expect(len(days) == 7, f"weekly days length=7 (got {len(days)})")
+        last = days[-1] if days else {}
+        expect(last.get("date") == today, f"weekly last day date == today {today}")
+        expect(int(last.get("xp", 0) or 0) == 0,
+               f"weekly today xp == 0 (got {last.get('xp')})")
+        expect(int(last.get("gifted_xp", 0) or 0) == 25,
+               f"weekly today gifted_xp == 25 (got {last.get('gifted_xp')})")
+
+    r = jget("/stats/monthly", token=token)
+    expect(r.status_code == 200, "/stats/monthly 200")
+    if r.status_code == 200:
+        days = r.json().get("days", [])
+        expect(len(days) == 30, f"monthly days length=30 (got {len(days)})")
+        last = days[-1] if days else {}
+        expect(last.get("date") == today, "monthly last day date == today")
+        expect(int(last.get("gifted_xp", 0) or 0) == 25,
+               f"monthly today gifted_xp == 25 (got {last.get('gifted_xp')})")
+
+
+def test_7_idempotent_same_day(admin_token: str, token: str, uid: str):
+    """(7) Second same-day gift does NOT re-bump streak."""
+    print("\n[Test 7] Same-day idempotency — 2nd gift keeps streak at 1")
+    r = jpost("/admin/gift/xp",
+              {"user_id": uid, "amount": 10, "message": "second"},
+              token=admin_token)
+    expect(r.status_code == 200, "2nd gift 200")
+    r = jget("/profile", token=token)
+    prof = r.json()
+    expect(prof.get("current_streak") == 1,
+           f"streak STILL 1 after 2nd same-day gift (got {prof.get('current_streak')})")
+    expect(prof.get("last_active_date") == utc_today(), "last_active_date still today")
+
+
+def test_3_focus_bumps_streak():
+    """(3) Focus session completion with positive XP bumps streak from 0 to 1."""
+    print("\n[Test 3] Focus session completion bumps streak")
+    token, uid, _ = register("focus")
+    r = jget("/profile", token=token)
+    expect(r.status_code == 200 and r.json().get("current_streak") == 0,
+           "fresh focus user streak=0")
+    r = jpost("/focus/session", {
+        "planned_minutes": 25,
+        "actual_seconds": 1500,
+        "backgrounded_seconds": 0,
+        "locked_app_seconds": 0,
+        "completed": True,
+        "committed_app_count": 3,
+    }, token=token)
+    expect(r.status_code == 200, f"/focus/session 200 (got {r.status_code} {r.text[:100]})")
+    if r.status_code == 200:
+        j = r.json()
+        expect(int(j.get("xp_delta", 0)) == 5,
+               f"focus xp_delta == 5 (got {j.get('xp_delta')})")
+    r = jget("/profile", token=token)
+    expect(r.status_code == 200, "/profile 200 after focus")
+    prof = r.json()
+    expect(prof.get("current_streak") == 1,
+           f"focus -> current_streak == 1 (got {prof.get('current_streak')})")
+
+
+def test_4_challenge_bumps_streak():
+    """(4) Challenge complete bumps streak from 0 to 1."""
+    print("\n[Test 4] Challenge complete bumps streak")
+    token, uid, _ = register("chal")
+    r = jget("/profile", token=token)
+    expect(r.json().get("current_streak") == 0, "fresh challenge user streak=0")
+    r = jpost("/challenge/accept", {}, token=token)
+    expect(r.status_code == 200, "/challenge/accept 200")
+    r = jpost("/challenge/complete", {
+        "completed": True,
+        "how_text": "Did it",
+        "difficulty": "easy",
+        "experience_text": "Felt good",
+        "rating": 5,
+    }, token=token)
+    expect(r.status_code == 200, f"/challenge/complete 200 (got {r.status_code} {r.text[:120]})")
+    if r.status_code == 200:
+        j = r.json()
+        expect(int(j.get("awarded_xp", 0)) > 0,
+               f"challenge awarded_xp > 0 (got {j.get('awarded_xp')})")
+    r = jget("/profile", token=token)
+    expect(r.json().get("current_streak") == 1,
+           f"challenge -> current_streak == 1 (got {r.json().get('current_streak')})")
+
+
+def test_1_streak_cap_indirect():
+    """(1a/b) Streak cap exists (indirect): fresh user shows 0, gift bumps to 1
+    NOT 2, and idempotent same-day grant doesn't bump beyond 1.
+    Already covered by tests 2 + 7 -- this is just a named summary line.
+    """
+    print("\n[Test 1a/b] Streak cap (indirect) -- covered by tests 2 + 7")
+
+
+async def test_1c_streak_cap_direct(admin_token: str):
+    """(1c) Direct DB seed: set current_streak=5000 + last_active_date=yesterday,
+    trigger another gift, verify streak stays exactly 5000 (not 5001).
+    """
+    print("\n[Test 1c] Streak cap held at 5000 (direct DB seed -> trigger gift)")
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+    except Exception as e:
+        print(f"  SKIP  motor unavailable: {e}")
         return
-    js = r.json()
-    by_area = js.get("by_area")
-    _assert(isinstance(by_area, dict), "stats/by-area returns by_area dict")
-    expected = {"social", "fitness", "appearance", "mindset"}
-    _assert(set(by_area.keys()) >= expected,
-            f"by_area has all 4 focus areas (got {list(by_area.keys())})")
-    for k in expected:
-        _assert(isinstance(by_area.get(k), int), f"by_area.{k} is int")
 
-    pre = int(by_area.get("mindset") or 0)
-    today = datetime.now(timezone.utc).date().isoformat()
-    tr = _get("/tasks", headers=H)
-    tasks = tr.json().get("tasks", []) if tr.status_code == 200 else []
-    mindset_task = None
-    for t in tasks:
-        if (t.get("focus_area") == "mindset" and t.get("is_default")
-                and not t.get("completed")):
-            mindset_task = t
-            break
-    _assert(mindset_task is not None, "have a mindset default task uncompleted")
-    if not mindset_task:
+    mongo_url = "mongodb://localhost:27017"
+    db_name = "test_database"
+    try:
+        with open("/app/backend/.env", "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("MONGO_URL"):
+                    mongo_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif line.startswith("DB_NAME"):
+                    db_name = line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+
+    client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=4000)
+    db = client[db_name]
+    try:
+        await db.command("ping")
+    except Exception as e:
+        print(f"  SKIP  cannot reach MongoDB at {mongo_url}: {e}")
         return
-    cr = _post(f"/tasks/{mindset_task['id']}/complete", {"date": today}, H)
-    _assert(cr.status_code == 200, "complete mindset task → 200",
-            extra=f"status={cr.status_code} body={cr.text[:300]}")
-    r2 = _get("/stats/by-area", headers=H)
-    _assert(r2.status_code == 200, "GET /stats/by-area post-complete → 200")
-    if r2.status_code == 200:
-        post = int(r2.json().get("by_area", {}).get("mindset") or 0)
-        _assert(post > pre,
-                f"by_area.mindset increased (pre={pre}, post={post})")
+
+    token, uid, _ = register("cap")
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    res = await db.profile.update_one(
+        {"_id": uid},
+        {"$set": {"current_streak": 5000, "longest_streak": 5000,
+                  "last_active_date": yesterday}},
+    )
+    expect(res.modified_count == 1,
+           f"db.profile primed (cs=5000, last_active=yesterday) -- modified={res.modified_count}")
+
+    r = jpost("/admin/gift/xp",
+              {"user_id": uid, "amount": 1, "message": "cap probe"},
+              token=admin_token)
+    expect(r.status_code == 200, f"/admin/gift/xp 200 (cap probe; got {r.status_code})")
+
+    r = jget("/profile", token=token)
+    expect(r.status_code == 200, "/profile 200 (cap probe)")
+    prof = r.json()
+    cs = prof.get("current_streak")
+    expect(cs == 5000, f"current_streak capped at 5000 (got {cs} -- should NOT be 5001)")
+    expect(prof.get("last_active_date") == utc_today(),
+           "last_active_date == today UTC after cap probe")
+    pdoc = await db.profile.find_one({"_id": uid}, {"longest_streak": 1})
+    expect((pdoc or {}).get("longest_streak") == 5000,
+           f"longest_streak capped at 5000 (got {(pdoc or {}).get('longest_streak')})")
+
+    client.close()
 
 
-# ---------- (3) focus/session ----------
-def get_total_xp(token):
-    r = _get("/profile", headers=auth_headers(token))
-    if r.status_code != 200:
-        return None
-    return int(r.json().get("total_xp") or 0)
-
-
-def run_focus(token, label, body, expected_delta, expected_reason, prev_xp):
-    H = auth_headers(token)
-    r = _post("/focus/session", body, H)
-    if expected_delta == "400":
-        _assert(r.status_code == 400, f"[{label}] returns 400",
-                extra=f"status={r.status_code} body={r.text[:300]} req={json.dumps(body)}")
-        return prev_xp
-    if r.status_code != 200:
-        _log(False, f"[{label}] expected 200 got {r.status_code}",
-             extra=f"req={json.dumps(body)} resp={r.text[:300]}")
-        return prev_xp
-    js = r.json()
-    actual_delta = int(js.get("xp_delta", -99999))
-    actual_reason = js.get("reason", "")
-    new_total = int((js.get("profile") or {}).get("total_xp") or 0)
-
-    _assert(actual_delta == expected_delta,
-            f"[{label}] xp_delta == {expected_delta}",
-            extra=f"got xp_delta={actual_delta} reason={actual_reason} req={json.dumps(body)} resp={r.text[:400]}")
-    _assert(actual_reason == expected_reason,
-            f"[{label}] reason == '{expected_reason}'",
-            extra=f"got reason='{actual_reason}' req={json.dumps(body)} resp={r.text[:400]}")
-
-    expected_total = max(0, prev_xp + expected_delta)
-    _assert(new_total == expected_total,
-            f"[{label}] profile.total_xp = max(0, prev+delta) = {expected_total}",
-            extra=f"got new_total={new_total} prev={prev_xp} delta={expected_delta}")
-    _assert(new_total >= 0, f"[{label}] total_xp >= 0 (got {new_total})")
-
-    rp = _get("/profile", headers=H)
-    if rp.status_code == 200:
-        pt = int(rp.json().get("total_xp") or 0)
-        _assert(pt == new_total, f"[{label}] /profile re-fetch matches session resp",
-                extra=f"refetch={pt} session_resp={new_total}")
-    return new_total
-
-
-def test_focus_session(token):
-    H = auth_headers(token)
-    total = get_total_xp(token)
-    _assert(total is not None, "fetch starting total_xp")
-    print(f"  [focus] starting total_xp = {total}")
-
-    total = run_focus(token, "A complete clean",
-                      {"planned_minutes": 25, "actual_seconds": 1500,
-                       "backgrounded_seconds": 0, "locked_app_seconds": 0,
-                       "completed": True, "committed_app_count": 3},
-                      5, "focus_complete", total)
-
-    total = run_focus(token, "B early-exit locked 4min",
-                      {"planned_minutes": 30, "actual_seconds": 300,
-                       "backgrounded_seconds": 0, "locked_app_seconds": 240,
-                       "completed": False, "committed_app_count": 2},
-                      -60, "focus_distracted_locked_apps", total)
-
-    total = run_focus(token, "C complete with penalty",
-                      {"planned_minutes": 60, "actual_seconds": 3600,
-                       "backgrounded_seconds": 0, "locked_app_seconds": 120,
-                       "completed": True, "committed_app_count": 1},
-                      -18, "focus_complete_with_penalty", total)
-
-    total = run_focus(token, "D penalty cap",
-                      {"planned_minutes": 60, "actual_seconds": 3600,
-                       "backgrounded_seconds": 0, "locked_app_seconds": 1320,
-                       "completed": True, "committed_app_count": 1},
-                      -288, "focus_complete_with_penalty", total)
-
-    # E — legacy iOS, omit locked_app_seconds entirely
-    total = run_focus(token, "E legacy iOS bg only",
-                      {"planned_minutes": 30, "actual_seconds": 600,
-                       "backgrounded_seconds": 120, "completed": False,
-                       "committed_app_count": 1},
-                      -4, "focus_distracted", total)
-
-    # F — validation
-    rF1 = _post("/focus/session",
-                {"planned_minutes": 0, "actual_seconds": 0,
-                 "backgrounded_seconds": 0, "locked_app_seconds": 0,
-                 "completed": False, "committed_app_count": 0}, H)
-    _assert(rF1.status_code == 400, "[F] planned_minutes=0 → 400",
-            extra=f"status={rF1.status_code} body={rF1.text[:200]}")
-    rF2 = _post("/focus/session",
-                {"planned_minutes": 200, "actual_seconds": 0,
-                 "backgrounded_seconds": 0, "locked_app_seconds": 0,
-                 "completed": False, "committed_app_count": 0}, H)
-    _assert(rF2.status_code == 400, "[F] planned_minutes=200 → 400",
-            extra=f"status={rF2.status_code} body={rF2.text[:200]}")
-
-    total = run_focus(token, "G clean cancel",
-                      {"planned_minutes": 25, "actual_seconds": 30,
-                       "backgrounded_seconds": 0, "locked_app_seconds": 0,
-                       "completed": False, "committed_app_count": 0},
-                      0, "focus_cancelled_clean", total)
-
-    final = get_total_xp(token)
-    _assert(final is not None and final >= 0,
-            f"[final] total_xp >= 0 after all scenarios (got {final})")
-
-
-# ---------- (4) regression smoke ----------
-def test_regression():
-    email = f"ryan.chen.{uuid.uuid4().hex[:10]}@gmail.com"
-    rr = _post("/auth/register", {"full_name": "Ryan Chen", "email": email,
-                                   "password": "Marigold!Mountain8821"})
-    _assert(rr.status_code == 200, "[regression] /auth/register (gmail.com) → 200",
-            extra=f"status={rr.status_code} body={rr.text[:300]}")
-    if rr.status_code != 200:
-        return
-    js = rr.json()
-    token = js.get("token") or js.get("access_token")
-    _assert(bool(token), "[regression] register returns JWT")
-
-    rp = _get("/profile", headers=auth_headers(token))
-    _assert(rp.status_code == 200, "[regression] /profile via JWT → 200",
-            extra=f"status={rp.status_code} body={rp.text[:200]}")
-
-    anon_id = f"device-{uuid.uuid4().hex}"
-    ra = _get("/profile", headers={"X-Anonymous-Id": anon_id})
-    _assert(ra.status_code == 200, "[regression] /profile via X-Anonymous-Id → 200",
-            extra=f"status={ra.status_code} body={ra.text[:200]}")
-
-    rt = _get("/tasks", headers=auth_headers(token))
-    _assert(rt.status_code == 200, "[regression] /tasks GET → 200")
-    tasks = rt.json().get("tasks", []) if rt.status_code == 200 else []
-    defaults = [t for t in tasks if t.get("is_default")]
-    _assert(len(defaults) >= 5,
-            f"[regression] /tasks returns seeded defaults (got {len(defaults)})")
-
-    rw = _get("/stats/weekly", headers=auth_headers(token))
-    _assert(rw.status_code == 200, "[regression] /stats/weekly → 200")
-    if rw.status_code == 200:
-        days = rw.json().get("days", [])
-        _assert(len(days) == 7,
-                f"[regression] /stats/weekly days length = 7 (got {len(days)})")
-        if days:
-            wd_ok = days[0]["day"] in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
-            _assert(wd_ok, f"[regression] weekly day is weekday (got '{days[0]['day']}')")
+def test_6_regression(token: str, admin_token: str):
+    """(6) No regression on commonly hit endpoints."""
+    print("\n[Test 6] Regression -- common endpoints all 200")
+    for path in ["/profile", "/stats/daily", "/stats/weekly",
+                 "/stats/monthly", "/stats/by-area", "/library/ratings"]:
+        r = jget(path, token=token)
+        expect(r.status_code == 200, f"GET {path} 200 (got {r.status_code})")
+    r = jget("/library/catalog", token=admin_token)
+    expect(r.status_code == 200, f"GET /library/catalog (admin) 200 (got {r.status_code})")
 
 
 def main():
-    print(f"==> testing against {BASE}")
-    email, pw, token, uid = register_user()
-    if not token:
-        print("FATAL: cannot continue without token")
-        sys.exit(1)
-    H = auth_headers(token)
+    print(f"BASE = {BASE}")
+    print("Logging in as admin...")
+    admin_token = admin_login()
 
-    rt = _get("/tasks", headers=H)
-    tasks = rt.json().get("tasks", []) if rt.status_code == 200 else []
-    default_tasks = [t for t in tasks if t.get("is_default")]
-    _assert(len(default_tasks) >= 5,
-            f"fresh user has seeded default tasks (got {len(default_tasks)})")
+    token2, uid2 = test_2_gift_bumps_streak(admin_token)
+    test_5_stats_show_gifted_xp(token2)
+    test_7_idempotent_same_day(admin_token, token2, uid2)
+    test_1_streak_cap_indirect()
+    test_3_focus_bumps_streak()
+    test_4_challenge_bumps_streak()
+    test_6_regression(token2, admin_token)
+    asyncio.run(test_1c_streak_cap_direct(admin_token))
 
-    print("\n--- (1) /stats/monthly ---")
-    test_stats_monthly(token, default_tasks)
-
-    print("\n--- (2) /stats/by-area ---")
-    test_stats_by_area(token)
-
-    print("\n--- (3) /focus/session ---")
-    test_focus_session(token)
-
-    print("\n--- (4) regression smoke ---")
-    test_regression()
-
-    print("\n" + "=" * 60)
-    print(f"PASSED: {len(PASS)}")
-    print(f"FAILED: {len(FAIL)}")
-    if FAIL:
+    print()
+    print("=" * 62)
+    print(f"PASSED: {PASSED}    FAILED: {len(FAILED)}")
+    if FAILED:
         print("\nFAILURES:")
-        for f in FAIL:
+        for f in FAILED:
             print(f"  - {f}")
-    print("=" * 60)
-    sys.exit(0 if not FAIL else 1)
+        sys.exit(1)
+    print("ALL ASSERTIONS PASSED")
 
 
 if __name__ == "__main__":
