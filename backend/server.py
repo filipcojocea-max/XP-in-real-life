@@ -1811,6 +1811,17 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
                 {"_id": user_id},
                 {"$inc": {"total_xp": step_xp_delta}},
             )
+            # Tick a daily goal forward → log XP to charts so the bar /
+            # line graphs reflect the new XP that was just earned. We
+            # only log POSITIVE deltas — un-ticking refunds XP but
+            # shouldn't go on the chart as a negative bar (the chart
+            # shows earnings, not refunds).
+            if step_xp_delta > 0:
+                await _log_xp_to_charts(
+                    user_id, step_xp_delta,
+                    source="goal_step",
+                    focus_area=goal.get("focus_area") or "mindset",
+                )
 
     awarded_xp = 0
     refunded_xp = 0
@@ -1820,6 +1831,13 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
         await db.profile.update_one(
             {"_id": user_id},
             {"$inc": {"goals_completed": 1, "total_xp": awarded_xp}},
+        )
+        # Goal completion → keep streak alive AND show on charts.
+        await _bump_streak_for_xp(user_id)
+        await _log_xp_to_charts(
+            user_id, awarded_xp,
+            source="goal_complete",
+            focus_area=goal.get("focus_area") or "mindset",
         )
         prof = await db.profile.find_one({"_id": user_id})
         await check_and_unlock_achievements(prof)
@@ -2744,8 +2762,12 @@ async def challenge_past_answer(
         await db.profile.update_one(
             {"_id": user_id}, {"$inc": {"total_xp": awarded_xp}}
         )
-        # Late-answered challenge → still counts as activity for streak.
+        # Late-answered challenge → still counts as activity for streak +
+        # logged onto the Progress charts so the user sees the credit.
         await _bump_streak_for_xp(user_id)
+        await _log_xp_to_charts(
+            user_id, awarded_xp, source="challenge_late", focus_area="mindset",
+        )
     updated = await db.challenge_completions.find_one({"id": completion_id}, {"_id": 0})
     return {"awarded_xp": awarded_xp, "completion": updated}
 
@@ -3506,6 +3528,62 @@ async def _log_xp_event(user_id: str, xp: int, tz_offset: int):
         "tz_offset_minutes": int(tz_offset or 0),
         "local_week_key": week_key,
     })
+
+
+async def _log_xp_to_charts(
+    user_id: str,
+    amount: int,
+    source: str,
+    focus_area: str = "mindset",
+) -> None:
+    """Write an XP row that the Progress-tab charts read.
+
+    The /stats/weekly and /stats/monthly endpoints sum `xp_awarded` from
+    the `task_logs` collection. Originally only regular task completions
+    inserted there, which meant XP earned from goals, focus sessions,
+    mini-app challenges (sleep / confidence / dress-with-confidence /
+    challenge tasks) was invisible on the charts even though it bumped
+    the user's total_xp profile counter.
+
+    This helper inserts a synthetic task_log row tagged with the XP
+    source (so we can debug analytics later) using a UUID-prefixed
+    task_id so it never collides with a real task. Whatever string is
+    passed as `focus_area` will also be reflected in /stats/by-area —
+    callers should pick the most accurate one (e.g. a goal in the
+    "social" pillar should pass focus_area="social").
+
+    GIFTED XP is intentionally NOT logged here. Creator gifts are
+    surfaced separately by the chart endpoints via the `gifts`
+    collection (rendered as the gold stacked segment), and double-
+    logging them would inflate the daily totals.
+
+    Never raises — chart logging is non-critical and must not block the
+    XP grant if Mongo is hot.
+    """
+    if amount <= 0:
+        return
+    try:
+        # Normalise focus_area to one of the four canonical pillars.
+        # Anything unknown collapses to "mindset" so /stats/by-area
+        # doesn't get a garbage bucket.
+        if focus_area not in FOCUS_AREAS:
+            focus_area = "mindset"
+        await db.task_logs.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            # Synthetic task_id so this row can never be confused with a
+            # real task completion when we list past task logs.
+            "task_id": f"_xp:{source}:{uuid.uuid4()}",
+            "task_title": source,
+            "date": today_str(),
+            "focus_area": focus_area,
+            "xp_awarded": int(amount),
+            "xp_multiplier": 1.0,
+            "completed_at": now_iso(),
+            "_source": source,  # tag for analytics; not read by chart
+        })
+    except Exception as e:
+        logger.warning("[xp-chart-log] failed for source=%s: %s", source, e)
 
 
 async def _sum_week_xp(user_id: str, tz_offset: int, anchor: Optional[datetime] = None) -> int:
@@ -5959,8 +6037,12 @@ async def confidence_complete(
         )
         tz_off = int((await db.profile.find_one({"_id": user_id}, {"tz_offset_minutes": 1}) or {}).get("tz_offset_minutes", 0) or 0)
         await _log_xp_event(user_id, xp_gain, tz_off)
-        # Confidence track completion → keep streak alive.
+        # Confidence track completion → keep streak alive AND show on
+        # the Progress-tab charts (was previously invisible there).
         await _bump_streak_for_xp(user_id)
+        await _log_xp_to_charts(
+            user_id, xp_gain, source="confidence_track", focus_area="mindset",
+        )
     except Exception as e:
         logger.warning("[confidence] XP award failed: %s", e)
     return {"ok": True, "already_done": False, "xp_awarded": 15}
@@ -7200,8 +7282,11 @@ async def focus_session_complete(
         )
         if delta > 0:
             await _log_xp_event(user_id, delta, int(prof.get("tz_offset_minutes") or 0))
-            # Focus session bonus → keep streak alive.
+            # Focus session bonus → keep streak alive AND show on charts.
             await _bump_streak_for_xp(user_id)
+            await _log_xp_to_charts(
+                user_id, delta, source="focus_session", focus_area="mindset",
+            )
 
     # Log the session row for history / anti-abuse.
     await db.focus_sessions.insert_one({
