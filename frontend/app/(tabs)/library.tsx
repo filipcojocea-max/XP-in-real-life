@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -12,21 +12,92 @@ import { router, useFocusEffect } from 'expo-router';
 import { colors, spacing, radii, GOLD } from '../../src/theme';
 import { api } from '../../src/api';
 import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
+import {
+  MiniAppRatingStrip,
+  RateMiniAppModal,
+  MiniAppRatingStats,
+} from '../../src/components/MiniAppRating';
 
 type Tab = 'add' | 'mine';
+
+// IDs that match the backend's LIBRARY_APP_IDS list. Keep in sync.
+type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence';
+
+const APP_LABELS: Record<MiniAppId, string> = {
+  sleep: 'Improve Sleeping',
+  challenges: 'Challenge Tasks',
+  spot: 'Spot the Object',
+  confidence: 'Build Self-Confidence',
+};
+
+const APP_TINTS: Record<MiniAppId, string> = {
+  sleep: colors.cyan,
+  challenges: colors.green,
+  spot: colors.amber,
+  confidence: '#FFD700',
+};
+
+const EMPTY_STATS: MiniAppRatingStats = { average: 0, count: 0, user_rating: null };
 
 export default function Library() {
   const [tab, setTab] = useState<Tab>('add');
   const [isAdmin, setIsAdmin] = useState(false);
 
-  const checkAdmin = React.useCallback(async () => {
+  // Rating state. `ratings` is the per-app aggregate map fetched on
+  // focus. `rateTarget` (mini-app id or null) controls the modal.
+  const [ratings, setRatings] = useState<Record<MiniAppId, MiniAppRatingStats>>({
+    sleep: EMPTY_STATS,
+    challenges: EMPTY_STATS,
+    spot: EMPTY_STATS,
+    confidence: EMPTY_STATS,
+  });
+  const [rateTarget, setRateTarget] = useState<MiniAppId | null>(null);
+  const [submittingRating, setSubmittingRating] = useState(false);
+
+  const checkAdmin = useCallback(async () => {
     try {
       const p = await api.getProfile();
       setIsAdmin(!!p.is_admin);
     } catch {}
   }, []);
-  useEffect(() => { checkAdmin(); }, [checkAdmin]);
-  useFocusEffect(React.useCallback(() => { checkAdmin(); }, [checkAdmin]));
+
+  const loadRatings = useCallback(async () => {
+    try {
+      const r = await api.libraryRatings();
+      setRatings({
+        sleep: r.ratings.sleep ?? EMPTY_STATS,
+        challenges: r.ratings.challenges ?? EMPTY_STATS,
+        spot: r.ratings.spot ?? EMPTY_STATS,
+        confidence: r.ratings.confidence ?? EMPTY_STATS,
+      });
+    } catch (e) {
+      // Silent — strip just shows "No reviews" on failure.
+      console.log('[library] ratings load', e);
+    }
+  }, []);
+
+  useEffect(() => { checkAdmin(); loadRatings(); }, [checkAdmin, loadRatings]);
+  useFocusEffect(
+    React.useCallback(() => { checkAdmin(); loadRatings(); }, [checkAdmin, loadRatings])
+  );
+
+  const submitRating = async (stars: number) => {
+    if (!rateTarget) return;
+    setSubmittingRating(true);
+    try {
+      const r = await api.rateMiniApp(rateTarget, stars);
+      // Patch local state with the freshly-recomputed aggregate so the
+      // strip on the card updates instantly without a full refetch.
+      setRatings((prev) => ({ ...prev, [rateTarget]: r.stats }));
+      setRateTarget(null);
+    } catch (e) {
+      console.log('[library] submit rating', e);
+      // Leave modal open so user can retry; surface a toast-like inline
+      // failure later if needed. For now, simplest UX: just unlock.
+    } finally {
+      setSubmittingRating(false);
+    }
+  };
 
   // Reset Library+ to top on each focus so tapping the tab always
   // shows the mini-app catalog header first.
@@ -127,6 +198,12 @@ export default function Library() {
             >
               <View style={styles.featureGlow} />
               <View style={styles.featureRow}>
+                <MiniAppRatingStrip
+                  testID="rating-strip-sleep"
+                  stats={ratings.sleep}
+                  tint={APP_TINTS.sleep}
+                  onPress={() => setRateTarget('sleep')}
+                />
                 <View style={styles.featureIcon}>
                   <Ionicons name="moon" size={32} color={colors.cyan} />
                 </View>
@@ -173,6 +250,12 @@ export default function Library() {
             >
               <View style={[styles.featureGlow, { backgroundColor: colors.green + '22' }]} />
               <View style={styles.featureRow}>
+                <MiniAppRatingStrip
+                  testID="rating-strip-challenges"
+                  stats={ratings.challenges}
+                  tint={APP_TINTS.challenges}
+                  onPress={() => setRateTarget('challenges')}
+                />
                 <View style={[styles.featureIcon, { backgroundColor: colors.green + '22', borderColor: colors.green + '88' }]}>
                   <Ionicons name="flash" size={32} color={colors.green} />
                 </View>
@@ -219,6 +302,12 @@ export default function Library() {
             >
               <View style={[styles.featureGlow, { backgroundColor: colors.amber + '22' }]} />
               <View style={styles.featureRow}>
+                <MiniAppRatingStrip
+                  testID="rating-strip-spot"
+                  stats={ratings.spot}
+                  tint={APP_TINTS.spot}
+                  onPress={() => setRateTarget('spot')}
+                />
                 <View style={[styles.featureIcon, { backgroundColor: colors.amber + '22', borderColor: colors.amber + '88' }]}>
                   <Ionicons name="scan-circle" size={32} color={colors.amber} />
                 </View>
@@ -264,6 +353,12 @@ export default function Library() {
             >
               <View style={[styles.featureGlow, { backgroundColor: '#FFD70022' }]} />
               <View style={styles.featureRow}>
+                <MiniAppRatingStrip
+                  testID="rating-strip-confidence"
+                  stats={ratings.confidence}
+                  tint={APP_TINTS.confidence}
+                  onPress={() => setRateTarget('confidence')}
+                />
                 <View style={[styles.featureIcon, { backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
                   <Ionicons name="shirt" size={32} color={'#FFD700'} />
                 </View>
@@ -392,6 +487,19 @@ export default function Library() {
           </View>
         )}
       </ScrollView>
+
+      {/* Centered modal — opens when the user taps a star strip on
+          any of the 4 mini-app cards (or any of the My Library rows).
+          Pre-selects their existing rating so editing feels seamless. */}
+      <RateMiniAppModal
+        visible={rateTarget !== null}
+        appLabel={rateTarget ? APP_LABELS[rateTarget] : ''}
+        tint={rateTarget ? APP_TINTS[rateTarget] : colors.amber}
+        initialStars={rateTarget ? ratings[rateTarget].user_rating : null}
+        submitting={submittingRating}
+        onCancel={() => setRateTarget(null)}
+        onSubmit={submitRating}
+      />
     </SafeAreaView>
   );
 }

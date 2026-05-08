@@ -748,6 +748,30 @@ export const api = {
   statsByArea: () =>
     req<{ by_area: Record<FocusArea, number> }>('/stats/by-area'),
 
+  // ──────── Library+ Mini-App Ratings ────────
+  // Returns aggregate stats for all 4 featured mini-apps + the
+  // caller's own rating per app (null if never rated).
+  libraryRatings: () =>
+    req<{
+      ratings: Record<
+        'sleep' | 'challenges' | 'spot' | 'confidence',
+        { average: number; count: number; user_rating: number | null }
+      >;
+    }>('/library/ratings'),
+
+  // Upserts the caller's rating (1–5) for a single mini-app and
+  // returns the freshly recomputed aggregate so the UI can update
+  // without a full refetch.
+  rateMiniApp: (app_id: 'sleep' | 'challenges' | 'spot' | 'confidence', stars: number) =>
+    req<{
+      saved: boolean;
+      app_id: string;
+      stats: { average: number; count: number; user_rating: number };
+    }>('/library/ratings', {
+      method: 'POST',
+      body: JSON.stringify({ app_id, stars }),
+    }),
+
   // ──────── Sleep Coach ────────
   sleepProfile: () =>
     req<{

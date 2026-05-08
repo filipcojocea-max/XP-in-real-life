@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -6776,6 +6776,126 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
             "name": "Build Self-Confidence · Dress with Confidence (AI Coach)",
             "count": len(dress_items),
             "items": dress_items,
+        },
+    }
+
+
+# ═════════════════════ Library+ Mini-App Ratings ═════════════════════
+# Each authenticated user (incl. anonymous) can rate any of the four
+# featured mini-apps from 1–5 stars. The UI shows a vertical 5-star
+# strip on the left side of every mini-app card with the running
+# average + reviewer count, and lets the user tap to give/change
+# their rating at any time.
+#
+# Storage model — `library_ratings` collection:
+#   {
+#     "_id":          "<uuid>",          # internal row id
+#     "user_id":      "<uid>",
+#     "app_id":       "sleep" | "challenges" | "spot" | "confidence",
+#     "stars":        1..5 (int),
+#     "updated_at":   "<iso8601>",
+#   }
+# Composite uniqueness: (user_id, app_id). We enforce it via upsert.
+
+LIBRARY_APP_IDS = ["sleep", "challenges", "spot", "confidence"]
+
+
+@api_router.get("/library/ratings")
+async def library_ratings_get(user_id: str = Depends(get_user_or_legacy)):
+    """Aggregate rating stats for all four mini-apps PLUS the caller's
+    own rating per app (so the UI can pre-highlight their stars in the
+    "change my rating" modal).
+
+    Returns:
+      {
+        "ratings": {
+          "sleep":      {"average": 4.5, "count": 12, "user_rating": 4 | null},
+          "challenges": {...},
+          "spot":       {...},
+          "confidence": {...}
+        }
+      }
+    """
+    out: dict = {}
+    # Pull everything in one round-trip then bucket in Python — the
+    # collection is small (max ~4 rows per user) so a per-app
+    # aggregate pipeline would be more I/O than this.
+    rows = await db.library_ratings.find({}, {"_id": 0}).to_list(100000)
+    by_app: dict[str, list[int]] = {a: [] for a in LIBRARY_APP_IDS}
+    user_rating: dict[str, int | None] = {a: None for a in LIBRARY_APP_IDS}
+    for r in rows:
+        aid = r.get("app_id")
+        if aid not in by_app:
+            continue
+        try:
+            stars = int(r.get("stars") or 0)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= stars <= 5:
+            by_app[aid].append(stars)
+            if r.get("user_id") == user_id:
+                user_rating[aid] = stars
+    for aid in LIBRARY_APP_IDS:
+        votes = by_app[aid]
+        avg = round(sum(votes) / len(votes), 2) if votes else 0.0
+        out[aid] = {
+            "average": avg,
+            "count": len(votes),
+            "user_rating": user_rating[aid],
+        }
+    return {"ratings": out}
+
+
+@api_router.post("/library/ratings")
+async def library_ratings_post(
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Upsert the caller's rating for a mini-app. Returns the freshly
+    recomputed aggregate for THAT app so the UI can update without a
+    full refetch.
+
+    Body:  { "app_id": "sleep", "stars": 4 }
+    """
+    app_id = (body.get("app_id") or "").strip()
+    if app_id not in LIBRARY_APP_IDS:
+        raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
+    try:
+        stars = int(body.get("stars"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "stars must be an integer 1..5")
+    if stars < 1 or stars > 5:
+        raise HTTPException(400, "stars must be between 1 and 5")
+
+    # Upsert: composite (user_id, app_id). Mongo's update_one with
+    # upsert=True gives us the right semantics — one row per user/app.
+    await db.library_ratings.update_one(
+        {"user_id": user_id, "app_id": app_id},
+        {
+            "$set": {
+                "stars": stars,
+                "updated_at": now_iso(),
+                "user_id": user_id,
+                "app_id": app_id,
+            },
+            "$setOnInsert": {"_id": str(uuid.uuid4())},
+        },
+        upsert=True,
+    )
+
+    # Recompute aggregate for the affected app only.
+    rows = await db.library_ratings.find(
+        {"app_id": app_id}, {"_id": 0, "stars": 1}
+    ).to_list(100000)
+    votes = [int(r["stars"]) for r in rows if isinstance(r.get("stars"), int) and 1 <= r["stars"] <= 5]
+    avg = round(sum(votes) / len(votes), 2) if votes else 0.0
+    return {
+        "saved": True,
+        "app_id": app_id,
+        "stats": {
+            "average": avg,
+            "count": len(votes),
+            "user_rating": stars,
         },
     }
 
