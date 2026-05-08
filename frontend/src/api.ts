@@ -1290,6 +1290,10 @@ export type AdminReport = {
   severity: string;
   excerpt: string;
   reason: string;
+  rating?: number;
+  stars?: string;
+  level_at_submit?: number;
+  platform?: string;
   created_at: string;
   viewed_at: string | null;
   dismissed_at: string | null;

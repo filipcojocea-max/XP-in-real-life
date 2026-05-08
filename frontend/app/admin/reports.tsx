@@ -59,6 +59,14 @@ export default function AdminReports() {
         );
       } catch {}
     }
+    if (r.kind === 'feedback') {
+      const stars = r.stars || ('★'.repeat(r.rating || 0) + '☆'.repeat(5 - (r.rating || 0)));
+      showAlert(
+        `Feedback from ${r.reported_name}`,
+        `${stars}  (${r.rating || '?'} / 5)\n${r.level_at_submit ? `Level at submit: ${r.level_at_submit}\n` : ''}${r.platform ? `Platform: ${r.platform}\n` : ''}\n"${r.excerpt}"`,
+      );
+      return;
+    }
     showAlert(
       `Report on ${r.reported_name}`,
       `Kind: ${r.kind}\nSeverity: ${r.severity}\nReason: ${r.reason || '(no reason)'}\n\nExcerpt:\n${r.excerpt}`,
@@ -94,7 +102,7 @@ export default function AdminReports() {
         <View style={styles.empty}>
           <Ionicons name="shield-checkmark" size={42} color={colors.green} />
           <Text style={styles.emptyTitle}>All clear</Text>
-          <Text style={styles.emptyDesc}>No flagged activity right now. Reports will appear here automatically when the AI guard catches anything inappropriate.</Text>
+          <Text style={styles.emptyDesc}>No flagged activity or new feedback right now. Reports and user feedback will appear here automatically.</Text>
         </View>
       ) : (
         <ScrollView
@@ -110,35 +118,50 @@ export default function AdminReports() {
             />
           }
         >
-          {reports.map((r) => (
+          {reports.map((r) => {
+            const isFeedback = r.kind === 'feedback';
+            const accent = isFeedback ? '#FFD700' : colors.red;
+            return (
             <TouchableOpacity
               key={r.id}
               activeOpacity={0.85}
-              style={[styles.row, !r.viewed_at && styles.rowUnviewed]}
+              style={[styles.row, !r.viewed_at && (isFeedback ? styles.rowUnviewedGold : styles.rowUnviewed)]}
               onPress={() => onView(r)}
               onLongPress={() => onDismiss(r)}
               testID={`report-${r.id}`}
             >
-              <View style={[styles.icon, { backgroundColor: colors.red + '22', borderColor: colors.red + '88' }]}>
-                <Ionicons name={r.kind === 'message_image' ? 'image' : 'chatbubble-ellipses'} size={18} color={colors.red} />
+              <View style={[styles.icon, { backgroundColor: accent + '22', borderColor: accent + '88' }]}>
+                <Ionicons
+                  name={isFeedback ? 'chatbubbles' : (r.kind === 'message_image' ? 'image' : 'chatbubble-ellipses')}
+                  size={18}
+                  color={accent}
+                />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.name} numberOfLines={1}>
                   {r.reported_name}
-                  {!r.viewed_at && <Text style={{ color: colors.red }}>  •  NEW</Text>}
+                  {!r.viewed_at && <Text style={{ color: accent }}>  •  NEW</Text>}
                 </Text>
                 <Text style={styles.email} numberOfLines={1}>{r.reported_email || '(anonymous account)'}</Text>
+                {isFeedback && (r.rating || r.stars) ? (
+                  <Text style={[styles.starsRow, { color: '#FFD700' }]} numberOfLines={1}>
+                    {r.stars || ('★'.repeat(r.rating || 0) + '☆'.repeat(5 - (r.rating || 0)))}  ({r.rating}/5)
+                  </Text>
+                ) : null}
                 <Text style={styles.excerpt} numberOfLines={2}>{r.excerpt}</Text>
                 <View style={styles.metaRow}>
-                  <View style={[styles.pill, { backgroundColor: colors.red + '22' }]}>
-                    <Text style={[styles.pillText, { color: colors.red }]}>{r.severity.toUpperCase()}</Text>
+                  <View style={[styles.pill, { backgroundColor: accent + '22' }]}>
+                    <Text style={[styles.pillText, { color: accent }]}>
+                      {isFeedback ? 'FEEDBACK' : r.severity.toUpperCase()}
+                    </Text>
                   </View>
                   <Text style={styles.metaText}>{new Date(r.created_at).toLocaleString()}</Text>
                 </View>
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
             </TouchableOpacity>
-          ))}
+            );
+          })}
         </ScrollView>
       )}
     </SafeAreaView>
@@ -172,6 +195,8 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   rowUnviewed: { borderColor: colors.red, backgroundColor: colors.red + '10' },
+  rowUnviewedGold: { borderColor: '#FFD700', backgroundColor: '#FFD70010' },
+  starsRow: { fontSize: 14, fontWeight: '900', marginTop: 4, letterSpacing: 1 },
   icon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
   name: { color: colors.text, fontWeight: '900', fontSize: 14 },
   email: { color: colors.textMuted, fontSize: 11, marginTop: 1 },

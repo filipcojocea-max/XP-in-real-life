@@ -334,6 +334,22 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
+        {/* Send Feedback to the Creator — pings the admin notification bell */}
+        <TouchableOpacity
+          testID="profile-feedback-btn"
+          style={styles.actionRow}
+          onPress={() => router.push('/feedback' as any)}
+        >
+          <View style={[styles.actionIcon, { backgroundColor: '#FFD70022', borderColor: '#FFD70066' }]}>
+            <Ionicons name="chatbubbles" size={18} color="#FFD700" />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.actionTitle, { color: '#FFD700' }]}>Send Feedback</Text>
+            <Text style={styles.actionDesc}>Rate the app & message the creator directly</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
         {/* Friends+ — social discovery */}
         <TouchableOpacity
           testID="profile-friends-btn"

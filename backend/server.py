@@ -6978,6 +6978,34 @@ async def feedback_post(
         {"_id": user_id},
         {"$set": {"feedback_submitted_at": now_iso()}},
     )
+    # ── Notify the Creator (admin) by adding an entry to admin_reports
+    # so it shows up in the Creator's notification bell + /admin/reports
+    # inbox alongside abuse reports. We use a distinct kind="feedback"
+    # so the UI can render it differently (stars instead of red flag).
+    try:
+        prof = await db.profile.find_one({"_id": user_id}) or {}
+        user_doc = await db.users.find_one({"_id": user_id}) or {}
+        stars = "★" * rating + "☆" * (5 - rating)
+        excerpt_str = text if text else "(no comment)"
+        await db.admin_reports.insert_one({
+            "id": str(uuid.uuid4()),
+            "reported_user_id": user_id,
+            "reported_name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "reported_email": user_doc.get("email", ""),
+            "kind": "feedback",
+            "severity": "info",
+            "rating": rating,
+            "stars": stars,
+            "excerpt": excerpt_str[:500],
+            "reason": f"In-app feedback ({rating}/5 stars)" + (f" · Level {level_at}" if level_at else ""),
+            "level_at_submit": level_at,
+            "platform": platform_str,
+            "created_at": now_iso(),
+            "viewed_at": None,
+            "dismissed_at": None,
+        })
+    except Exception as e:
+        logger.warning(f"[feedback] admin notify failed: {e}")
     return {"saved": True, "id": doc["_id"]}
 
 

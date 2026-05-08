@@ -18,6 +18,26 @@ import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
 import { LevelUpReviewModal } from '../src/components/LevelUpReviewModal';
 import { useLevelUpDetector } from '../src/hooks/useLevelUpDetector';
 
+/**
+ * LevelUpPromptHost — wires the level-up detector hook to the modal.
+ * Mounted inside <AuthGate> so it only runs when there's a signed-in
+ * user (the hook itself no-ops when `user` is falsy, but mounting it
+ * inside the gate also keeps the polling off the auth screens).
+ */
+function LevelUpPromptHost() {
+  const { pending, clearPending } = useLevelUpDetector();
+  if (!pending) return null;
+  return (
+    <LevelUpReviewModal
+      visible
+      level={pending.level}
+      hasSubmittedFeedback={pending.hasSubmittedFeedback}
+      hasClickedPlayStoreReview={pending.hasClickedPlayStoreReview}
+      onClose={() => clearPending()}
+    />
+  );
+}
+
 // Keep the splash screen visible only until the JS bundle has finished
 // evaluating the root component. Without this we can't predictably
 // dismiss it ourselves and users on slow devices see a too-long splash
@@ -164,6 +184,7 @@ export default function RootLayout() {
               <Stack.Screen name="library-catalog" />
               <Stack.Screen name="messages" />
               <Stack.Screen name="admin" />
+              <Stack.Screen name="feedback" />
             </Stack>
             {/* Bottom 40-px swipe-up reveal target for Immersive Mode. */}
             <RevealZone />
