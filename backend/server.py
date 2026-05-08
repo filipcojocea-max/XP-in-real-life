@@ -7158,6 +7158,230 @@ async def library_ratings_post(
     }
 
 
+# ═══════════════════ Library+ Mini-App Pricing & Purchases ═══════════
+# Creator can:
+#   • set a price + currency + external purchase URL (Ko-fi/Stripe) per app
+#   • add a discount (% off, time-limited) that auto-expires
+#   • free apps display "FREE" badge (price=0 means free; default for all)
+#
+# Users (non-Creator):
+#   • see "FREE" or the current price (with strikethrough if discounted)
+#   • tapping a priced/locked app opens a Buy modal that links externally
+#   • after returning, they self-attest "I purchased it" → unlock for life
+#
+# Storage:
+#   • db.library_pricing  — one row per app_id (upsert)
+#       {_id, app_id, price (float), currency (str), purchase_url (str),
+#        discount_percent (int 0..100), discount_starts_at (iso), discount_ends_at (iso),
+#        updated_at}
+#   • db.library_purchases — one row per (user_id, app_id) (upsert, unique pair)
+#       {_id, user_id, app_id, purchased_at, paid_amount, paid_currency}
+# Effective price = price * (1 - discount_percent/100) if discount_active else price.
+# Discount considered active when now() ∈ [starts_at, ends_at].
+
+DEFAULT_PRICE_CURRENCY = "USD"
+SUPPORTED_PRICE_CURRENCIES = ["USD", "EUR", "GBP", "AUD", "CAD", "JPY", "INR", "RON", "CHF", "BRL"]
+
+
+def _pricing_doc_to_pub(doc: dict | None, app_id: str, purchased: bool) -> dict:
+    """Translate the stored pricing doc into the public payload the
+    frontend wants (computes effective price + discount-active flag)."""
+    if not doc:
+        return {
+            "app_id": app_id,
+            "price": 0.0,
+            "currency": DEFAULT_PRICE_CURRENCY,
+            "purchase_url": "",
+            "discount_percent": 0,
+            "discount_active": False,
+            "discount_starts_at": None,
+            "discount_ends_at": None,
+            "effective_price": 0.0,
+            "is_free": True,
+            "purchased": purchased,
+        }
+    try:
+        price = float(doc.get("price") or 0.0)
+    except (TypeError, ValueError):
+        price = 0.0
+    currency = (doc.get("currency") or DEFAULT_PRICE_CURRENCY).upper()
+    try:
+        pct = int(doc.get("discount_percent") or 0)
+    except (TypeError, ValueError):
+        pct = 0
+    starts = doc.get("discount_starts_at")
+    ends = doc.get("discount_ends_at")
+    discount_active = False
+    if pct > 0 and starts and ends:
+        try:
+            now = datetime.utcnow()
+            s = datetime.fromisoformat(starts.replace("Z", "+00:00")).replace(tzinfo=None)
+            e = datetime.fromisoformat(ends.replace("Z", "+00:00")).replace(tzinfo=None)
+            discount_active = s <= now <= e
+        except Exception:
+            discount_active = False
+    eff = price * (1 - pct / 100.0) if discount_active and price > 0 else price
+    eff = round(max(0.0, eff), 2)
+    return {
+        "app_id": app_id,
+        "price": round(price, 2),
+        "currency": currency,
+        "purchase_url": doc.get("purchase_url") or "",
+        "discount_percent": pct if discount_active else 0,
+        "discount_active": discount_active,
+        "discount_starts_at": starts if discount_active else None,
+        "discount_ends_at": ends if discount_active else None,
+        "effective_price": eff,
+        "is_free": price <= 0.0,
+        "purchased": purchased,
+    }
+
+
+@api_router.get("/library/pricing")
+async def library_pricing_get(user_id: str = Depends(get_user_or_legacy)):
+    """Returns pricing config for all 4 mini-apps + per-user purchase
+    status. Used by Library+ to render FREE pills, price tags with
+    optional strikethrough, and lock/unlock state."""
+    rows = await db.library_pricing.find({}, {"_id": 0}).to_list(100)
+    by_app = {r.get("app_id"): r for r in rows if r.get("app_id") in LIBRARY_APP_IDS}
+    purchased_rows = await db.library_purchases.find(
+        {"user_id": user_id}, {"_id": 0, "app_id": 1}
+    ).to_list(100)
+    purchased_set = {p.get("app_id") for p in purchased_rows}
+    out = {}
+    for aid in LIBRARY_APP_IDS:
+        out[aid] = _pricing_doc_to_pub(by_app.get(aid), aid, aid in purchased_set)
+    return {"pricing": out, "currencies": SUPPORTED_PRICE_CURRENCIES}
+
+
+@api_router.post("/library/pricing/{app_id}")
+async def library_pricing_set(
+    app_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Creator-only: set price + currency + purchase URL for a mini-app.
+    Pass price=0 to mark the app as free. Currency must be one of
+    SUPPORTED_PRICE_CURRENCIES. purchase_url is optional but strongly
+    recommended (Ko-fi / Stripe checkout link)."""
+    if app_id not in LIBRARY_APP_IDS:
+        raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator only.")
+    try:
+        price = float(body.get("price") if body.get("price") is not None else 0.0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "price must be a number")
+    if price < 0 or price > 100000:
+        raise HTTPException(400, "price out of range (0..100000)")
+    currency = (body.get("currency") or DEFAULT_PRICE_CURRENCY).upper()
+    if currency not in SUPPORTED_PRICE_CURRENCIES:
+        raise HTTPException(400, f"currency must be one of {SUPPORTED_PRICE_CURRENCIES}")
+    purchase_url = (body.get("purchase_url") or "").strip()[:500]
+    if purchase_url and not (purchase_url.startswith("http://") or purchase_url.startswith("https://")):
+        raise HTTPException(400, "purchase_url must start with http:// or https://")
+    await db.library_pricing.update_one(
+        {"app_id": app_id},
+        {
+            "$set": {
+                "app_id": app_id,
+                "price": round(price, 2),
+                "currency": currency,
+                "purchase_url": purchase_url,
+                "updated_at": now_iso(),
+            },
+            "$setOnInsert": {"_id": str(uuid.uuid4())},
+        },
+        upsert=True,
+    )
+    doc = await db.library_pricing.find_one({"app_id": app_id}, {"_id": 0})
+    return {"saved": True, "pricing": _pricing_doc_to_pub(doc, app_id, False)}
+
+
+@api_router.post("/library/pricing/{app_id}/discount")
+async def library_pricing_discount(
+    app_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Creator-only: add or clear a time-limited discount on a mini-app.
+    Body:
+      { "percent": 50, "duration_value": 7, "duration_unit": "days" }   # set
+      { "percent": 0 }                                                  # clear
+    duration_unit ∈ {days, weeks, months}.
+    """
+    if app_id not in LIBRARY_APP_IDS:
+        raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator only.")
+    try:
+        pct = int(body.get("percent") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "percent must be an integer 0..99")
+    if pct < 0 or pct > 99:
+        raise HTTPException(400, "percent must be 0..99")
+    set_doc: dict = {"app_id": app_id, "updated_at": now_iso()}
+    if pct == 0:
+        set_doc["discount_percent"] = 0
+        set_doc["discount_starts_at"] = None
+        set_doc["discount_ends_at"] = None
+    else:
+        try:
+            dur_val = int(body.get("duration_value") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "duration_value must be a positive integer")
+        if dur_val <= 0 or dur_val > 1000:
+            raise HTTPException(400, "duration_value must be 1..1000")
+        unit = (body.get("duration_unit") or "days").lower().strip()
+        if unit not in ("days", "weeks", "months"):
+            raise HTTPException(400, "duration_unit must be days|weeks|months")
+        days = {"days": 1, "weeks": 7, "months": 30}[unit] * dur_val
+        now = datetime.utcnow()
+        starts = now.isoformat()
+        ends = (now + timedelta(days=days)).isoformat()
+        set_doc["discount_percent"] = pct
+        set_doc["discount_starts_at"] = starts
+        set_doc["discount_ends_at"] = ends
+    await db.library_pricing.update_one(
+        {"app_id": app_id},
+        {"$set": set_doc, "$setOnInsert": {"_id": str(uuid.uuid4())}},
+        upsert=True,
+    )
+    doc = await db.library_pricing.find_one({"app_id": app_id}, {"_id": 0})
+    return {"saved": True, "pricing": _pricing_doc_to_pub(doc, app_id, False)}
+
+
+@api_router.post("/library/purchase/{app_id}")
+async def library_purchase_record(
+    app_id: str,
+    body: dict = Body(default=None),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Records that the caller has purchased the mini-app. Trust-based:
+    after returning from the external payment URL the frontend POSTs
+    here. Idempotent — re-POSTing returns already_owned=true."""
+    if app_id not in LIBRARY_APP_IDS:
+        raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
+    pricing_doc = await db.library_pricing.find_one({"app_id": app_id}, {"_id": 0})
+    pricing_pub = _pricing_doc_to_pub(pricing_doc, app_id, False)
+    # Free apps don't need a purchase record — just no-op.
+    if pricing_pub["is_free"]:
+        return {"saved": False, "already_owned": True, "is_free": True}
+    existing = await db.library_purchases.find_one({"user_id": user_id, "app_id": app_id})
+    if existing:
+        return {"saved": True, "already_owned": True, "is_free": False}
+    await db.library_purchases.insert_one({
+        "_id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "app_id": app_id,
+        "purchased_at": now_iso(),
+        "paid_amount": pricing_pub["effective_price"],
+        "paid_currency": pricing_pub["currency"],
+    })
+    return {"saved": True, "already_owned": False, "is_free": False}
+
+
+# ════════════════════════════════════════════════════════════════════
 # ── Server-side notification scheduler ──────────────────────────────
 # 4× daily motivational pushes + 3× daily Spot-the-Object surprises
 # + 2-minute multiplayer-invite expiry sweep. Lives in

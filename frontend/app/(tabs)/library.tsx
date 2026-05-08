@@ -17,6 +17,14 @@ import {
   RateMiniAppModal,
   MiniAppRatingStats,
 } from '../../src/components/MiniAppRating';
+import {
+  PricingBadge,
+  CreatorPricingMenu,
+  SetPriceModal,
+  SetDiscountModal,
+  BuyAppModal,
+} from '../../src/components/LibraryPricing';
+import type { LibraryAppPricing } from '../../src/api';
 
 type Tab = 'add' | 'mine';
 
@@ -54,6 +62,65 @@ export default function Library() {
   const [rateTarget, setRateTarget] = useState<MiniAppId | null>(null);
   const [submittingRating, setSubmittingRating] = useState(false);
 
+  // ── Pricing state ───────────────────────────────────────────────
+  const EMPTY_PRICING: Record<MiniAppId, LibraryAppPricing | null> = {
+    sleep: null, challenges: null, spot: null, confidence: null,
+  };
+  const [pricing, setPricing] = useState<Record<MiniAppId, LibraryAppPricing | null>>(EMPTY_PRICING);
+  const [currencies, setCurrencies] = useState<string[]>(['USD', 'EUR', 'GBP', 'AUD', 'CAD']);
+  const [creatorMenuApp, setCreatorMenuApp] = useState<MiniAppId | null>(null);
+  const [setPriceFor, setSetPriceFor] = useState<MiniAppId | null>(null);
+  const [setDiscountFor, setSetDiscountFor] = useState<MiniAppId | null>(null);
+  const [buyAppFor, setBuyAppFor] = useState<MiniAppId | null>(null);
+
+  const loadPricing = useCallback(async () => {
+    try {
+      const r = await api.libraryPricing();
+      setPricing({
+        sleep: r.pricing.sleep,
+        challenges: r.pricing.challenges,
+        spot: r.pricing.spot,
+        confidence: r.pricing.confidence,
+      });
+      if (Array.isArray(r.currencies) && r.currencies.length) setCurrencies(r.currencies);
+    } catch (e) {
+      console.log('[library] pricing load', e);
+    }
+  }, []);
+
+  // True when the user can OPEN this mini-app: free OR purchased OR Creator.
+  const canOpenApp = (id: MiniAppId): boolean => {
+    if (isAdmin) return true;
+    const p = pricing[id];
+    if (!p) return true; // pricing not yet loaded — treat as free fallback
+    return p.is_free || p.purchased;
+  };
+
+  // Tap handler for cards. Routes to mini-app if unlocked, otherwise
+  // opens the BuyAppModal so the user can purchase / unlock.
+  const handleCardTap = (id: MiniAppId, openRoute: string) => {
+    if (canOpenApp(id)) {
+      router.push(openRoute as any);
+      return;
+    }
+    setBuyAppFor(id);
+  };
+
+  // Creator tap on the bottom-left price badge → choose between
+  // "Change price" and "Add discount". stops bubble propagation
+  // (achieved by calling the badge's onCreatorTap from inside its
+  // own TouchableOpacity which doesn't forward the press to parent).
+  const handleCreatorBadgeTap = (id: MiniAppId) => {
+    setCreatorMenuApp(id);
+  };
+
+  const onPricingSaved = (next: LibraryAppPricing) => {
+    setPricing((prev) => ({ ...prev, [next.app_id]: next }));
+  };
+  const onPurchaseConfirmed = () => {
+    loadPricing();
+  };
+
   const checkAdmin = useCallback(async () => {
     try {
       const p = await api.getProfile();
@@ -76,9 +143,9 @@ export default function Library() {
     }
   }, []);
 
-  useEffect(() => { checkAdmin(); loadRatings(); }, [checkAdmin, loadRatings]);
+  useEffect(() => { checkAdmin(); loadRatings(); loadPricing(); }, [checkAdmin, loadRatings, loadPricing]);
   useFocusEffect(
-    React.useCallback(() => { checkAdmin(); loadRatings(); }, [checkAdmin, loadRatings])
+    React.useCallback(() => { checkAdmin(); loadRatings(); loadPricing(); }, [checkAdmin, loadRatings, loadPricing])
   );
 
   const submitRating = async (stars: number) => {
@@ -193,7 +260,7 @@ export default function Library() {
             <TouchableOpacity
               testID="library-card-sleep"
               activeOpacity={0.85}
-              onPress={() => router.push('/sleep' as any)}
+              onPress={() => handleCardTap('sleep', '/sleep')}
               style={styles.featureCard}
             >
               <View style={styles.featureGlow} />
@@ -239,13 +306,21 @@ export default function Library() {
                   </View>
                 </View>
               </View>
+              <View style={styles.pricingCorner} pointerEvents="box-none">
+                <PricingBadge
+                  pricing={pricing.sleep}
+                  isAdmin={isAdmin}
+                  onCreatorTap={() => handleCreatorBadgeTap('sleep')}
+                  testID="pricing-badge-sleep"
+                />
+              </View>
             </TouchableOpacity>
 
             {/* Challenge Tasks mini-app — featured */}
             <TouchableOpacity
               testID="library-card-challenges"
               activeOpacity={0.85}
-              onPress={() => router.push('/challenges' as any)}
+              onPress={() => handleCardTap('challenges', '/challenges')}
               style={[styles.featureCard, { marginTop: spacing.md, borderColor: colors.green + '55' }]}
             >
               <View style={[styles.featureGlow, { backgroundColor: colors.green + '22' }]} />
@@ -291,13 +366,21 @@ export default function Library() {
                   </View>
                 </View>
               </View>
+              <View style={styles.pricingCorner} pointerEvents="box-none">
+                <PricingBadge
+                  pricing={pricing.challenges}
+                  isAdmin={isAdmin}
+                  onCreatorTap={() => handleCreatorBadgeTap('challenges')}
+                  testID="pricing-badge-challenges"
+                />
+              </View>
             </TouchableOpacity>
 
             {/* Spot the Object mini-app — featured */}
             <TouchableOpacity
               testID="library-card-spot"
               activeOpacity={0.85}
-              onPress={() => router.push('/spot' as any)}
+              onPress={() => handleCardTap('spot', '/spot')}
               style={[styles.featureCard, { marginTop: spacing.md, borderColor: colors.amber + '55' }]}
             >
               <View style={[styles.featureGlow, { backgroundColor: colors.amber + '22' }]} />
@@ -343,12 +426,20 @@ export default function Library() {
                   </View>
                 </View>
               </View>
+              <View style={styles.pricingCorner} pointerEvents="box-none">
+                <PricingBadge
+                  pricing={pricing.spot}
+                  isAdmin={isAdmin}
+                  onCreatorTap={() => handleCreatorBadgeTap('spot')}
+                  testID="pricing-badge-spot"
+                />
+              </View>
             </TouchableOpacity>
             {/* Build Self-Confidence mini-app — featured */}
             <TouchableOpacity
               testID="library-card-confidence"
               activeOpacity={0.85}
-              onPress={() => router.push('/confidence' as any)}
+              onPress={() => handleCardTap('confidence', '/confidence')}
               style={[styles.featureCard, { marginTop: spacing.md, borderColor: '#FFD70055' }]}
             >
               <View style={[styles.featureGlow, { backgroundColor: '#FFD70022' }]} />
@@ -393,6 +484,14 @@ export default function Library() {
                     <Ionicons name="arrow-forward" size={14} color={colors.bg} />
                   </View>
                 </View>
+              </View>
+              <View style={styles.pricingCorner} pointerEvents="box-none">
+                <PricingBadge
+                  pricing={pricing.confidence}
+                  isAdmin={isAdmin}
+                  onCreatorTap={() => handleCreatorBadgeTap('confidence')}
+                  testID="pricing-badge-confidence"
+                />
               </View>
             </TouchableOpacity>
           </View>
@@ -480,6 +579,54 @@ export default function Library() {
         submitting={submittingRating}
         onCancel={() => setRateTarget(null)}
         onSubmit={submitRating}
+      />
+
+      {/* Creator-only: pricing menu + change-price + add-discount sheets */}
+      <CreatorPricingMenu
+        visible={creatorMenuApp !== null}
+        appId={creatorMenuApp}
+        pricing={creatorMenuApp ? pricing[creatorMenuApp] : null}
+        onClose={() => setCreatorMenuApp(null)}
+        onChoose={(which) => {
+          const id = creatorMenuApp;
+          setCreatorMenuApp(null);
+          if (which === 'price') setSetPriceFor(id);
+          else setSetDiscountFor(id);
+        }}
+      />
+      <SetPriceModal
+        visible={setPriceFor !== null}
+        appId={setPriceFor}
+        initial={setPriceFor ? pricing[setPriceFor] : null}
+        currencies={currencies}
+        onClose={() => setSetPriceFor(null)}
+        onSaved={onPricingSaved}
+      />
+      <SetDiscountModal
+        visible={setDiscountFor !== null}
+        appId={setDiscountFor}
+        initial={setDiscountFor ? pricing[setDiscountFor] : null}
+        onClose={() => setSetDiscountFor(null)}
+        onSaved={onPricingSaved}
+      />
+      {/* Buy modal — opens when a non-Creator taps a priced/un-purchased card */}
+      <BuyAppModal
+        visible={buyAppFor !== null}
+        appId={buyAppFor}
+        pricing={buyAppFor ? pricing[buyAppFor] : null}
+        description={
+          buyAppFor === 'sleep'
+            ? 'Smart questionnaire → personalized routine. Chat with Luna, your CBT-I sleep coach.'
+            : buyAppFor === 'challenges'
+              ? 'A new uncomfortable challenge every day. Earn XP for real growth.'
+              : buyAppFor === 'spot'
+                ? 'AI-verified photo challenges. Solo + multiplayer with friends.'
+                : buyAppFor === 'confidence'
+                  ? 'Daily speaking + posture drills, gratitude prompts, and an AI Style Coach.'
+                  : ''
+        }
+        onClose={() => setBuyAppFor(null)}
+        onPurchased={onPurchaseConfirmed}
       />
     </SafeAreaView>
   );
@@ -608,6 +755,14 @@ const styles = StyleSheet.create({
     backgroundColor: colors.cyan + '22',
   },
   featureRow: { flexDirection: 'row', gap: spacing.md, alignItems: 'flex-start' },
+  pricingCorner: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
   featureIcon: {
     width: 64,
     height: 64,

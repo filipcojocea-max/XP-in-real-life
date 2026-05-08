@@ -772,6 +772,50 @@ export const api = {
       body: JSON.stringify({ app_id, stars }),
     }),
 
+  // ──────── Library+ Mini-App Pricing & Purchases ────────
+  // Returns price/currency/discount info for all 4 mini-apps + a
+  // per-user `purchased` flag for each. Free apps (price=0) ALWAYS
+  // surface as `is_free:true`; the app card renders a green FREE pill
+  // for them and a price tag (with optional strikethrough) otherwise.
+  libraryPricing: () =>
+    req<{
+      pricing: Record<
+        'sleep' | 'challenges' | 'spot' | 'confidence',
+        LibraryAppPricing
+      >;
+      currencies: string[];
+    }>('/library/pricing'),
+
+  // Creator-only: set price + currency + external purchase URL on a
+  // mini-app. price=0 means free.
+  libraryPricingSet: (
+    app_id: 'sleep' | 'challenges' | 'spot' | 'confidence',
+    payload: { price: number; currency: string; purchase_url?: string },
+  ) =>
+    req<{ saved: boolean; pricing: LibraryAppPricing }>(`/library/pricing/${app_id}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // Creator-only: add or clear a time-limited discount on a mini-app.
+  // percent=0 clears any active discount.
+  libraryPricingDiscount: (
+    app_id: 'sleep' | 'challenges' | 'spot' | 'confidence',
+    payload: { percent: number; duration_value?: number; duration_unit?: 'days' | 'weeks' | 'months' },
+  ) =>
+    req<{ saved: boolean; pricing: LibraryAppPricing }>(`/library/pricing/${app_id}/discount`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // Records a user's purchase of a priced mini-app after they've
+  // returned from the external checkout URL. Idempotent.
+  libraryPurchase: (app_id: 'sleep' | 'challenges' | 'spot' | 'confidence') =>
+    req<{ saved: boolean; already_owned: boolean; is_free: boolean }>(
+      `/library/purchase/${app_id}`,
+      { method: 'POST' },
+    ),
+
   // ──────── In-app feedback + Level-up review prompts ────────
   // POST /feedback — store the user's rating + free-text. Used both
   // by the level-up modal AND the standalone Settings → Feedback
@@ -1297,6 +1341,20 @@ export type AdminReport = {
   created_at: string;
   viewed_at: string | null;
   dismissed_at: string | null;
+};
+
+export type LibraryAppPricing = {
+  app_id: 'sleep' | 'challenges' | 'spot' | 'confidence';
+  price: number;
+  currency: string;
+  purchase_url: string;
+  discount_percent: number;
+  discount_active: boolean;
+  discount_starts_at: string | null;
+  discount_ends_at: string | null;
+  effective_price: number;
+  is_free: boolean;
+  purchased: boolean;
 };
 
 
