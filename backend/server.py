@@ -2643,8 +2643,13 @@ async def challenge_complete(
         await db.profile.update_one(
             {"_id": user_id}, {"$inc": {"total_xp": awarded_xp}}
         )
-        # Challenge complete → keep streak alive.
+        # Challenge complete → keep streak alive AND surface on the
+        # Progress-tab charts (was previously invisible there because
+        # mini-app challenge XP bypassed the task_logs collection).
         await _bump_streak_for_xp(user_id)
+        await _log_xp_to_charts(
+            user_id, awarded_xp, source="challenge_complete", focus_area="mindset",
+        )
     await db.challenge_state.update_one(
         {"user_id": user_id, "date": today},
         {"$set": {
