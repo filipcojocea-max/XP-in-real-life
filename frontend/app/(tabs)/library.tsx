@@ -395,25 +395,6 @@ export default function Library() {
                 </View>
               </View>
             </TouchableOpacity>
-            <Text style={styles.sectionLabel}>Coming soon</Text>
-            <View style={styles.previewGrid}>
-              {[
-                { icon: 'fitness', label: 'Posture Coach' },
-                { icon: 'flame', label: 'Anxiety Reset' },
-                { icon: 'heart', label: 'Affirmations' },
-                { icon: 'restaurant', label: 'Nutrition' },
-              ].map((p, i) => (
-                <View key={i} style={styles.lockedCard}>
-                  <View style={styles.lockedIcon}>
-                    <Ionicons name={p.icon as any} size={24} color={colors.textMuted} />
-                  </View>
-                  <View style={styles.lockBadge}>
-                    <Ionicons name="lock-closed" size={10} color={colors.textMuted} />
-                  </View>
-                  <Text style={styles.lockedText}>{p.label}</Text>
-                </View>
-              ))}
-            </View>
           </View>
         ) : (
           <View style={{ gap: spacing.sm }}>
@@ -577,47 +558,6 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     paddingHorizontal: spacing.md,
   },
-
-  previewGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.xl,
-    justifyContent: 'center',
-  },
-  lockedCard: {
-    width: '46%',
-    padding: spacing.md,
-    borderRadius: radii.md,
-    backgroundColor: colors.surfaceGlass,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    position: 'relative',
-  },
-  lockedIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.sm,
-  },
-  lockBadge: {
-    position: 'absolute',
-    top: 10,
-    right: 10,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  lockedText: { color: colors.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
 
   notifyBadge: {
     flexDirection: 'row',
