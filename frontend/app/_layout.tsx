@@ -17,6 +17,7 @@ import { SuspensionAlertModal } from '../src/components/SuspensionAlertModal';
 import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
 import { LevelUpReviewModal } from '../src/components/LevelUpReviewModal';
 import { useLevelUpDetector } from '../src/hooks/useLevelUpDetector';
+import { StripeReturnHandler } from '../src/StripeReturnHandler';
 
 /**
  * LevelUpPromptHost — wires the level-up detector hook to the modal.
@@ -213,6 +214,11 @@ export default function RootLayout() {
                 milestone. Self-contained: detector hook polls profile,
                 modal handles store-review CTA + tip link + feedback. */}
             <LevelUpPromptHost />
+            {/* Listens for the deep-link from /api/payments/return after
+                Stripe Checkout, verifies the session, and surfaces a
+                confirmation alert if the webhook hasn't already
+                inserted the OWNED row. */}
+            <StripeReturnHandler />
           </AuthGate>
         </View>
       </ImmersiveProvider>

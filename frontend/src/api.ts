@@ -786,6 +786,32 @@ export const api = {
       currencies: string[];
     }>('/library/pricing'),
 
+  // Real-money purchases via Stripe Checkout. The backend looks up
+  // server-side pricing (so the client can never tamper with the
+  // amount) and returns a hosted Stripe Checkout URL the app opens
+  // in the system browser. Webhook flips `purchased=true` upon paid.
+  paymentsCreateCheckout: (
+    app_id: 'sleep' | 'challenges' | 'spot' | 'confidence',
+  ) =>
+    req<{
+      session_id: string;
+      checkout_url: string;
+      amount: number;
+      currency: string;
+      effective_price: number;
+      app_id: string;
+    }>('/payments/create-checkout', {
+      method: 'POST',
+      body: JSON.stringify({ app_id }),
+    }),
+
+  // Polled after returning from Stripe — finalises OWNED state if the
+  // webhook hasn't arrived yet (e.g. whsec not configured locally).
+  paymentsVerifySession: (session_id: string) =>
+    req<{ paid: boolean; session_id: string; newly_inserted?: boolean; app_id?: string }>(
+      `/payments/session/${encodeURIComponent(session_id)}/verify`,
+    ),
+
   // Creator-only: set price + currency + external purchase URL on a
   // mini-app. price=0 means free.
   libraryPricingSet: (

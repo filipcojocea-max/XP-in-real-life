@@ -41,6 +41,8 @@ import {
   Platform,
   ScrollView,
   KeyboardAvoidingView,
+  Animated as RNAnimated,
+  Easing as RNEasing,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -749,6 +751,9 @@ export function BuyAppModal({
   onClose: () => void;
   onPurchased: () => void;
 }) {
+  const [redirecting, setRedirecting] = useState(false);
+  const [redirectError, setRedirectError] = useState<string | null>(null);
+  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [openedCheckout, setOpenedCheckout] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -757,22 +762,46 @@ export function BuyAppModal({
     if (!visible) {
       setOpenedCheckout(false);
       setErr(null);
+      setRedirecting(false);
+      setRedirectError(null);
+      setPendingSessionId(null);
     }
   }, [visible]);
 
   if (!appId || !pricing) return null;
 
   const openCheckout = async () => {
-    if (!pricing.purchase_url) {
-      setErr('No checkout link configured yet — please ask the Creator to set one.');
-      return;
-    }
     Haptics.selectionAsync().catch(() => {});
+    setRedirecting(true);
+    setRedirectError(null);
+    setErr(null);
     try {
-      await Linking.openURL(pricing.purchase_url);
+      // Server-side Stripe Checkout Session — server reads the price
+      // from library_pricing so the user can never tamper with it.
+      const r = await api.paymentsCreateCheckout(appId);
+      setPendingSessionId(r.session_id);
+      // Tiny artificial delay so the "Redirecting" overlay reads as
+      // intentional and premium rather than a flash of UI.
+      await new Promise((res) => setTimeout(res, 700));
+      const ok = await Linking.openURL(r.checkout_url).then(() => true).catch(() => false);
+      if (!ok) {
+        setRedirectError('Could not open the secure checkout window. Please try again.');
+        setRedirecting(false);
+        return;
+      }
+      setRedirecting(false);
       setOpenedCheckout(true);
-    } catch (e) {
-      setErr('Could not open the checkout link.');
+    } catch (e: any) {
+      setRedirecting(false);
+      const msg = String(e?.message || e);
+      setRedirectError(msg.includes('already own') ? 'You already own this mini-app.' : msg);
+      // If pricing.purchase_url is set as a Ko-fi fallback, allow that path too:
+      if (pricing.purchase_url) {
+        try {
+          await Linking.openURL(pricing.purchase_url);
+          setOpenedCheckout(true);
+        } catch {}
+      }
     }
   };
 
@@ -780,6 +809,21 @@ export function BuyAppModal({
     setConfirming(true);
     setErr(null);
     try {
+      // First: try to verify the Stripe session directly (catches the
+      // case where the webhook hasn't been set up yet — paid sessions
+      // get inserted into library_purchases here).
+      if (pendingSessionId) {
+        try {
+          const v = await api.paymentsVerifySession(pendingSessionId);
+          if (v.paid) {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+            onPurchased();
+            onClose();
+            return;
+          }
+        } catch {}
+      }
+      // Fallback: trust-based purchase record (legacy Ko-fi flow).
       await api.libraryPurchase(appId);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       onPurchased();
@@ -814,26 +858,31 @@ export function BuyAppModal({
                   </View>
                 </View>
               ) : (
-                <Text style={buyStyles.priceBig}>{formatPrice(pricing.price, pricing.currency)}</Text>
+                <Text style={buyStyles.priceBig}>{formatPrice(pricing.effective_price, pricing.currency)}</Text>
               )}
               <Text style={buyStyles.priceFoot}>One-time purchase · Yours forever</Text>
+              <View style={buyStyles.stripeRow}>
+                <Ionicons name="shield-checkmark" size={11} color={colors.green} />
+                <Text style={buyStyles.stripeText}>Secure checkout via Stripe</Text>
+              </View>
             </View>
 
             {!openedCheckout ? (
               <TouchableOpacity
                 onPress={openCheckout}
-                style={[buyStyles.btn, buyStyles.btnPrimary]}
+                disabled={redirecting}
+                style={[buyStyles.btn, buyStyles.btnPrimary, redirecting && { opacity: 0.6 }]}
                 activeOpacity={0.85}
                 testID="buy-open-checkout"
               >
                 <Ionicons name="card" size={18} color={colors.bg} />
-                <Text style={buyStyles.btnPrimaryText}>Open checkout</Text>
-                <Ionicons name="open-outline" size={14} color={colors.bg} />
+                <Text style={buyStyles.btnPrimaryText}>{redirecting ? 'Redirecting…' : 'Buy now'}</Text>
+                <Ionicons name="arrow-forward" size={14} color={colors.bg} />
               </TouchableOpacity>
             ) : (
               <>
                 <Text style={buyStyles.afterTip}>
-                  Already paid? Tap below to unlock the app for your account.
+                  Already paid? Tap below to verify and unlock instantly.
                 </Text>
                 <TouchableOpacity
                   onPress={confirmPurchased}
@@ -857,15 +906,75 @@ export function BuyAppModal({
               </>
             )}
 
-            {err ? <Text style={buyStyles.errText}>{err}</Text> : null}
+            {(redirectError || err) ? <Text style={buyStyles.errText}>{redirectError || err}</Text> : null}
 
             <TouchableOpacity onPress={onClose} style={buyStyles.cancel} activeOpacity={0.7}>
               <Text style={buyStyles.cancelText}>Maybe later</Text>
             </TouchableOpacity>
           </View>
         </ScrollView>
+
+        {/* ────── Premium Redirecting overlay ────── */}
+        {redirecting ? <CheckoutRedirectingOverlay /> : null}
       </View>
     </Modal>
+  );
+}
+
+/**
+ * Full-screen overlay shown while the backend creates the Stripe
+ * Checkout Session. Branded, animated, and "premium" — sells the
+ * transition as deliberate rather than a flicker.
+ */
+function CheckoutRedirectingOverlay() {
+  const spin = React.useRef(new RNAnimated.Value(0)).current;
+  const pulse = React.useRef(new RNAnimated.Value(0)).current;
+  const [dots, setDots] = useState('');
+
+  React.useEffect(() => {
+    RNAnimated.loop(
+      RNAnimated.timing(spin, { toValue: 1, duration: 1100, useNativeDriver: true, easing: RNEasing.linear }),
+    ).start();
+    RNAnimated.loop(
+      RNAnimated.sequence([
+        RNAnimated.timing(pulse, { toValue: 1, duration: 800, useNativeDriver: true }),
+        RNAnimated.timing(pulse, { toValue: 0, duration: 800, useNativeDriver: true }),
+      ]),
+    ).start();
+    const t = setInterval(() => {
+      setDots((d) => (d.length >= 3 ? '' : d + '.'));
+    }, 350);
+    return () => clearInterval(t);
+  }, [spin, pulse]);
+
+  const rotate = spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const scale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] });
+  const opacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.75] });
+
+  return (
+    <View pointerEvents="auto" style={overlayStyles.root} testID="redirecting-overlay">
+      <View style={overlayStyles.center}>
+        <View style={overlayStyles.spinnerWrap}>
+          <RNAnimated.View
+            style={[
+              overlayStyles.glow,
+              { opacity, transform: [{ scale }] },
+            ]}
+          />
+          <RNAnimated.View style={[overlayStyles.spinner, { transform: [{ rotate }] }]} />
+          <View style={overlayStyles.lockChip}>
+            <Ionicons name="lock-closed" size={20} color={colors.green} />
+          </View>
+        </View>
+        <Text style={overlayStyles.brand}>XP IN REAL LIFE</Text>
+        <Text style={overlayStyles.title}>Redirecting to secure checkout{dots}</Text>
+        <Text style={overlayStyles.sub}>Powered by Stripe · 256-bit encrypted</Text>
+        <View style={overlayStyles.tipRow}>
+          <Ionicons name="shield-checkmark" size={12} color={colors.green} />
+          <Text style={overlayStyles.tipText}>Your card details never touch our servers.</Text>
+        </View>
+      </View>
+    </View>
   );
 }
 
@@ -900,6 +1009,12 @@ const buyStyles = StyleSheet.create({
   },
   discText: { color: colors.red, fontSize: 10, fontWeight: '900', letterSpacing: 0.5 },
   priceFoot: { color: colors.textMuted, fontSize: 11, marginTop: 6 },
+  stripeRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6,
+    backgroundColor: colors.green + '15', borderWidth: 1, borderColor: colors.green + '55',
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
+  },
+  stripeText: { color: colors.green, fontSize: 10, fontWeight: '900', letterSpacing: 0.4 },
 
   btn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
@@ -914,4 +1029,49 @@ const buyStyles = StyleSheet.create({
   errText: { color: colors.red, fontSize: 12, marginTop: 8, textAlign: 'center' },
   cancel: { paddingVertical: 12, alignItems: 'center', marginTop: spacing.sm },
   cancelText: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
+});
+
+// ════════════════════ Redirecting overlay styles ═══════════════════
+const overlayStyles = StyleSheet.create({
+  root: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(5,5,9,0.96)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  center: { alignItems: 'center', justifyContent: 'center', maxWidth: 360 },
+  spinnerWrap: {
+    width: 96, height: 96, alignItems: 'center', justifyContent: 'center',
+    marginBottom: spacing.lg,
+  },
+  glow: {
+    position: 'absolute',
+    width: 96, height: 96, borderRadius: 48,
+    backgroundColor: colors.green + '55',
+  },
+  spinner: {
+    width: 80, height: 80, borderRadius: 40,
+    borderWidth: 4,
+    borderColor: 'rgba(255,255,255,0.08)',
+    borderTopColor: colors.green,
+    borderRightColor: colors.cyan,
+  },
+  lockChip: {
+    position: 'absolute',
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.green + '88',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  brand: { color: colors.green, fontSize: 11, fontWeight: '900', letterSpacing: 3, marginBottom: 6 },
+  title: { color: colors.text, fontSize: 18, fontWeight: '900', textAlign: 'center', letterSpacing: -0.2 },
+  sub: { color: colors.textSecondary, fontSize: 12, marginTop: 8, textAlign: 'center' },
+  tipRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    marginTop: 14, paddingHorizontal: 12, paddingVertical: 6,
+    backgroundColor: colors.green + '10', borderWidth: 1, borderColor: colors.green + '44',
+    borderRadius: 999,
+  },
+  tipText: { color: colors.green, fontSize: 11, fontWeight: '700' },
 });

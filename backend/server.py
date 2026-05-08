@@ -7381,6 +7381,279 @@ async def library_purchase_record(
     return {"saved": True, "already_owned": False, "is_free": False}
 
 
+# ═══════════════════ Stripe Checkout (real payments) ═════════════════
+# Uses server-side Checkout Sessions ONLY (no client SDK). Flow:
+#   1. Frontend calls POST /payments/create-checkout {app_id} →
+#      backend looks up the current effective price from library_pricing
+#      (so the user can never tamper with the amount), creates a Stripe
+#      Checkout Session, embeds {user_id, app_id, anonymous_id} in
+#      session.metadata, and returns the hosted checkout URL.
+#   2. User pays on Stripe. Stripe fires `checkout.session.completed`
+#      webhook → POST /payments/webhook → we verify signature + insert
+#      library_purchases row idempotently (so the next /library/pricing
+#      call returns purchased=true → mini-app unlocks for life).
+#   3. Stripe redirects user back to STRIPE_RETURN_BASE/payments/return
+#      ?status=success&session_id=… → frontend deep-links into the app
+#      and refreshes pricing/ownership.
+#   4. Fallback: GET /payments/session/{session_id}/verify lets the
+#      frontend self-verify if the webhook hasn't arrived yet (e.g.
+#      whsec not configured); we query Stripe directly and insert the
+#      purchase row if payment_status == 'paid'.
+import stripe as _stripe_mod
+
+_stripe_secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
+_stripe_whsec = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+_stripe_return_base = os.getenv("STRIPE_RETURN_BASE", "").strip().rstrip("/")
+if _stripe_secret:
+    _stripe_mod.api_key = _stripe_secret
+    logger.info("[stripe] configured (test mode=%s)", _stripe_secret.startswith("sk_test_"))
+else:
+    logger.warning("[stripe] STRIPE_SECRET_KEY missing — checkout disabled")
+
+# Stripe minor-unit multiplier per ISO-4217 currency (zero-decimal vs. 2-decimal).
+_STRIPE_MINOR_UNITS = {
+    "USD": 100, "EUR": 100, "GBP": 100, "AUD": 100, "CAD": 100,
+    "INR": 100, "RON": 100, "CHF": 100, "BRL": 100,
+    "JPY": 1,  # zero-decimal
+}
+
+
+def _stripe_amount(price: float, currency: str) -> int:
+    mult = _STRIPE_MINOR_UNITS.get(currency.upper())
+    if mult is None:
+        raise HTTPException(400, f"Unsupported currency for Stripe: {currency}")
+    return max(1, int(round(price * mult)))
+
+
+async def _stripe_record_purchase(
+    user_id: str, app_id: str, session_id: str,
+    payment_intent: str | None, amount: int, currency: str,
+):
+    """Idempotent purchase record from Stripe events."""
+    if not user_id or not app_id:
+        logger.warning("[stripe] record_purchase missing user/app ids")
+        return False
+    if app_id not in LIBRARY_APP_IDS:
+        return False
+    existing = await db.library_purchases.find_one({
+        "$or": [{"stripe_session_id": session_id},
+                {"user_id": user_id, "app_id": app_id}],
+    })
+    if existing:
+        # Backfill stripe_session_id if record was created via /library/purchase fallback.
+        if not existing.get("stripe_session_id"):
+            await db.library_purchases.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"stripe_session_id": session_id,
+                          "stripe_payment_intent": payment_intent}},
+            )
+        return False
+    await db.library_purchases.insert_one({
+        "_id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "app_id": app_id,
+        "purchased_at": now_iso(),
+        "paid_amount": round(amount / _STRIPE_MINOR_UNITS.get(currency.upper(), 100), 2),
+        "paid_currency": currency.upper(),
+        "stripe_session_id": session_id,
+        "stripe_payment_intent": payment_intent,
+        "source": "stripe",
+    })
+    logger.info("[stripe] purchase recorded user=%s app=%s session=%s", user_id, app_id, session_id)
+    return True
+
+
+@api_router.post("/payments/create-checkout")
+async def stripe_create_checkout(
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Create a Stripe Checkout Session for the requested mini-app.
+    Body: { app_id }. Price/currency come from server-side library_pricing
+    so the client can NEVER tamper with the amount."""
+    if not _stripe_secret:
+        raise HTTPException(503, "Stripe not configured.")
+    app_id = (body.get("app_id") or "").strip()
+    if app_id not in LIBRARY_APP_IDS:
+        raise HTTPException(400, f"Invalid app_id. Must be one of {LIBRARY_APP_IDS}")
+    pricing_doc = await db.library_pricing.find_one({"app_id": app_id}, {"_id": 0})
+    pub = _pricing_doc_to_pub(pricing_doc, app_id, False)
+    if pub["is_free"]:
+        raise HTTPException(400, "This app is free — no checkout needed.")
+    if pub["effective_price"] <= 0:
+        raise HTTPException(400, "Effective price is 0; cannot checkout.")
+    # Already owned — short-circuit.
+    owns = await db.library_purchases.find_one({"user_id": user_id, "app_id": app_id})
+    if owns:
+        raise HTTPException(409, "You already own this mini-app.")
+    currency = pub["currency"]
+    amount = _stripe_amount(pub["effective_price"], currency)
+    # Look up display name + owner email for receipts.
+    user_doc = await db.users.find_one({"_id": user_id}) or {}
+    customer_email = user_doc.get("email") if user_doc.get("email") else None
+    pretty = {
+        "sleep": "Improve Sleeping",
+        "challenges": "Challenge Tasks",
+        "spot": "Spot the Object",
+        "confidence": "Build Self-Confidence",
+    }.get(app_id, app_id)
+    return_base = _stripe_return_base or "https://xp-confidence.preview.emergentagent.com"
+    success_url = f"{return_base}/api/payments/return?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{return_base}/api/payments/return?status=cancel&session_id={{CHECKOUT_SESSION_ID}}"
+    try:
+        session = _stripe_mod.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": currency.lower(),
+                    "product_data": {
+                        "name": f"{pretty} — Library+ Premium",
+                        "description": "One-time purchase. Lifetime access on this account.",
+                    },
+                    "unit_amount": amount,
+                },
+                "quantity": 1,
+            }],
+            metadata={
+                "user_id": user_id,
+                "app_id": app_id,
+                "price": str(pub["effective_price"]),
+                "currency": currency,
+            },
+            customer_email=customer_email,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            allow_promotion_codes=False,
+        )
+    except Exception as e:
+        logger.error("[stripe] create session failed: %s", e)
+        raise HTTPException(502, f"Stripe error: {e}")
+    return {
+        "session_id": session.id,
+        "checkout_url": session.url,
+        "amount": amount,
+        "currency": currency,
+        "effective_price": pub["effective_price"],
+        "app_id": app_id,
+    }
+
+
+@api_router.post("/payments/webhook")
+async def stripe_webhook(request: Request):
+    """Stripe fires this on `checkout.session.completed`. We verify
+    signature (when whsec configured) and idempotently insert the
+    library_purchases row so /library/pricing flips purchased=true."""
+    body = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    event = None
+    if _stripe_whsec:
+        try:
+            event = _stripe_mod.Webhook.construct_event(body, sig, _stripe_whsec)
+        except Exception as e:
+            logger.warning("[stripe] webhook signature verify failed: %s", e)
+            raise HTTPException(401, "Invalid signature")
+    else:
+        # No whsec configured yet — accept un-verified payload (DEV ONLY).
+        try:
+            event = json.loads(body.decode("utf-8") or "{}")
+        except Exception:
+            raise HTTPException(400, "Invalid JSON")
+        logger.warning("[stripe] webhook received without whsec verification (set STRIPE_WEBHOOK_SECRET)")
+    etype = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
+    obj = (event.get("data", {}).get("object") if isinstance(event, dict)
+           else event["data"]["object"])
+    if etype == "checkout.session.completed":
+        if obj.get("payment_status") == "paid" or obj.get("status") == "complete":
+            md = obj.get("metadata") or {}
+            await _stripe_record_purchase(
+                user_id=md.get("user_id", ""),
+                app_id=md.get("app_id", ""),
+                session_id=obj.get("id", ""),
+                payment_intent=obj.get("payment_intent"),
+                amount=obj.get("amount_total", 0) or 0,
+                currency=(obj.get("currency") or "USD").upper(),
+            )
+    return {"received": True, "type": etype}
+
+
+@api_router.get("/payments/session/{session_id}/verify")
+async def stripe_verify_session(
+    session_id: str,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Frontend fallback after returning from Stripe — fetches the
+    session and finalises the purchase if Stripe says it's paid.
+    Useful when the webhook hasn't been configured yet."""
+    if not _stripe_secret:
+        raise HTTPException(503, "Stripe not configured.")
+    try:
+        session = _stripe_mod.checkout.Session.retrieve(session_id)
+    except Exception as e:
+        raise HTTPException(404, f"Session not found: {e}")
+    md = (session.get("metadata") or {}) if isinstance(session, dict) else (session.metadata or {})
+    sess_user = md.get("user_id", "")
+    sess_app = md.get("app_id", "")
+    paid = (session.get("payment_status") if isinstance(session, dict) else session.payment_status) == "paid"
+    if not paid:
+        return {"paid": False, "session_id": session_id}
+    if sess_user and sess_user != user_id:
+        # Don't credit a different user.
+        raise HTTPException(403, "Session belongs to another user.")
+    inserted = await _stripe_record_purchase(
+        user_id=sess_user or user_id,
+        app_id=sess_app,
+        session_id=session_id,
+        payment_intent=(session.get("payment_intent") if isinstance(session, dict) else session.payment_intent),
+        amount=(session.get("amount_total") if isinstance(session, dict) else session.amount_total) or 0,
+        currency=((session.get("currency") if isinstance(session, dict) else session.currency) or "USD").upper(),
+    )
+    return {"paid": True, "session_id": session_id, "newly_inserted": inserted, "app_id": sess_app}
+
+
+@api_router.get("/payments/return")
+async def stripe_return(status: str = "success", session_id: str = ""):
+    """Stripe's success/cancel URL lands here. Renders a tiny HTML page
+    that auto-deeplinks back into the Expo app. The app's deep-link
+    handler then calls /payments/session/{id}/verify to finalise
+    OWNED state in case the webhook hasn't arrived yet."""
+    deep = f"xpconfidence://payments/return?status={status}&session_id={session_id}"
+    web = f"/?stripe_status={status}&stripe_session={session_id}#payments-return"
+    body = f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Returning to XP in Real Life…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{{margin:0;background:#0a0a0f;color:#eaeaea;font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100vh}}
+  .card{{background:#11121a;border:1px solid rgba(255,255,255,.1);border-radius:24px;
+         padding:32px 28px;max-width:360px;text-align:center}}
+  h1{{font-size:20px;margin:8px 0 6px;color:{'#33ff95' if status == 'success' else '#ff7777'}}}
+  p{{font-size:13px;color:#aaa;line-height:1.5;margin:8px 0}}
+  a.btn{{display:inline-block;margin-top:16px;background:#33ff95;color:#0a0a0f;
+         padding:10px 18px;border-radius:999px;font-weight:800;text-decoration:none}}
+  .spin{{width:48px;height:48px;border-radius:50%;border:4px solid #222;
+         border-top-color:#33ff95;border-right-color:#33ff95;
+         animation:s 1s linear infinite;margin:0 auto 12px}}
+  @keyframes s{{to{{transform:rotate(360deg)}}}}
+</style></head><body><div class="card">
+<div class="spin"></div>
+<h1>{'Payment received ✓' if status == 'success' else 'Payment cancelled'}</h1>
+<p>{'Returning you to <b>XP in Real Life</b> — your mini-app is unlocking now.' if status == 'success' else 'No charge was made. You can try again from inside the app.'}</p>
+<a class="btn" href="{deep}">Open the app</a>
+<p style="margin-top:14px;font-size:11px;color:#666">If nothing happens, return to the app manually.</p>
+</div>
+<script>
+  // Try to auto-redirect to the deep link (mobile); fall back to web URL.
+  setTimeout(function(){{
+    window.location.href = "{deep}";
+    setTimeout(function(){{ window.location.href = "{web}"; }}, 800);
+  }}, 250);
+</script>
+</body></html>"""
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=body)
+
+
 # ════════════════════════════════════════════════════════════════════
 # ── Server-side notification scheduler ──────────────────────────────
 # 4× daily motivational pushes + 3× daily Spot-the-Object surprises
