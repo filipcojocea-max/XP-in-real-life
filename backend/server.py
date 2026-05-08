@@ -6920,6 +6920,116 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
 LIBRARY_APP_IDS = ["sleep", "challenges", "spot", "confidence"]
 
 
+# ═════════════════════ User Feedback (in-app survey) ═════════════════
+# Stored separately from Library+ ratings because:
+#   • Library+ ratings are per-mini-app (4 buckets); feedback is global.
+#   • Feedback contains free-text the user typed, mini-app ratings don't.
+#   • Feedback drives the level-up "rate-us" prompt frequency cap so
+#     we never re-prompt a user who already gave feedback.
+#
+# Storage model — `feedback` collection:
+#   {
+#     "_id":               "<uuid>",
+#     "user_id":           "<uid>",
+#     "rating":            1..5 (int),
+#     "text":              str (≤1000 chars),
+#     "level_at_submit":   int,
+#     "app_version":       str,
+#     "platform":          "ios" | "android" | "web",
+#     "created_at":        "<iso8601>",
+#   }
+
+
+@api_router.post("/feedback")
+async def feedback_post(
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """User submits in-app feedback (rating + free-text). Once a user
+    has POSTed once, subsequent level-up prompts will skip the "Give us
+    feedback" pop-up — the rate-us-on-Play-Store dialog still shows
+    until they tap it (we can't actually detect Play Store rating; we
+    only track our own button click)."""
+    try:
+        rating = int(body.get("rating") or 0)
+    except (TypeError, ValueError):
+        rating = 0
+    if rating < 1 or rating > 5:
+        raise HTTPException(400, "rating must be between 1 and 5")
+    text = (body.get("text") or "").strip()
+    if len(text) > 1000:
+        raise HTTPException(400, "text exceeds 1000 chars")
+    level_at = int(body.get("level_at_submit") or 0)
+    app_version = (body.get("app_version") or "")[:32]
+    platform_str = (body.get("platform") or "")[:16]
+    doc = {
+        "_id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "rating": rating,
+        "text": text,
+        "level_at_submit": level_at,
+        "app_version": app_version,
+        "platform": platform_str,
+        "created_at": now_iso(),
+    }
+    await db.feedback.insert_one(doc)
+    # Mark on profile so level-up modal stops nagging for feedback.
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$set": {"feedback_submitted_at": now_iso()}},
+    )
+    return {"saved": True, "id": doc["_id"]}
+
+
+@api_router.get("/feedback/me")
+async def feedback_me(user_id: str = Depends(get_user_or_legacy)):
+    """Returns whether the user has ever submitted feedback. Used by
+    the level-up prompt to decide whether to show the in-app feedback
+    section."""
+    prof = await db.profile.find_one({"_id": user_id}, {"feedback_submitted_at": 1})
+    submitted = bool(prof and prof.get("feedback_submitted_at"))
+    return {"submitted": submitted, "submitted_at": prof.get("feedback_submitted_at") if prof else None}
+
+
+@api_router.post("/profile/level-milestone-shown")
+async def level_milestone_shown(
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Mark a level-up milestone (e.g. 2, 3, 4, 5, 6) as having shown
+    its review/feedback prompt. The profile field
+    `level_milestones_shown` is a sorted unique list of integers; we
+    use it on the client as the source of truth for "have we already
+    pestered the user at this level?".
+
+    Also accepts optional `play_store_review_clicked: bool` — once true
+    we permanently stop the Play-Store CTA (Apple/Google guidelines
+    forbid repeat-asking once they've had their chance to rate)."""
+    try:
+        level = int(body.get("level") or 0)
+    except (TypeError, ValueError):
+        level = 0
+    if level < 1 or level > 200:
+        raise HTTPException(400, "level out of range")
+    update_set: dict = {}
+    if body.get("play_store_review_clicked"):
+        update_set["play_store_review_clicked"] = True
+        update_set["play_store_review_clicked_at"] = now_iso()
+    await db.profile.update_one(
+        {"_id": user_id},
+        {
+            "$addToSet": {"level_milestones_shown": level},
+            **({"$set": update_set} if update_set else {}),
+        },
+    )
+    prof = await db.profile.find_one({"_id": user_id})
+    return {
+        "saved": True,
+        "level_milestones_shown": sorted(prof.get("level_milestones_shown") or []),
+        "play_store_review_clicked": bool(prof.get("play_store_review_clicked")),
+    }
+
+
 @api_router.get("/library/ratings")
 async def library_ratings_get(user_id: str = Depends(get_user_or_legacy)):
     """Aggregate rating stats for all four mini-apps PLUS the caller's

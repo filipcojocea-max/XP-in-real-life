@@ -772,6 +772,46 @@ export const api = {
       body: JSON.stringify({ app_id, stars }),
     }),
 
+  // ──────── In-app feedback + Level-up review prompts ────────
+  // POST /feedback — store the user's rating + free-text. Used both
+  // by the level-up modal AND the standalone Settings → Feedback
+  // screen. Once submitted, the level-up prompts skip the inline
+  // feedback section on subsequent levels.
+  submitFeedback: (payload: {
+    rating: number;
+    text?: string;
+    level_at_submit?: number;
+    app_version?: string;
+    platform?: string;
+  }) =>
+    req<{ saved: boolean; id: string }>('/feedback', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // GET /feedback/me — has this user submitted feedback yet? Used
+  // by useLevelUpDetector to decide whether to show the inline
+  // feedback CTA in the level-up modal.
+  feedbackMe: () =>
+    req<{ submitted: boolean; submitted_at: string | null }>('/feedback/me'),
+
+  // POST /profile/level-milestone-shown — mark a milestone level as
+  // having shown its review/feedback prompt. Optional second arg
+  // permanently flags `play_store_review_clicked` (we never re-prompt
+  // for the OS store dialog after that — Apple/Google guideline).
+  markLevelMilestoneShown: (level: number, playStoreReviewClicked = false) =>
+    req<{
+      saved: boolean;
+      level_milestones_shown: number[];
+      play_store_review_clicked: boolean;
+    }>('/profile/level-milestone-shown', {
+      method: 'POST',
+      body: JSON.stringify({
+        level,
+        play_store_review_clicked: playStoreReviewClicked,
+      }),
+    }),
+
   // ──────── Sleep Coach ────────
   sleepProfile: () =>
     req<{

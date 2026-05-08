@@ -15,6 +15,8 @@ import { NotificationDeepLinker } from '../src/NotificationDeepLinker';
 import { enableAndroidImmersive, reassertAndroidImmersive } from '../src/androidImmersive';
 import { SuspensionAlertModal } from '../src/components/SuspensionAlertModal';
 import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
+import { LevelUpReviewModal } from '../src/components/LevelUpReviewModal';
+import { useLevelUpDetector } from '../src/hooks/useLevelUpDetector';
 
 // Keep the splash screen visible only until the JS bundle has finished
 // evaluating the root component. Without this we can't predictably
@@ -186,6 +188,10 @@ export default function RootLayout() {
                 them the golden reason + time-remaining. */}
             <SuspensionAlertModal />
             <GiftReceivedAlert />
+            {/* Level-up review prompt — fires once per crossed L2..L6
+                milestone. Self-contained: detector hook polls profile,
+                modal handles store-review CTA + tip link + feedback. */}
+            <LevelUpPromptHost />
           </AuthGate>
         </View>
       </ImmersiveProvider>
