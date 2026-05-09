@@ -108,11 +108,14 @@ backend:
   - task: "Adaptive Work-Life Scheduler endpoints"
     implemented: true
     working: true
-    file: "/app/backend/server.py + /app/frontend/app/schedule.tsx"
+    file: "/app/backend/server.py + /app/frontend/app/schedule.tsx + /app/frontend/src/scheduleHelpers.ts"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
+        - working: true
+          agent: "main"
+          comment: "DETECTION ALGORITHM UPGRADE (2026-05-09): Old detectPeriod() looked for arr[i]==arr[i+L] periodicity which fails for the common case of marking ONLY a first work block (e.g. days 1-14 work, 15-30 blank). New algorithm in scheduleHelpers.ts: locate first 1-block (W work days), then either (a) use distance to second 1-block when present, or (b) for single-block input, default to symmetric F = W when trailing blanks ≥ W. Verified end-to-end via Playwright: marking days 1-14 → detects 28-day cycle and confirm screen now reads 'So, it looks like you work 14 days on and 14 days off.' with the full 28-cell grid (14 Day + 14 Off) rendered in 4 rows of 7. describePattern() updated to read '{N} days on and {M} days off' (was '{N} on, {M} off'). Step-2 instruction copy updated to 'Mark your first block of work days, then leave your days off blank. We will calculate the full rotation.' Repeat-toggle now gates the Continue button when a pattern is detected (forces explicit confirmation). Backend untouched."
         - working: true
           agent: "main"
           comment: "WIZARD UI REFINEMENTS (2026-05-09): (1) Added 'Expand calendar (+30 days)' button on the rotating-pick step → grid grows from 30 to 60 cells for longer rotations like 14-on/14-off. (2) New <CycleGrid> component renders the cycle in a fixed 7-cols Mon..Sun layout (with weekday header row + blank pad-cells when cycle isn't a 7-multiple) — used in Confirm, Assign, and Anchor steps so rows stay perfectly aligned across screens. (3) Confirm-step copy now reads 'So, it looks like you work 4 on, 4 off.' as a sentence, with the same 7-col grid below for visual verification against a standard week. (4) Final 6-month view: added a 'Reset' pill (red) on the toolbar that fires showConfirm('Are you sure you want to reset your calendar pattern?') with Yes/No options before calling /api/schedule/reset. Verified visually via Playwright walkthrough across all 5 wizard screens (intro, 30-day pick, confirm, assign, anchor, done) on mobile 390×844. Backend endpoints unchanged from previous pass; no retest needed."

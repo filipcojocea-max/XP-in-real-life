@@ -164,19 +164,15 @@ export default function ScheduleScreen() {
   }, [rotateGrid]);
 
   const onConfirmCycle = useCallback(() => {
-    let cycleLen = detectedLen;
-    if (!confirmRepeat || !cycleLen) {
-      // Default: use the first contiguous block as the cycle.
-      const ones = rotateGrid.filter((x) => x).length;
-      const zeros = rotateGrid.filter((x) => !x).length;
-      // Best fallback: trim to first non-empty span up to 14 days
-      const span = Math.min(14, Math.max(2, Math.min(ones + zeros, rotateGrid.findIndex((x, i) => i > 0 && x === 0 && rotateGrid[i - 1] === 1) + 7)));
-      cycleLen = Math.max(2, isFinite(span) ? span : 7);
-    }
+    // detectPeriod already infers the full cycle length (work block + off
+    // run-up to the next work block, with symmetric default for single
+    // blocks). Use it whenever available; only fall back to the grid
+    // length if detection truly failed (e.g. all 30 days marked work).
+    const cycleLen = detectedLen || Math.max(2, rotateGrid.length);
     const next = patternFromBinary(rotateGrid, cycleLen);
     setCycle(next);
     setStep('rotating-shifts');
-  }, [confirmRepeat, detectedLen, rotateGrid]);
+  }, [detectedLen, rotateGrid]);
 
   const cycleSetIndex = useCallback((idx: number, s: ShiftType) => {
     setCycle((prev) => prev.map((x, i) => (i === idx ? s : x)));
@@ -616,7 +612,7 @@ function RotatingPickStep({
       <Text style={styles.kicker}>STEP 2 · 30-DAY GRID</Text>
       <Text style={styles.bigQuestion}>Tap your work days on the calendar.</Text>
       <Text style={styles.helperText}>
-        Mark the first block of work days. We'll spot the pattern (e.g. "4 on, 4 off") and project it 6 months ahead.
+        Mark your first block of work days, then leave your days off blank. We will calculate the full rotation.
       </Text>
 
       <PresetStrip presets={presets} onEdit={onEditPreset} compact />
@@ -690,8 +686,8 @@ function RotatingPickStep({
         </TouchableOpacity>
         <TouchableOpacity
           onPress={onContinue}
-          style={[styles.btn, styles.btnPrimary, !any && { opacity: 0.5 }]}
-          disabled={!any}
+          style={[styles.btn, styles.btnPrimary, (!any || (detectedLen !== null && !confirmRepeat)) && { opacity: 0.5 }]}
+          disabled={!any || (detectedLen !== null && !confirmRepeat)}
           testID="rotate-continue"
         >
           <Text style={styles.btnPrimaryText}>Continue</Text>

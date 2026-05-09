@@ -37,21 +37,49 @@ export function mondayOf(d: Date): Date {
 }
 
 /**
- * Detects the smallest period L (>=2, <=14) such that arr[i] == arr[i+L]
- * for every overlapping i. Trims trailing partial cycle. Returns null
- * when no clean period is found.
+ * Detects the full cycle length given a binary work-grid where the user
+ * has marked their FIRST block of work days. Two cases:
+ *
+ *  ① Multiple work blocks visible → cycle = distance between the start
+ *     of block-1 and start of block-2 (e.g. "4 on, 4 off, 4 on…" → 8).
+ *
+ *  ② Only ONE work block visible → assume the user stopped marking at
+ *     the end of their first work block and left the rest blank for us
+ *     to "fill in". We use the trailing zero-stretch as the off-period
+ *     and clip it to the work-period when blanks ≥ W (symmetric default
+ *     — covers e.g. "1–14 work, 15–28 blank" → 14 on, 14 off).
+ *
+ *  Returns the total cycle length, or null when no work day is marked.
  */
 export function detectPeriod(arr: number[]): number | null {
   const n = arr.length;
   if (n < 2) return null;
-  for (let L = 2; L <= Math.min(14, Math.floor(n / 2) + 0); L++) {
-    let ok = true;
-    for (let i = 0; i + L < n; i++) {
-      if (arr[i] !== arr[i + L]) { ok = false; break; }
-    }
-    if (ok) return L;
+  const onIndices = arr
+    .map((v, i) => (v ? i : -1))
+    .filter((i) => i >= 0);
+  if (!onIndices.length) return null;
+
+  // Locate first 1-block (start..end inclusive).
+  const start = onIndices[0];
+  let end = start;
+  while (end + 1 < n && arr[end + 1]) end++;
+  const W = end - start + 1;
+
+  // Locate start of the SECOND 1-block, if any.
+  let secondStart = -1;
+  for (let i = end + 1; i < n; i++) {
+    if (arr[i]) { secondStart = i; break; }
   }
-  return null;
+  if (secondStart > 0) {
+    return secondStart - start;  // cycle = first-block-start → next-block-start
+  }
+
+  // Single-block case: F = trailing zeros, default to symmetric (= W) if blanks ≥ W.
+  const trailing = n - 1 - end;
+  if (trailing <= 0) return null; // user marked everything as work — no off period yet
+  let F = trailing;
+  if (F >= W) F = W;
+  return W + F;
 }
 
 /** Builds a length-L cycle from binary work-grid: 1→'day', 0→'off'. */
@@ -65,8 +93,8 @@ export function patternFromBinary(arr: number[], length: number): ShiftType[] {
 
 /**
  * Plain-English summary of a pattern. Examples:
- *  - ["day","day","day","day","off","off","off","off"] → "4 on, 4 off"
- *  - ["day","day","off","off","off"]                  → "2 on, 3 off"
+ *  - ["day"×14, "off"×14] → "14 days on and 14 days off"
+ *  - ["day","day","off","off","off"]  → "2 days on and 3 days off"
  *  - mixed Day/Night → "3 day · 3 night · 2 off"
  */
 export function describePattern(pat: ShiftType[]): string {
@@ -77,7 +105,9 @@ export function describePattern(pat: ShiftType[]): string {
   if (!hasNight) {
     const onCount = counts.day;
     const offCount = counts.off;
-    if (onCount && offCount) return `${onCount} on, ${offCount} off`;
+    if (onCount && offCount) {
+      return `${onCount} ${onCount === 1 ? 'day' : 'days'} on and ${offCount} ${offCount === 1 ? 'day' : 'days'} off`;
+    }
     if (onCount && !offCount) return `${onCount} working ${onCount === 1 ? 'day' : 'days'}`;
     return `${offCount} off`;
   }
