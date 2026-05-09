@@ -8132,14 +8132,11 @@ def _validate_shift_schedule(payload: dict) -> dict:
             entry = dict(DEFAULT_SHIFTS[k])
             for fld in ("start_time", "sleep_time"):
                 if fld in d:
-                    val = str(d[fld])
-                    try:
-                        hh, mm = _parse_hhmm(val, default=(-1, -1))
-                        if hh < 0:
-                            raise ValueError
-                        entry[fld] = f"{hh:02d}:{mm:02d}"
-                    except Exception:
+                    val = str(d[fld]).strip()
+                    if not re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", val):
                         raise HTTPException(400, f"shifts.{k}.{fld} must be HH:MM 24-hour")
+                    hh, mm = _parse_hhmm(val, default=(0, 0))
+                    entry[fld] = f"{hh:02d}:{mm:02d}"
             if "icon" in d:
                 entry["icon"] = str(d["icon"])[:8]
             if "color" in d:
