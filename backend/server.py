@@ -6566,6 +6566,134 @@ async def admin_reports_list(user_id: str = Depends(get_user_or_legacy)):
     return {"reports": items, "new_count": new_count}
 
 
+# ═══════════════════ Admin: Players by creation date ═══════════════════
+# Creator-only roster of every account, sortable by creation date with
+# date/week/month filters, search, and pagination. Backs the new
+# "View Players Dates" tab in Friends+.
+@api_router.get("/admin/players/by-creation")
+async def admin_players_by_creation(
+    order: str = "newest",
+    since: str = "all",        # all | week | month
+    q: str = "",
+    limit: int = 200,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only.")
+
+    order = (order or "newest").strip().lower()
+    if order not in ("newest", "oldest"):
+        order = "newest"
+    since = (since or "all").strip().lower()
+    if since not in ("all", "week", "month"):
+        since = "all"
+    limit = max(1, min(500, int(limit or 200)))
+
+    query: dict = {}
+    if since == "week":
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        query["created_at"] = {"$gte": cutoff.isoformat()}
+    elif since == "month":
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        query["created_at"] = {"$gte": cutoff.isoformat()}
+
+    needle = (q or "").strip().lower()
+    rows: list = []
+    sort_dir = -1 if order == "newest" else 1
+    cur = db.profile.find(query).sort("created_at", sort_dir).limit(limit * 3)
+    viewer_is_admin = True  # we just verified above
+    async for prof in cur:
+        # `_email_cache` is populated by serialize_profile() / our auth flow;
+        # admins are explicitly allowed to see emails for the roster view.
+        email = prof.get("_email_cache") or ""
+        full_name = prof.get("full_name") or prof.get("name") or "Anonymous"
+        if needle:
+            hay = f"{full_name} {email}".lower()
+            if needle not in hay:
+                continue
+        row = _serialize_player(prof, "none", viewer_is_admin=viewer_is_admin)
+        row["created_at"] = prof.get("created_at")
+        row["email"] = email
+        # Last seen surfaced for ops; client can show "Active 5h ago" etc.
+        row["last_seen_at"] = prof.get("last_seen_at")
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return {"players": rows, "count": len(rows), "order": order, "since": since}
+
+
+# ═══════════════════ Admin: Global leaderboard (top 100) ═══════════════════
+# Top-100 players by total XP (lifetime, weekly, monthly, yearly). The
+# weekly/monthly/yearly windows are computed by summing xp_events; the
+# lifetime window uses profile.total_xp.
+@api_router.get("/admin/leaderboard/global")
+async def admin_leaderboard_global(
+    period: str = "all",
+    q: str = "",
+    user_id: str = Depends(get_user_or_legacy),
+):
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only.")
+    period = (period or "all").strip().lower()
+    if period not in ("all", "week", "month", "year"):
+        period = "all"
+
+    needle = (q or "").strip().lower()
+
+    if period == "all":
+        # Cheap path: profile.total_xp is already a counter on every profile.
+        rows: list = []
+        cur = db.profile.find({}).sort("total_xp", -1).limit(500)  # over-fetch for filter
+        async for prof in cur:
+            row = _serialize_player(prof, "none", viewer_is_admin=True)
+            row["created_at"] = prof.get("created_at")
+            row["period_xp"] = int(prof.get("total_xp", 0) or 0)
+            if needle:
+                if needle not in (row["name"] or "").lower():
+                    continue
+            rows.append(row)
+            if len(rows) >= 100:
+                break
+        for i, r in enumerate(rows):
+            r["rank"] = i + 1
+        return {"leaderboard": rows, "period": period}
+
+    # Aggregated path: sum xp_events inside the rolling window.
+    now_dt = datetime.now(timezone.utc)
+    if period == "week":
+        cutoff = now_dt - timedelta(days=7)
+    elif period == "month":
+        cutoff = now_dt - timedelta(days=30)
+    else:  # year
+        cutoff = now_dt - timedelta(days=365)
+
+    pipeline = [
+        {"$match": {"earned_at_utc": {"$gte": cutoff}}},
+        {"$group": {"_id": "$user_id", "period_xp": {"$sum": "$xp"}}},
+        {"$match": {"period_xp": {"$gt": 0}}},
+        {"$sort": {"period_xp": -1}},
+        {"$limit": 500},
+    ]
+    rows: list = []
+    async for grp in db.xp_events.aggregate(pipeline):
+        prof = await db.profile.find_one({"_id": grp["_id"]})
+        if not prof:
+            continue
+        row = _serialize_player(prof, "none", viewer_is_admin=True)
+        row["created_at"] = prof.get("created_at")
+        row["period_xp"] = int(grp.get("period_xp", 0) or 0)
+        if needle and needle not in (row["name"] or "").lower():
+            continue
+        rows.append(row)
+        if len(rows) >= 100:
+            break
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    return {"leaderboard": rows, "period": period}
+
+
+
+
 @api_router.post("/admin/reports/{report_id}/view")
 async def admin_reports_view(report_id: str, user_id: str = Depends(get_user_or_legacy)):
     if not await _is_admin_user(user_id):

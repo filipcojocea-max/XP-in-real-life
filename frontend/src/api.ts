@@ -345,6 +345,38 @@ export const api = {
   adminSuspensionStatus: (userId: string) =>
     req<AdminSuspensionStatus>(`/admin/suspension/${userId}`),
 
+  // ── Admin: Players by creation date (Creator only) ────────────────
+  // Used by the new "View Players Dates" tab in Friends+. Supports
+  // newest/oldest sort, week/month/all time-window filter, free-text
+  // search and pagination via `limit`.
+  adminPlayersByCreation: (opts: {
+    order?: 'newest' | 'oldest';
+    since?: 'all' | 'week' | 'month';
+    q?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (opts.order) qs.set('order', opts.order);
+    if (opts.since) qs.set('since', opts.since);
+    if (opts.q) qs.set('q', opts.q);
+    if (opts.limit) qs.set('limit', String(opts.limit));
+    return req<{ players: AdminPlayerRow[]; count: number; order: string; since: string }>(
+      `/admin/players/by-creation?${qs.toString()}`,
+    );
+  },
+
+  // ── Admin: Global leaderboard (Creator only) ─────────────────────
+  // Top-100 players by total XP, with switchable rolling window.
+  adminGlobalLeaderboard: (opts: { period?: 'all' | 'week' | 'month' | 'year'; q?: string }) => {
+    const qs = new URLSearchParams();
+    if (opts.period) qs.set('period', opts.period);
+    if (opts.q) qs.set('q', opts.q);
+    return req<{ leaderboard: AdminLeaderboardRow[]; period: string }>(
+      `/admin/leaderboard/global?${qs.toString()}`,
+    );
+  },
+
+
   // ── Admin: Gifts (XP / Bonus Top-Up) ────────────────────────────
   adminGiftXP: (userId: string, amount: number, message?: string) =>
     req<{ ok: boolean; gift: GiftEntry }>('/admin/gift/xp', {
@@ -1103,6 +1135,21 @@ export type FriendStatus =
   | 'pending_incoming'
   | 'friends'
   | 'self';
+
+/** Admin-roster row returned by /admin/players/by-creation. Extends Player
+ *  with an explicit creation timestamp + email for the Creator console. */
+export type AdminPlayerRow = Player & {
+  created_at: string | null;
+  email: string;
+  last_seen_at: string | null;
+};
+
+/** Admin global-leaderboard row returned by /admin/leaderboard/global. */
+export type AdminLeaderboardRow = Player & {
+  rank: number;
+  period_xp: number;
+  created_at: string | null;
+};
 
 export type Player = {
   user_id: string;

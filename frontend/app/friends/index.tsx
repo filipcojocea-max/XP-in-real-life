@@ -172,6 +172,33 @@ export default function FriendsScreen() {
         <View style={{ width: 36 }} />
       </View>
 
+      {/* Creator-only admin shortcuts. Only visible to is_admin profiles —
+          regular users never see these rows. */}
+      {viewerIsAdmin ? (
+        <View style={adminStrip.row}>
+          <TouchableOpacity
+            style={[adminStrip.card, { borderColor: '#FFD70088' }]}
+            activeOpacity={0.85}
+            onPress={() => router.push('/admin/players-dates' as any)}
+            testID="admin-players-dates"
+          >
+            <Ionicons name="calendar" size={18} color="#FFD700" />
+            <Text style={[adminStrip.title, { color: '#FFD700' }]}>Players Dates</Text>
+            <Text style={adminStrip.sub}>All accounts · sort by created date</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[adminStrip.card, { borderColor: colors.cyan + '99' }]}
+            activeOpacity={0.85}
+            onPress={() => router.push('/admin/global-leaderboard' as any)}
+            testID="admin-global-leaderboard"
+          >
+            <Ionicons name="trophy" size={18} color={colors.cyan} />
+            <Text style={[adminStrip.title, { color: colors.cyan }]}>Global Leaderboard</Text>
+            <Text style={adminStrip.sub}>Top 100 · week / month / year / all</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
       {/* Top tabs: Players | Friends | Leaderboard */}
       <View style={styles.tabsRow}>
         <TabPill label="Players" active={topTab === 'players'} onPress={() => setTopTab('players')} testID="ftab-players" />
@@ -1388,6 +1415,28 @@ function GoalRow({ goal }: { goal: FriendGoalSummary }) {
     </View>
   );
 }
+
+// Creator-only horizontal strip rendered above the Friends+ tabs.
+const adminStrip = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+  },
+  card: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    gap: 4,
+  },
+  title: { fontSize: 13, fontWeight: '900', marginTop: 4 },
+  sub: { color: colors.textMuted, fontSize: 10, fontWeight: '700' },
+});
+
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
