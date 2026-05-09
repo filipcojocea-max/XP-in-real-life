@@ -6602,9 +6602,14 @@ async def admin_players_by_creation(
     sort_dir = -1 if order == "newest" else 1
     cur = db.profile.find(query).sort("created_at", sort_dir).limit(limit * 3)
     viewer_is_admin = True  # we just verified above
+    raw_profiles: list[dict] = []
     async for prof in cur:
-        # `_email_cache` is populated by serialize_profile() / our auth flow;
-        # admins are explicitly allowed to see emails for the roster view.
+        raw_profiles.append(prof)
+    # Hydrate `_email_cache` so the UI can show actual emails — without
+    # this the field is always empty since profile docs don't store the
+    # email directly (it lives in users collection).
+    await _enrich_emails(raw_profiles)
+    for prof in raw_profiles:
         email = prof.get("_email_cache") or ""
         full_name = prof.get("full_name") or prof.get("name") or "Anonymous"
         if needle:
