@@ -334,6 +334,22 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
+        {/* Adaptive Work-Life Scheduler — overrides default Start Day */}
+        <TouchableOpacity
+          testID="profile-schedule-btn"
+          style={styles.actionRow}
+          onPress={() => router.push('/schedule' as any)}
+        >
+          <View style={[styles.actionIcon, { backgroundColor: '#3B82F622', borderColor: '#3B82F666' }]}>
+            <Ionicons name="calendar" size={18} color="#3B82F6" />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.actionTitle, { color: '#3B82F6' }]}>Adaptive Work-Life Scheduler</Text>
+            <Text style={styles.actionDesc}>Day/Night/Off pattern · custom wake-up · auto silence</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
         {/* Send Feedback to the Creator — pings the admin notification bell */}
         <TouchableOpacity
           testID="profile-feedback-btn"

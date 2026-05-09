@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import random
+import re
 import secrets
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
@@ -426,23 +427,146 @@ def user_today_str(prof: Optional[dict]) -> str:
 
     The day rolls over at `day_start_time` local — NOT at midnight.
     Falls back to server UTC if either field is unset.
+
+    NEW: if profile.shift_schedule.enabled is true, the day boundary is
+    determined by the SHIFT pattern (Day / Night / Off → each with its
+    own wake-up time) so the app naturally resets when the user wakes
+    up regardless of midnight. See `_effective_day_start_for(prof, ...)`.
     """
     if not prof:
         return today_str()
     tz_name = prof.get("timezone")
-    day_start = prof.get("day_start_time") or prof.get("wake_time") or "07:00"
     if not tz_name:
         return today_str()
     try:
         from zoneinfo import ZoneInfo
         local_now = datetime.now(ZoneInfo(tz_name))
-        hh, mm = [int(x) for x in (day_start or "07:00").split(":")[:2]]
-        # If local now is BEFORE day_start, we still belong to yesterday
+        # Resolve the day-start HH:MM to use for THIS local moment.
+        hh, mm = _effective_day_start_for(prof, local_now)
         if (local_now.hour, local_now.minute) < (hh, mm):
             local_now = local_now - timedelta(days=1)
         return local_now.date().isoformat()
     except Exception:
         return today_str()
+
+
+# ═══════════════════ Adaptive Work-Life Scheduler helpers ════════════
+#
+# Profile field `shift_schedule` shape (all optional / nullable):
+# {
+#   "enabled": bool,
+#   "pattern": ["day","day","night","night","off","off","off","off"],
+#   "pattern_start_date": "YYYY-MM-DD",   # date the pattern's idx 0 lands on
+#   "shifts": {
+#     "day":   {"start_time":"06:00","sleep_time":"22:00",
+#               "icon":"🌅","color":"#FFA726"},
+#     "night": {"start_time":"14:00","sleep_time":"06:00",
+#               "icon":"🌃","color":"#1E3A8A"},
+#     "off":   {"start_time":"09:00","sleep_time":"23:00",
+#               "icon":"☕","color":"#22C55E"},
+#   },
+#   "refresh_offset_hours": 2,
+#   "manual_overrides": { "YYYY-MM-DD": "off"|"day"|"night" }
+# }
+
+DEFAULT_SHIFTS = {
+    "day":   {"start_time": "06:00", "sleep_time": "22:00", "icon": "🌅", "color": "#FFA726"},
+    "night": {"start_time": "14:00", "sleep_time": "06:00", "icon": "🌃", "color": "#1E3A8A"},
+    "off":   {"start_time": "09:00", "sleep_time": "23:00", "icon": "☕", "color": "#22C55E"},
+}
+SHIFT_TYPES = ["day", "night", "off"]
+
+
+def _default_shift_schedule() -> dict:
+    return {
+        "enabled": False,
+        "pattern": [],
+        "pattern_start_date": today_str(),
+        "shifts": {k: dict(v) for k, v in DEFAULT_SHIFTS.items()},
+        "refresh_offset_hours": 2,
+        "manual_overrides": {},
+    }
+
+
+def _shift_for_date(prof: Optional[dict], date_iso: str) -> Optional[str]:
+    """Returns the shift type ('day'|'night'|'off') for the given local
+    date based on profile.shift_schedule. Returns None when the schedule
+    is disabled or has no pattern. Manual overrides take precedence."""
+    if not prof:
+        return None
+    sched = prof.get("shift_schedule") or {}
+    if not sched.get("enabled"):
+        return None
+    pattern = sched.get("pattern") or []
+    if not pattern:
+        return None
+    overrides = sched.get("manual_overrides") or {}
+    if date_iso in overrides and overrides[date_iso] in SHIFT_TYPES:
+        return overrides[date_iso]
+    try:
+        anchor = datetime.fromisoformat(sched.get("pattern_start_date") or today_str()).date()
+        target = datetime.fromisoformat(date_iso).date()
+        delta = (target - anchor).days
+        idx = delta % len(pattern)
+        if idx < 0:
+            idx += len(pattern)
+        v = pattern[idx]
+        return v if v in SHIFT_TYPES else None
+    except Exception:
+        return None
+
+
+def _effective_day_start_for(prof: Optional[dict], local_now: datetime) -> tuple[int, int]:
+    """Returns (HH, MM) of the day-start boundary that applies RIGHT
+    NOW for the given user. If the schedule is enabled, uses the shift
+    that owns the current local date (or the previous one when local
+    time is before that shift's start)."""
+    fallback = (prof or {}).get("day_start_time") or (prof or {}).get("wake_time") or "07:00"
+    fb_hh, fb_mm = _parse_hhmm(fallback, default=(7, 0))
+    if not prof or not (prof.get("shift_schedule") or {}).get("enabled"):
+        return fb_hh, fb_mm
+    today_iso = local_now.date().isoformat()
+    shift = _shift_for_date(prof, today_iso)
+    if shift is None:
+        return fb_hh, fb_mm
+    shifts = (prof.get("shift_schedule") or {}).get("shifts") or {}
+    s_def = shifts.get(shift) or DEFAULT_SHIFTS.get(shift) or {}
+    return _parse_hhmm(s_def.get("start_time", "07:00"), default=(7, 0))
+
+
+def _parse_hhmm(s: Optional[str], default=(7, 0)) -> tuple[int, int]:
+    try:
+        if not s:
+            return default
+        parts = str(s).split(":")
+        return int(parts[0]) % 24, int(parts[1]) % 60
+    except Exception:
+        return default
+
+
+def _is_in_silence_window(prof: Optional[dict], local_now: datetime) -> bool:
+    """Returns True when the user is within the SLEEP window of their
+    current shift — the system uses this to silence push notifications
+    so they don't fire during the user's sleep hours."""
+    if not prof or not (prof.get("shift_schedule") or {}).get("enabled"):
+        return False
+    today_iso = local_now.date().isoformat()
+    shift = _shift_for_date(prof, today_iso)
+    if shift is None:
+        return False
+    shifts = (prof.get("shift_schedule") or {}).get("shifts") or {}
+    s_def = shifts.get(shift) or DEFAULT_SHIFTS.get(shift) or {}
+    sleep_hh, sleep_mm = _parse_hhmm(s_def.get("sleep_time"), default=(22, 0))
+    start_hh, start_mm = _parse_hhmm(s_def.get("start_time"), default=(7, 0))
+    cur = (local_now.hour, local_now.minute)
+    sleep = (sleep_hh, sleep_mm)
+    start = (start_hh, start_mm)
+    # If sleep < start (e.g. day shift: sleep 22, start 06) the window
+    # is sleep..24 OR 0..start. Otherwise it's sleep..start (e.g. night
+    # shift: sleep 06, start 14 → silence 06..14).
+    if sleep < start:
+        return cur >= sleep or cur < start
+    return sleep <= cur < start
 
 
 async def user_today_str_for(user_id: str) -> str:
@@ -574,6 +698,9 @@ def serialize_profile(prof: dict) -> dict:
         "avatar_base64": prof.get("avatar_base64"),
         "wake_time": prof.get("wake_time", "07:00"),
         "morning_setup_done": prof.get("morning_setup_done", False),
+        # Adaptive Work-Life Scheduler (overrides static day_start_time
+        # when shift_schedule.enabled).
+        "shift_schedule": _serialize_shift_schedule(prof),
         # New day-anchor system
         "day_start_time": prof.get("day_start_time"),
         "timezone": prof.get("timezone"),
@@ -7939,6 +8066,211 @@ async def boost_purchase_record(
     await _grant_boost_to_inventory(user_id, boost_id, source="purchase")
     prof = await db.profile.find_one({"_id": user_id})
     return {"saved": True, "is_free": False, "profile": serialize_profile(prof) if prof else None}
+
+
+# ═══════════════════ Adaptive Work-Life Scheduler endpoints ════════════
+#
+# Stores `shift_schedule` on profile. When enabled, daily resets,
+# focus-mode penalty cutoffs, and notification silencing all follow
+# the user's pattern instead of the static day_start_time field.
+
+def _serialize_shift_schedule(prof: Optional[dict]) -> dict:
+    sched = (prof or {}).get("shift_schedule") or _default_shift_schedule()
+    out = {
+        "enabled": bool(sched.get("enabled")),
+        "pattern": list(sched.get("pattern") or []),
+        "pattern_start_date": sched.get("pattern_start_date") or today_str(),
+        "shifts": {},
+        "refresh_offset_hours": float(sched.get("refresh_offset_hours") or 2),
+        "manual_overrides": dict(sched.get("manual_overrides") or {}),
+    }
+    for k in SHIFT_TYPES:
+        d = (sched.get("shifts") or {}).get(k) or DEFAULT_SHIFTS[k]
+        out["shifts"][k] = {
+            "start_time": d.get("start_time", DEFAULT_SHIFTS[k]["start_time"]),
+            "sleep_time": d.get("sleep_time", DEFAULT_SHIFTS[k]["sleep_time"]),
+            "icon": d.get("icon", DEFAULT_SHIFTS[k]["icon"]),
+            "color": d.get("color", DEFAULT_SHIFTS[k]["color"]),
+        }
+    return out
+
+
+def _validate_shift_schedule(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Body must be an object")
+    out: dict = {}
+    if "enabled" in payload:
+        out["enabled"] = bool(payload.get("enabled"))
+    if "pattern" in payload:
+        pat = payload.get("pattern") or []
+        if not isinstance(pat, list) or any(p not in SHIFT_TYPES for p in pat):
+            raise HTTPException(400, f"pattern entries must be one of {SHIFT_TYPES}")
+        if len(pat) > 60:
+            raise HTTPException(400, "pattern length must be ≤ 60")
+        out["pattern"] = list(pat)
+    if "pattern_start_date" in payload:
+        try:
+            datetime.fromisoformat(str(payload["pattern_start_date"]))
+            out["pattern_start_date"] = str(payload["pattern_start_date"])
+        except Exception:
+            raise HTTPException(400, "pattern_start_date must be ISO YYYY-MM-DD")
+    if "refresh_offset_hours" in payload:
+        try:
+            v = float(payload["refresh_offset_hours"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "refresh_offset_hours must be a number")
+        if v < 0 or v > 12:
+            raise HTTPException(400, "refresh_offset_hours must be 0..12")
+        out["refresh_offset_hours"] = v
+    if "shifts" in payload:
+        sh = payload.get("shifts") or {}
+        if not isinstance(sh, dict):
+            raise HTTPException(400, "shifts must be an object")
+        out_shifts: dict = {}
+        for k in SHIFT_TYPES:
+            d = (sh.get(k) or {}) if isinstance(sh.get(k), dict) else {}
+            entry = dict(DEFAULT_SHIFTS[k])
+            for fld in ("start_time", "sleep_time"):
+                if fld in d:
+                    val = str(d[fld])
+                    try:
+                        hh, mm = _parse_hhmm(val, default=(-1, -1))
+                        if hh < 0:
+                            raise ValueError
+                        entry[fld] = f"{hh:02d}:{mm:02d}"
+                    except Exception:
+                        raise HTTPException(400, f"shifts.{k}.{fld} must be HH:MM 24-hour")
+            if "icon" in d:
+                entry["icon"] = str(d["icon"])[:8]
+            if "color" in d:
+                cv = str(d["color"]).strip()
+                if not re.match(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$", cv):
+                    raise HTTPException(400, f"shifts.{k}.color must be #RRGGBB or #RRGGBBAA")
+                entry["color"] = cv
+            out_shifts[k] = entry
+        out["shifts"] = out_shifts
+    if "manual_overrides" in payload:
+        mo = payload.get("manual_overrides") or {}
+        if not isinstance(mo, dict):
+            raise HTTPException(400, "manual_overrides must be an object")
+        cleaned: dict = {}
+        for k, v in mo.items():
+            try:
+                datetime.fromisoformat(str(k))
+            except Exception:
+                raise HTTPException(400, f"manual_overrides key {k!r} must be ISO YYYY-MM-DD")
+            if v is None or v == "":
+                continue  # pruned
+            if v not in SHIFT_TYPES:
+                raise HTTPException(400, f"manual_overrides[{k}] must be one of {SHIFT_TYPES} or null")
+            cleaned[str(k)] = v
+        out["manual_overrides"] = cleaned
+    return out
+
+
+@api_router.get("/schedule")
+async def schedule_get(user_id: str = Depends(get_user_or_legacy)):
+    prof = await db.profile.find_one({"_id": user_id}) or {}
+    return {"schedule": _serialize_shift_schedule(prof)}
+
+
+@api_router.put("/schedule")
+async def schedule_put(
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    update = _validate_shift_schedule(body)
+    if not update:
+        raise HTTPException(400, "Empty payload — nothing to update")
+    prof = await db.profile.find_one({"_id": user_id}) or {}
+    cur = prof.get("shift_schedule") or _default_shift_schedule()
+    merged = dict(cur)
+    for k, v in update.items():
+        merged[k] = v
+    if "shifts" not in merged:
+        merged["shifts"] = {k: dict(DEFAULT_SHIFTS[k]) for k in SHIFT_TYPES}
+    if "pattern" not in merged:
+        merged["pattern"] = []
+    if "pattern_start_date" not in merged:
+        merged["pattern_start_date"] = today_str()
+    if "manual_overrides" not in merged:
+        merged["manual_overrides"] = {}
+    if "refresh_offset_hours" not in merged:
+        merged["refresh_offset_hours"] = 2
+    if "enabled" not in merged:
+        merged["enabled"] = bool(cur.get("enabled"))
+    await db.profile.update_one({"_id": user_id}, {"$set": {"shift_schedule": merged}}, upsert=True)
+    new_prof = await db.profile.find_one({"_id": user_id}) or {}
+    return {"saved": True, "schedule": _serialize_shift_schedule(new_prof)}
+
+
+@api_router.post("/schedule/reset")
+async def schedule_reset(user_id: str = Depends(get_user_or_legacy)):
+    """Wipes the schedule back to defaults (still disabled)."""
+    fresh = _default_shift_schedule()
+    await db.profile.update_one({"_id": user_id}, {"$set": {"shift_schedule": fresh}}, upsert=True)
+    return {"saved": True, "schedule": _serialize_shift_schedule({"shift_schedule": fresh})}
+
+
+@api_router.put("/schedule/day/{date_iso}")
+async def schedule_day_override(
+    date_iso: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Sets or clears a manual override for a single day. Body
+    {shift: 'day'|'night'|'off'} or {shift: null} to remove."""
+    try:
+        datetime.fromisoformat(date_iso)
+    except Exception:
+        raise HTTPException(400, "date must be ISO YYYY-MM-DD")
+    shift = body.get("shift") if isinstance(body, dict) else None
+    if shift is not None and shift not in SHIFT_TYPES:
+        raise HTTPException(400, f"shift must be one of {SHIFT_TYPES} or null to clear")
+    prof = await db.profile.find_one({"_id": user_id}) or {}
+    sched = prof.get("shift_schedule") or _default_shift_schedule()
+    overrides = dict(sched.get("manual_overrides") or {})
+    if shift is None:
+        overrides.pop(date_iso, None)
+    else:
+        overrides[date_iso] = shift
+    sched["manual_overrides"] = overrides
+    await db.profile.update_one({"_id": user_id}, {"$set": {"shift_schedule": sched}}, upsert=True)
+    return {"saved": True, "manual_overrides": overrides}
+
+
+@api_router.get("/schedule/preview")
+async def schedule_preview(
+    days: int = 14,
+    from_: Optional[str] = None,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Returns a calendar preview of the next N days with the
+    computed shift type, start time, sleep time, refresh time, and
+    whether the day is a manual override."""
+    days = max(1, min(60, int(days or 14)))
+    prof = await db.profile.find_one({"_id": user_id}) or {}
+    sched = _serialize_shift_schedule(prof)
+    try:
+        start = datetime.fromisoformat(from_).date() if from_ else datetime.utcnow().date()
+    except Exception:
+        start = datetime.utcnow().date()
+    out = []
+    overrides = sched.get("manual_overrides") or {}
+    for i in range(days):
+        d = (start + timedelta(days=i)).isoformat()
+        shift = _shift_for_date(prof, d)
+        s_def = (sched.get("shifts") or {}).get(shift or "off") or DEFAULT_SHIFTS["off"]
+        out.append({
+            "date": d,
+            "shift": shift,
+            "start_time": s_def.get("start_time"),
+            "sleep_time": s_def.get("sleep_time"),
+            "icon": s_def.get("icon"),
+            "color": s_def.get("color"),
+            "is_override": d in overrides,
+        })
+    return {"days": out, "schedule": sched}
 
 
 # ════════════════════════════════════════════════════════════════════

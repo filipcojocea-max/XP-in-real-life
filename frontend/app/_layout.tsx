@@ -186,6 +186,7 @@ export default function RootLayout() {
               <Stack.Screen name="messages" />
               <Stack.Screen name="admin" />
               <Stack.Screen name="feedback" />
+              <Stack.Screen name="schedule" />
             </Stack>
             {/* Bottom 40-px swipe-up reveal target for Immersive Mode. */}
             <RevealZone />

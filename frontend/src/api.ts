@@ -900,8 +900,31 @@ export const api = {
       body: JSON.stringify({ boost_id }),
     }),
 
-  // ──────── In-app feedback + Level-up review prompts ────────
-  // POST /feedback — store the user's rating + free-text. Used both
+  // ──────── Adaptive Work-Life Scheduler ────────
+  // Pattern of Day/Night/Off shifts overrides the static day_start_time
+  // when enabled. Backend recalculates the boundary every request via
+  // user_today_str → _effective_day_start_for. Manual overrides per
+  // date take precedence over the rotating pattern.
+  scheduleGet: () =>
+    req<{ schedule: ShiftSchedule }>('/schedule'),
+  schedulePut: (payload: Partial<ShiftSchedule>) =>
+    req<{ saved: boolean; schedule: ShiftSchedule }>('/schedule', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  scheduleReset: () =>
+    req<{ saved: boolean; schedule: ShiftSchedule }>('/schedule/reset', { method: 'POST' }),
+  scheduleDayOverride: (date_iso: string, shift: 'day' | 'night' | 'off' | null) =>
+    req<{ saved: boolean; manual_overrides: Record<string, string> }>(
+      `/schedule/day/${date_iso}`,
+      { method: 'PUT', body: JSON.stringify({ shift }) },
+    ),
+  schedulePreview: (days = 14, from_iso?: string) =>
+    req<{ days: ScheduleDay[]; schedule: ShiftSchedule }>(
+      `/schedule/preview?days=${days}${from_iso ? `&from_=${from_iso}` : ''}`,
+    ),
+
+  // ──────── In-app feedback + Level-up review prompts ────────  // POST /feedback — store the user's rating + free-text. Used both
   // by the level-up modal AND the standalone Settings → Feedback
   // screen. Once submitted, the level-up prompts skip the inline
   // feedback section on subsequent levels.
@@ -1425,6 +1448,34 @@ export type AdminReport = {
   created_at: string;
   viewed_at: string | null;
   dismissed_at: string | null;
+};
+
+export type ShiftType = 'day' | 'night' | 'off';
+
+export type ShiftDef = {
+  start_time: string;     // HH:MM 24h
+  sleep_time: string;     // HH:MM 24h
+  icon: string;           // emoji
+  color: string;          // #RRGGBB hex
+};
+
+export type ShiftSchedule = {
+  enabled: boolean;
+  pattern: ShiftType[];
+  pattern_start_date: string;  // YYYY-MM-DD
+  shifts: { day: ShiftDef; night: ShiftDef; off: ShiftDef };
+  refresh_offset_hours: number;
+  manual_overrides: Record<string, ShiftType>;
+};
+
+export type ScheduleDay = {
+  date: string;
+  shift: ShiftType | null;
+  start_time: string;
+  sleep_time: string;
+  icon: string;
+  color: string;
+  is_override: boolean;
 };
 
 export type LibraryAppPricing = {
