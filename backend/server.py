@@ -480,6 +480,8 @@ SHIFT_TYPES = ["day", "night", "off"]
 def _default_shift_schedule() -> dict:
     return {
         "enabled": False,
+        "pattern_kind": "rotating",
+        "setup_complete": False,
         "pattern": [],
         "pattern_start_date": today_str(),
         "shifts": {k: dict(v) for k, v in DEFAULT_SHIFTS.items()},
@@ -570,7 +572,14 @@ def _is_in_silence_window(prof: Optional[dict], local_now: datetime) -> bool:
 
 
 async def user_today_str_for(user_id: str) -> str:
-    prof = await db.profile.find_one({"_id": user_id}, {"timezone": 1, "day_start_time": 1, "wake_time": 1})
+    # NOTE: include shift_schedule so _effective_day_start_for can pick
+    # the rotating shift's wake-up time when the user's Adaptive Work-Life
+    # Scheduler is enabled. Without this projection field the schedule
+    # would never affect the daily reset boundary.
+    prof = await db.profile.find_one(
+        {"_id": user_id},
+        {"timezone": 1, "day_start_time": 1, "wake_time": 1, "shift_schedule": 1},
+    )
     return user_today_str(prof)
 
 
@@ -8076,13 +8085,25 @@ async def boost_purchase_record(
 
 def _serialize_shift_schedule(prof: Optional[dict]) -> dict:
     sched = (prof or {}).get("shift_schedule") or _default_shift_schedule()
+    pk = sched.get("pattern_kind")
+    if pk not in ("weekly", "rotating"):
+        pk = "rotating"
     out = {
         "enabled": bool(sched.get("enabled")),
+        # 'weekly' = same every Mon..Sun (length-7 pattern starting Monday).
+        # 'rotating' = N-day cycle that repeats from pattern_start_date.
+        # The wizard uses this to remember which mode the user picked so
+        # it lands them on the right editor when they reopen the screen.
+        "pattern_kind": pk,
         "pattern": list(sched.get("pattern") or []),
         "pattern_start_date": sched.get("pattern_start_date") or today_str(),
         "shifts": {},
         "refresh_offset_hours": float(sched.get("refresh_offset_hours") or 2),
         "manual_overrides": dict(sched.get("manual_overrides") or {}),
+        # `setup_complete` flips true the first time the user finishes the
+        # wizard. Used by the Profile entry to decide between Wizard and
+        # the 6-month calendar view.
+        "setup_complete": bool(sched.get("setup_complete")),
     }
     for k in SHIFT_TYPES:
         d = (sched.get("shifts") or {}).get(k) or DEFAULT_SHIFTS[k]
@@ -8101,6 +8122,13 @@ def _validate_shift_schedule(payload: dict) -> dict:
     out: dict = {}
     if "enabled" in payload:
         out["enabled"] = bool(payload.get("enabled"))
+    if "setup_complete" in payload:
+        out["setup_complete"] = bool(payload.get("setup_complete"))
+    if "pattern_kind" in payload:
+        pk = str(payload.get("pattern_kind") or "").strip()
+        if pk not in ("weekly", "rotating"):
+            raise HTTPException(400, "pattern_kind must be 'weekly' or 'rotating'")
+        out["pattern_kind"] = pk
     if "pattern" in payload:
         pat = payload.get("pattern") or []
         if not isinstance(pat, list) or any(p not in SHIFT_TYPES for p in pat):
@@ -8188,6 +8216,10 @@ async def schedule_put(
         merged["shifts"] = {k: dict(DEFAULT_SHIFTS[k]) for k in SHIFT_TYPES}
     if "pattern" not in merged:
         merged["pattern"] = []
+    if "pattern_kind" not in merged:
+        merged["pattern_kind"] = "rotating"
+    if "setup_complete" not in merged:
+        merged["setup_complete"] = False
     if "pattern_start_date" not in merged:
         merged["pattern_start_date"] = today_str()
     if "manual_overrides" not in merged:
@@ -8245,7 +8277,7 @@ async def schedule_preview(
     """Returns a calendar preview of the next N days with the
     computed shift type, start time, sleep time, refresh time, and
     whether the day is a manual override."""
-    days = max(1, min(60, int(days or 14)))
+    days = max(1, min(200, int(days or 14)))
     prof = await db.profile.find_one({"_id": user_id}) or {}
     sched = _serialize_shift_schedule(prof)
     try:

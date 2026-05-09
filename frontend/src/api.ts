@@ -1461,6 +1461,10 @@ export type ShiftDef = {
 
 export type ShiftSchedule = {
   enabled: boolean;
+  /** 'weekly' = same every Mon..Sun (length-7 pattern). 'rotating' = N-day cycle. */
+  pattern_kind: 'weekly' | 'rotating';
+  /** Marks the wizard as completed. When false the Profile entry opens the wizard. */
+  setup_complete: boolean;
   pattern: ShiftType[];
   pattern_start_date: string;  // YYYY-MM-DD
   shifts: { day: ShiftDef; night: ShiftDef; off: ShiftDef };

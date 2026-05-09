@@ -334,21 +334,9 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
-        {/* Adaptive Work-Life Scheduler — overrides default Start Day */}
-        <TouchableOpacity
-          testID="profile-schedule-btn"
-          style={styles.actionRow}
-          onPress={() => router.push('/schedule' as any)}
-        >
-          <View style={[styles.actionIcon, { backgroundColor: '#3B82F622', borderColor: '#3B82F666' }]}>
-            <Ionicons name="calendar" size={18} color="#3B82F6" />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.actionTitle, { color: '#3B82F6' }]}>Adaptive Work-Life Scheduler</Text>
-            <Text style={styles.actionDesc}>Day/Night/Off pattern · custom wake-up · auto silence</Text>
-          </View>
-          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
-        </TouchableOpacity>
+        {/* Adaptive Work-Life Scheduler — master toggle on the row,
+            tap row body to open the wizard / 6-month calendar. */}
+        <ScheduleProfileRow router={router} />
 
         {/* Send Feedback to the Creator — pings the admin notification bell */}
         <TouchableOpacity
@@ -743,3 +731,122 @@ const bellStyles = StyleSheet.create({
   badgeText: { color: '#fff', fontSize: 10, fontWeight: '900' },
 });
 
+
+
+/**
+ * ScheduleProfileRow — Profile entry for the Adaptive Work-Life Scheduler.
+ *
+ * Layout: a single row whose RIGHT edge is the master ON/OFF toggle.
+ * Tapping the row's body opens the wizard (or the 6-month calendar if
+ * setup is already complete). Long-press always reopens the wizard from
+ * the top so the user can rebuild their pattern from scratch.
+ */
+function ScheduleProfileRow({ router }: { router: ReturnType<typeof useRouter> }) {
+  const [enabled, setEnabled] = useState(false);
+  const [setupComplete, setSetupComplete] = useState(false);
+  const [hasPattern, setHasPattern] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await api.scheduleGet();
+      setEnabled(!!r.schedule.enabled);
+      setSetupComplete(!!r.schedule.setup_complete);
+      setHasPattern((r.schedule.pattern || []).length > 0);
+    } catch {}
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      refresh();
+    }, [refresh]),
+  );
+
+  const onToggle = useCallback(async (v: boolean) => {
+    if (v && !hasPattern) {
+      // Can't enable without a pattern — push the user into the wizard.
+      router.push('/schedule?wizard=1' as any);
+      return;
+    }
+    setBusy(true);
+    setEnabled(v);
+    try {
+      await api.schedulePut({ enabled: v });
+    } catch {
+      setEnabled(!v);
+    } finally {
+      setBusy(false);
+    }
+  }, [hasPattern, router]);
+
+  const onPressBody = () => {
+    // Setup done → open final calendar; otherwise open wizard.
+    router.push((setupComplete ? '/schedule' : '/schedule?wizard=1') as any);
+  };
+
+  const onLongPress = () => {
+    // Always reopen the wizard from the top (re-onboarding).
+    router.push('/schedule?wizard=1' as any);
+  };
+
+  return (
+    <View style={[scheduleRow.row, enabled && { borderColor: '#3B82F688' }]} testID="profile-schedule-row">
+      <TouchableOpacity
+        style={scheduleRow.body}
+        onPress={onPressBody}
+        onLongPress={onLongPress}
+        activeOpacity={0.85}
+        testID="profile-schedule-btn"
+      >
+        <View style={[scheduleRow.icon, { backgroundColor: '#3B82F622', borderColor: '#3B82F666' }]}>
+          <Ionicons name="calendar" size={18} color="#3B82F6" />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={scheduleRow.title}>Adaptive Work-Life Scheduler</Text>
+          <Text style={scheduleRow.desc} numberOfLines={2}>
+            {setupComplete
+              ? (enabled
+                  ? 'Active · 6-month calendar driving daily resets.'
+                  : 'Pattern saved · toggle ON to activate it.')
+              : 'Set up your shift pattern in 4 quick steps.'}
+          </Text>
+        </View>
+      </TouchableOpacity>
+      <Switch
+        testID="profile-schedule-toggle"
+        value={enabled}
+        disabled={busy}
+        onValueChange={onToggle}
+        trackColor={{ false: colors.border, true: '#3B82F688' }}
+        thumbColor={enabled ? '#3B82F6' : '#888'}
+      />
+    </View>
+  );
+}
+
+const scheduleRow = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    minHeight: 60,
+  },
+  body: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  icon: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  title: { color: '#3B82F6', fontSize: 14, fontWeight: '900' },
+  desc: { color: colors.textMuted, fontSize: 11, marginTop: 2, lineHeight: 15 },
+});
