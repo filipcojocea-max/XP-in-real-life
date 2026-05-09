@@ -47,6 +47,17 @@ export default function NewSpotMatch() {
   }, [load]);
 
   const toggle = (uid: string) => {
+    // Disallow inviting friends currently sleeping/resting per their
+    // Adaptive Work-Life Schedule. The backend would also skip pushing
+    // the invite to them, so we explain it up front.
+    const friend = friends.find((p) => p.user_id === uid);
+    if (friend?.silence_state?.in_silence) {
+      showAlert(
+        'Friend is unavailable',
+        `${friend.name} is currently ${friend.silence_state.label || 'sleeping per their shift schedule'}. They\u2019ll auto-rejoin once they\u2019re awake.`,
+      );
+      return;
+    }
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(uid)) {
@@ -115,28 +126,46 @@ export default function NewSpotMatch() {
         <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}>
           {friends.map((f) => {
             const isSel = selected.has(f.user_id);
+            const sleeping = !!f.silence_state?.in_silence;
+            const sleepLabel = f.silence_state?.label;
             return (
               <TouchableOpacity
                 key={f.user_id}
-                activeOpacity={0.85}
+                activeOpacity={sleeping ? 1 : 0.85}
                 onPress={() => toggle(f.user_id)}
-                style={[styles.row, isSel && styles.rowSel]}
+                style={[styles.row, isSel && styles.rowSel, sleeping && styles.rowSleeping]}
                 testID={`mp-friend-${f.user_id}`}
               >
                 {f.avatar_base64 ? (
-                  <Image source={{ uri: `data:image/jpeg;base64,${f.avatar_base64}` }} style={styles.avatar} />
+                  <Image
+                    source={{ uri: `data:image/jpeg;base64,${f.avatar_base64}` }}
+                    style={[styles.avatar, sleeping && styles.avatarSleeping]}
+                  />
                 ) : (
-                  <View style={[styles.avatar, styles.avatarFallback]}>
+                  <View style={[styles.avatar, styles.avatarFallback, sleeping && styles.avatarSleeping]}>
                     <Text style={styles.avatarLetter}>{(f.name || '?').slice(0, 1).toUpperCase()}</Text>
                   </View>
                 )}
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.name}>{f.name}</Text>
-                  <Text style={styles.sub}>Lv {f.level} · {f.total_xp} XP</Text>
+                  <Text style={[styles.name, sleeping && styles.nameSleeping]}>{f.name}</Text>
+                  {sleeping ? (
+                    <View style={styles.sleepBadgeRow}>
+                      <Ionicons name="moon" size={11} color={colors.textMuted} />
+                      <Text style={styles.sleepText} numberOfLines={1}>{sleepLabel || 'Resting (shift schedule)'}</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.sub}>Lv {f.level} · {f.total_xp} XP</Text>
+                  )}
                 </View>
-                <View style={[styles.check, isSel && styles.checkOn]}>
-                  {isSel ? <Ionicons name="checkmark" size={16} color={colors.bg} /> : null}
-                </View>
+                {sleeping ? (
+                  <View style={styles.zzzPill}>
+                    <Text style={styles.zzzPillText}>Zzz</Text>
+                  </View>
+                ) : (
+                  <View style={[styles.check, isSel && styles.checkOn]}>
+                    {isSel ? <Ionicons name="checkmark" size={16} color={colors.bg} /> : null}
+                  </View>
+                )}
               </TouchableOpacity>
             );
           })}
@@ -207,11 +236,28 @@ const styles = StyleSheet.create({
     minHeight: 64,
   },
   rowSel: { borderColor: colors.cyan, backgroundColor: colors.cyan + '15' },
+  // Adaptive Work-Life Scheduler "gray-out" treatment when a friend is
+  // currently in their silence window (sleeping). Greatly desaturated
+  // background, dimmed border, no tap-feedback highlight.
+  rowSleeping: { opacity: 0.55, backgroundColor: '#1a1f2a', borderColor: '#2b3340' },
   avatar: { width: 40, height: 40, borderRadius: 20 },
+  avatarSleeping: { opacity: 0.7 },
   avatarFallback: { backgroundColor: colors.cyan + '22', alignItems: 'center', justifyContent: 'center' },
   avatarLetter: { color: colors.cyan, fontWeight: '900' },
   name: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  nameSleeping: { color: colors.textMuted },
   sub: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
+  sleepBadgeRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 3 },
+  sleepText: { color: colors.textMuted, fontSize: 11, fontStyle: 'italic', flex: 1 },
+  zzzPill: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#374151',
+    borderWidth: 1,
+    borderColor: '#4b5563',
+  },
+  zzzPillText: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 0.5 },
   check: {
     width: 26,
     height: 26,

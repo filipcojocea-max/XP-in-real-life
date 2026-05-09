@@ -2988,6 +2988,57 @@ async def _enrich_emails(profs: list) -> list:
     return profs
 
 
+def _serialize_silence_state(prof: dict) -> Optional[dict]:
+    """Compute the player's current "silence" state for friend lists and
+    Spot multiplayer lobbies.
+
+    Returns None when the Adaptive Work-Life Scheduler is OFF (we don't
+    expose the field at all). Otherwise the dict is always present with:
+      • in_silence  — bool, true when the user is between sleep_time and
+                      start_time of their current shift.
+      • shift       — 'day' | 'night' | 'off' | None of TODAY's shift.
+      • label       — Human-readable status the UI can put on a card,
+                      e.g. "Sleeping (Night Shift Schedule)".
+
+    Friends use this to gray out players who shouldn't be invited to a
+    Spot match round, and the Spot scheduler uses the same `in_silence`
+    flag to skip pushing surprise notifications during sleep.
+    """
+    if not prof:
+        return None
+    sched = (prof or {}).get("shift_schedule") or {}
+    if not sched.get("enabled"):
+        return None
+    try:
+        tz_name = (prof.get("timezone") or "").strip() or "UTC"
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            tz = _ZI(tz_name)
+        except Exception:
+            from zoneinfo import ZoneInfo as _ZI
+            tz = _ZI("UTC")
+        local_now = datetime.now(tz)
+        in_silence = _is_in_silence_window(prof, local_now)
+        today_iso = local_now.date().isoformat()
+        shift = _shift_for_date(prof, today_iso)
+    except Exception:
+        return {"in_silence": False, "shift": None, "label": None}
+
+    label = None
+    if in_silence:
+        if shift == "night":
+            label = "Sleeping (Night Shift Schedule)"
+        elif shift == "day":
+            label = "Resting (Day Shift Schedule)"
+        else:
+            label = "Resting (Day Off Schedule)"
+    return {
+        "in_silence": bool(in_silence),
+        "shift": shift,
+        "label": label,
+    }
+
+
 def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = False) -> dict:
     """Public-facing trimmed profile for player cards / detail views.
 
@@ -3054,6 +3105,15 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
         state = _suspension_state(prof)
         base["is_currently_suspended"] = bool(state)
         base["was_suspended_ever"] = bool(prof.get("was_suspended_ever") or state)
+
+    # Adaptive Work-Life Scheduler: when the friend is currently in their
+    # silence/sleep window, the Spot multiplayer lobby grays them out and
+    # the Spot scheduler skips pushing surprise notifications to them.
+    # `silence_state` is omitted (i.e. None drops the key) when the user
+    # has the scheduler turned OFF — preserves backwards compat.
+    silence = _serialize_silence_state(prof)
+    if silence is not None:
+        base["silence_state"] = silence
     return base
 
 
@@ -4960,14 +5020,35 @@ async def spot_match_create(
         )
         broadcast_count = 0
         skipped_night = 0
+        skipped_silence = 0
         for fid in confirmed:
-            # Pull the friend's profile to check daylight. profiles cache
-            # already has it from _load_profiles_cache above.
+            # Pull the friend's profile to check daylight + Adaptive
+            # Work-Life Scheduler silence window. profiles cache already
+            # has it from _load_profiles_cache above.
             fprof = profiles.get(fid) or await db.profile.find_one({"_id": fid}) or {}
             if _scheduler_is_daylight_now and not _scheduler_is_daylight_now(fprof):
                 skipped_night += 1
                 logger.info("[match.invite.skip_night] user=%s tz=%s", fid, fprof.get("timezone"))
                 continue
+            # Adaptive Work-Life Scheduler: skip friends in their sleep
+            # window even if it falls inside daylight (e.g. a Night-shift
+            # worker who sleeps 06:00–14:00). No XP penalty, no push —
+            # they auto-rejoin the next round when they wake.
+            try:
+                tz_name = (fprof.get("timezone") or "").strip() or "UTC"
+                from zoneinfo import ZoneInfo as _ZI
+                fzone = _ZI(tz_name)
+                f_local_now = datetime.now(fzone)
+                if _is_in_silence_window(fprof, f_local_now):
+                    skipped_silence += 1
+                    logger.info(
+                        "[match.invite.skip_silence] user=%s tz=%s shift=%s",
+                        fid, fprof.get("timezone"),
+                        _shift_for_date(fprof, f_local_now.date().isoformat()),
+                    )
+                    continue
+            except Exception as e:
+                logger.warning("[match.invite.silence_check] %s: %s", fid, e)
             tokens = await db.push_tokens.find({"user_id": fid}).to_list(10)
             for t in tokens:
                 tok = t.get("token")
@@ -4992,8 +5073,8 @@ async def spot_match_create(
                 except Exception as e:
                     logger.warning("[match.invite.push] %s: %s", fid, e)
         logger.info(
-            "[match.invite.broadcast] match=%s pushed=%d skipped_night=%d",
-            match_doc["id"], broadcast_count, skipped_night,
+            "[match.invite.broadcast] match=%s pushed=%d skipped_night=%d skipped_silence=%d",
+            match_doc["id"], broadcast_count, skipped_night, skipped_silence,
         )
     except Exception as e:
         logger.warning("[match.invite.broadcast] %s", e)
@@ -8365,6 +8446,9 @@ async def _start_notification_scheduler():
             db=db,
             send_push=_push_send_bool_wrapper,
             pick_motivation=_server_pick_motivation,
+            # Wire the Adaptive Work-Life Scheduler silence-window check
+            # so the spot-surprise tick can skip pushes during sleep.
+            is_in_silence=_is_in_silence_window,
         )
     except Exception as e:
         logger.warning("[scheduler] start failed: %s", e)

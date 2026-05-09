@@ -1131,6 +1131,17 @@ export type Player = {
   // ISO-8601 UTC timestamp of the last time this player opened the app.
   // Used by Friends → My Friends to render "Active 1.5 hrs ago" labels.
   last_seen_at?: string | null;
+  /**
+   * Adaptive Work-Life Scheduler signal. Present only when the player has
+   * the scheduler enabled. The Spot multiplayer lobby grays the friend
+   * out and shows `label` while `in_silence` is true, and the backend
+   * skips them from match invite broadcasts.
+   */
+  silence_state?: {
+    in_silence: boolean;
+    shift: 'day' | 'night' | 'off' | null;
+    label: string | null;
+  };
   // When this player became our friend. Populated only on the
   // /friends/list endpoint (null elsewhere). Powers the unfriend
   // confirmation dialog's "You've been friends for X days" subtitle.

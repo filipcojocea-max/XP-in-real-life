@@ -49,6 +49,10 @@ logger = logging.getLogger("notif_scheduler")
 _db = None
 _send_push: Optional[Callable[..., Awaitable[bool]]] = None
 _pick_motivation: Optional[Callable[[], str]] = None
+# Adaptive Work-Life Scheduler hook. server.py wires this to its
+# `_is_in_silence_window(prof, local_now)` helper so the spot-surprise
+# tick can skip pushes when the user is in their scheduled sleep window.
+_is_in_silence: Optional[Callable[[dict, datetime], bool]] = None
 
 scheduler: Optional[AsyncIOScheduler] = None
 
@@ -315,12 +319,20 @@ async def _spot_surprise_tick():
             "spot_random_slots": 1,        # list[iso utc str]
             "spot_random_slots_day": 1,    # yyyy-mm-dd local
             "spot_random_consumed": 1,     # list[iso utc str]
+            # Adaptive Work-Life Scheduler: required by `_is_in_silence`
+            # so a Night-shift worker sleeping 06:00–14:00 doesn't get
+            # buzzed mid-snooze. Without this projection the silence
+            # check returns False (open) and the user gets pinged.
+            "shift_schedule": 1,
+            "day_start_time": 1,
+            "wake_time": 1,
         },
     ).limit(5000)
     async for prof in cur:
         try:
             tz = _user_tz(prof)
-            today = now_utc.astimezone(tz).date().isoformat()
+            now_local = now_utc.astimezone(tz)
+            today = now_local.date().isoformat()
             slots = prof.get("spot_random_slots") or []
             consumed = set(prof.get("spot_random_consumed") or [])
             slots_day = prof.get("spot_random_slots_day")
@@ -339,8 +351,22 @@ async def _spot_surprise_tick():
                         "spot_random_consumed": [],
                     }},
                 )
+            # Adaptive Work-Life Scheduler: if the user is currently in
+            # their scheduled sleep window (Day-shift sleeping 22:00→06:00,
+            # Night-shift sleeping 06:00→14:00, etc.) we silently consume
+            # any slot that fires during this window — NO push, NO penalty.
+            # The user auto-rejoins for their next slot once awake.
+            in_silence = False
+            if _is_in_silence is not None:
+                try:
+                    in_silence = bool(_is_in_silence(prof, now_local))
+                except Exception as e:
+                    logger.warning("[spot_surprise.silence_check] %s: %s", prof.get("_id"), e)
+                    in_silence = False
+
             # Fire any slot that is now ≤ now (and not yet consumed).
             fired_any = False
+            silenced_any = False
             for slot_iso in list(slots):
                 if slot_iso in consumed:
                     continue
@@ -353,7 +379,7 @@ async def _spot_surprise_tick():
                 # Don't fire more than 30 minutes late — assume the user
                 # was offline; just consume the slot to avoid spam.
                 late_minutes = (now_utc - slot_dt).total_seconds() / 60.0
-                if 0 <= late_minutes <= 30:
+                if 0 <= late_minutes <= 30 and not in_silence:
                     await _push_to_user(
                         prof["_id"],
                         "🎯 Spot the Object — Surprise Challenge",
@@ -367,13 +393,20 @@ async def _spot_surprise_tick():
                             "channelId": "spot_surprise",
                         },
                     )
+                    fired_any = True
+                elif in_silence:
+                    silenced_any = True
                 consumed.add(slot_iso)
-                fired_any = True
-            if fired_any:
+            if fired_any or silenced_any:
                 await _db.profile.update_one(
                     {"_id": prof["_id"]},
                     {"$set": {"spot_random_consumed": list(consumed)}},
                 )
+                if silenced_any:
+                    logger.info(
+                        "[spot_surprise.silenced] user=%s tz=%s reason=in_silence_window",
+                        prof.get("_id"), prof.get("timezone"),
+                    )
         except Exception as e:
             logger.warning("[spot_surprise.tick] %s: %s", prof.get("_id"), e)
 
@@ -487,13 +520,15 @@ def init_scheduler(
     db,
     send_push: Callable[..., Awaitable[bool]],
     pick_motivation: Callable[[], str],
+    is_in_silence: Optional[Callable[[dict, datetime], bool]] = None,
 ) -> AsyncIOScheduler:
     """Wire dependencies and start the scheduler. Idempotent — calling
     twice replaces the old jobs."""
-    global _db, _send_push, _pick_motivation, scheduler
+    global _db, _send_push, _pick_motivation, _is_in_silence, scheduler
     _db = db
     _send_push = send_push
     _pick_motivation = pick_motivation
+    _is_in_silence = is_in_silence
 
     if scheduler and scheduler.running:
         try:
