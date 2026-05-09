@@ -1690,8 +1690,48 @@ async def delete_task(task_id: str, user_id: str = Depends(get_user_or_legacy)):
     return {"deleted": True}
 
 
+# ─────────────── Anti-XP-exploit: per-task toggle rate-limit ───────────────
+# Process-local memory of recent (user_id, task_id) toggles. Prevents the
+# "Done / Undone / Done / Undone …" loop that would otherwise spam the
+# leaderboard. Sliding 5-second window, max 6 toggles per task per user.
+# When exceeded we return 429; the client should disable the chip until
+# the window clears.
+import time as _time
+
+_TASK_TOGGLE_WINDOW_S = 5.0
+_TASK_TOGGLE_MAX = 6
+_task_toggle_log: dict[tuple[str, str], list[float]] = {}
+
+
+def _check_task_toggle_rate(user_id: str, task_id: str) -> None:
+    """Raise HTTPException(429) if the user has flipped this task more
+    than _TASK_TOGGLE_MAX times in the last _TASK_TOGGLE_WINDOW_S seconds.
+    The dict is process-local — it doesn't try to be perfect across
+    multiple workers (we only run one). Memory is bounded since we trim
+    every entry on each call.
+    """
+    now = _time.monotonic()
+    key = (user_id, task_id)
+    bucket = _task_toggle_log.get(key) or []
+    # Trim out entries older than the window.
+    bucket = [t for t in bucket if now - t <= _TASK_TOGGLE_WINDOW_S]
+    if len(bucket) >= _TASK_TOGGLE_MAX:
+        retry_in = max(0.0, _TASK_TOGGLE_WINDOW_S - (now - bucket[0]))
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "task_toggle_rate_limited",
+                "message": f"You're toggling this task too quickly. Try again in {retry_in:.1f}s.",
+                "retry_after_seconds": round(retry_in, 1),
+            },
+        )
+    bucket.append(now)
+    _task_toggle_log[key] = bucket
+
+
 @api_router.post("/tasks/{task_id}/complete")
 async def complete_task(task_id: str, body: CompleteTaskBody, user_id: str = Depends(get_user_or_legacy)):
+    _check_task_toggle_rate(user_id, task_id)
     target_date = body.date or today_str()
     task = await db.tasks.find_one({"id": task_id, "user_id": user_id}, {"_id": 0})
     if not task:
@@ -1747,15 +1787,27 @@ async def complete_task(task_id: str, body: CompleteTaskBody, user_id: str = Dep
 
 @api_router.post("/tasks/{task_id}/uncomplete")
 async def uncomplete_task(task_id: str, body: CompleteTaskBody, user_id: str = Depends(get_user_or_legacy)):
+    _check_task_toggle_rate(user_id, task_id)
     target_date = body.date or today_str()
     log = await db.task_logs.find_one({"task_id": task_id, "user_id": user_id, "date": target_date})
     if not log:
         return {"already_uncompleted": True}
+    awarded = int(log.get("xp_awarded") or 0)
     await db.task_logs.delete_one({"task_id": task_id, "user_id": user_id, "date": target_date})
     await db.profile.update_one(
         {"_id": user_id},
-        {"$inc": {"total_xp": -log["xp_awarded"], "tasks_completed": -1}},
+        {"$inc": {"total_xp": -awarded, "tasks_completed": -1}},
     )
+    # Reverse the leaderboard event so the weekly total no longer
+    # contains the XP from the now-undone task. Without this the
+    # Done/Undone loop would inflate the leaderboard indefinitely
+    # because xp_events is append-only.
+    try:
+        tz_off = int((await db.profile.find_one({"_id": user_id}, {"tz_offset_minutes": 1}) or {}).get("tz_offset_minutes", 0) or 0)
+        if awarded > 0:
+            await _log_xp_event(user_id, -awarded, tz_off)
+    except Exception as _e:
+        logger.warning("[uncomplete_task] leaderboard refund failed for user=%s task=%s: %s", user_id, task_id, _e)
     # Clamp negative values
     prof = await db.profile.find_one({"_id": user_id})
     fixes = {}
@@ -1766,7 +1818,7 @@ async def uncomplete_task(task_id: str, body: CompleteTaskBody, user_id: str = D
     if fixes:
         await db.profile.update_one({"_id": user_id}, {"$set": fixes})
     prof = await db.profile.find_one({"_id": user_id})
-    return {"profile": serialize_profile(prof), "xp_removed": log["xp_awarded"]}
+    return {"profile": serialize_profile(prof), "xp_removed": awarded}
 
 
 # --------- Goals ---------
@@ -3717,8 +3769,13 @@ def _is_local_sunday(tz_offset_minutes: int) -> bool:
 
 
 async def _log_xp_event(user_id: str, xp: int, tz_offset: int):
-    """Append an XP-earn event to xp_events collection (for leaderboard)."""
-    if xp <= 0:
+    """Append an XP-earn event to xp_events collection (for the weekly
+    leaderboard). Both positive (earn) and negative (refund / uncomplete)
+    deltas are accepted: the leaderboard sums these so a negative event
+    correctly cancels the matching positive event when a user un-ticks
+    a task. Zero deltas are skipped to keep the collection clean.
+    """
+    if xp == 0:
         return
     monday_utc, _, week_key = _local_week_bounds(tz_offset)
     await db.xp_events.insert_one({
