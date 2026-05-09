@@ -34,7 +34,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics';
 import { api, type ShiftSchedule, type ShiftType } from '../src/api';
 import { colors, spacing, radii } from '../src/theme';
-import { showAlert } from '../src/uiAlert';
+import { showAlert, showConfirm } from '../src/uiAlert';
 import {
   iso,
   addDays,
@@ -69,7 +69,7 @@ export default function ScheduleScreen() {
   // Weekly pattern (length 7, Mon..Sun)
   const [weekly, setWeekly] = useState<ShiftType[]>(['day', 'day', 'day', 'day', 'day', 'off', 'off']);
 
-  // Rotating selection (30-day binary array)
+  // Rotating selection (30-day binary array; expandable to 60 days)
   const [rotateGrid, setRotateGrid] = useState<number[]>(Array(30).fill(0));
   const [detectedLen, setDetectedLen] = useState<number | null>(null);
   const [confirmRepeat, setConfirmRepeat] = useState(false);
@@ -220,6 +220,23 @@ export default function ScheduleScreen() {
     }
   }, []);
 
+  // Reset handler: shows confirm dialog before destroying everything
+  const onResetSchedule = useCallback(async () => {
+    const ok = await showConfirm(
+      'Are you sure you want to reset your calendar pattern?',
+      'This wipes the rotating pattern, all manual overrides, presets and turns the master toggle OFF. You\'ll have to walk through the wizard again from the start.',
+      { confirmText: 'Yes, reset', cancelText: 'No, keep it', destructive: true },
+    );
+    if (!ok) return;
+    try {
+      await api.scheduleReset();
+      await load();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    } catch (e: any) {
+      showAlert('Reset failed', String(e?.message || e));
+    }
+  }, [load]);
+
   if (loading || !schedule) {
     return (
       <SafeAreaView style={styles.root}>
@@ -302,6 +319,7 @@ export default function ScheduleScreen() {
           grid={rotateGrid}
           detectedLen={detectedLen}
           confirmRepeat={confirmRepeat}
+          presets={schedule.shifts}
           onBack={() => setStep('rotating-pick')}
           onConfirm={onConfirmCycle}
         />
@@ -336,6 +354,7 @@ export default function ScheduleScreen() {
           insets={insets}
           schedule={schedule}
           onTapDay={(d) => setOverrideFor(d)}
+          onReset={onResetSchedule}
         />
       )}
 
@@ -367,6 +386,73 @@ function stepIndex(s: WizardStep): number {
   if (s === 'weekly' || s === 'rotating-pick' || s === 'rotating-confirm' || s === 'rotating-shifts') return 2;
   if (s === 'anchor') return 3;
   return 4;
+}
+
+// ════════════════════ Cycle 7-col grid ══════════════════════════════
+//
+// Renders a cycle of any length as a 7-cols Mon..Sun planner grid so the
+// user can clearly visualise the rotation against a standard week. We
+// always pad to multiples of 7 with empty placeholder cells so subsequent
+// "rows" stay perfectly aligned even when the cycle isn't a 7-multiple.
+function CycleGrid({
+  cycle,
+  presets,
+  selectedIdx,
+  onTapIndex,
+  showTodayBadge = false,
+  showTime = false,
+}: {
+  cycle: ShiftType[];
+  presets: ShiftSchedule['shifts'];
+  selectedIdx?: number | null;
+  onTapIndex?: (idx: number) => void;
+  showTodayBadge?: boolean;
+  showTime?: boolean;
+}) {
+  const padded = useMemo(() => {
+    const rem = cycle.length % 7;
+    const extras = rem === 0 ? 0 : 7 - rem;
+    return { cells: cycle, blanks: extras };
+  }, [cycle]);
+
+  return (
+    <View style={styles.cycleGridWrap}>
+      <View style={styles.cycleHeaderRow}>
+        {WEEK_LABELS_MON.map((d) => (
+          <Text key={d} style={styles.cycleHeaderCell}>{d}</Text>
+        ))}
+      </View>
+      <View style={styles.cycleGrid}>
+        {padded.cells.map((s, i) => {
+          const def = presets[s];
+          const selected = selectedIdx === i;
+          return (
+            <TouchableOpacity
+              key={i}
+              activeOpacity={onTapIndex ? 0.85 : 1}
+              disabled={!onTapIndex}
+              onPress={() => onTapIndex && onTapIndex(i)}
+              style={[
+                styles.cycleCell,
+                { borderColor: def.color, backgroundColor: def.color + '14' },
+                selected && styles.cycleCellSelected,
+              ]}
+              testID={`cycle-cell-${i}`}
+            >
+              {showTodayBadge && selected ? <Text style={styles.todayBadge}>TODAY</Text> : null}
+              <Text style={styles.cycleCellIdx}>{i + 1}</Text>
+              <Text style={styles.cycleCellEmoji}>{def.icon}</Text>
+              <Text style={[styles.cycleCellLabel, { color: def.color }]}>{SHIFT_LABEL_SHORT[s]}</Text>
+              {showTime ? <Text style={styles.cycleCellTime}>{def.start_time}</Text> : null}
+            </TouchableOpacity>
+          );
+        })}
+        {Array.from({ length: padded.blanks }).map((_, i) => (
+          <View key={`pad-${i}`} style={[styles.cycleCell, styles.cycleCellBlank]} />
+        ))}
+      </View>
+    </View>
+  );
 }
 
 // ════════════════════ Step components ════════════════════════════
@@ -553,6 +639,22 @@ function RotatingPickStep({
         ))}
       </View>
 
+      {/* Expand to 60 days for longer rotations (e.g. military 14-on/14-off) */}
+      {grid.length < 60 ? (
+        <TouchableOpacity
+          onPress={() => {
+            Haptics.selectionAsync().catch(() => {});
+            setGrid([...grid, ...Array(30).fill(0)]);
+          }}
+          style={styles.expandBtn}
+          activeOpacity={0.85}
+          testID="rotate-expand"
+        >
+          <Ionicons name="add-circle-outline" size={16} color={colors.cyan} />
+          <Text style={styles.expandBtnText}>Expand calendar (+30 days · for longer patterns)</Text>
+        </TouchableOpacity>
+      ) : null}
+
       {/* Detection banner */}
       <View style={[styles.detectBanner, detectedLen ? styles.detectBannerOk : null]}>
         <Ionicons
@@ -603,12 +705,14 @@ function RotatingConfirmStep({
   grid,
   detectedLen,
   confirmRepeat,
+  presets,
   onBack,
   onConfirm,
 }: {
   grid: number[];
   detectedLen: number | null;
   confirmRepeat: boolean;
+  presets: ShiftSchedule['shifts'];
   onBack: () => void;
   onConfirm: () => void;
 }) {
@@ -619,22 +723,12 @@ function RotatingConfirmStep({
   return (
     <ScrollView contentContainerStyle={styles.body}>
       <Text style={styles.kicker}>CONFIRM PATTERN</Text>
-      <Text style={styles.bigQuestion}>{desc || `${cycleLen}-day cycle`}</Text>
+      <Text style={styles.bigQuestion}>So, it looks like you work {desc || `on a ${cycleLen}-day cycle`}.</Text>
       <Text style={styles.helperText}>
-        We'll repeat this {cycleLen}-day cycle for the next 6 months. You can fine-tune any day later by tapping it on the calendar.
+        Compare against a standard week: tap "Looks right" to repeat this rotation for the next 6 months. You can fine-tune any day later.
       </Text>
 
-      <View style={styles.previewCycleRow}>
-        {previewPat.map((s, i) => (
-          <View key={i} style={[styles.previewCycleCell, { borderColor: s === 'off' ? colors.border : colors.cyan }]}>
-            <Text style={styles.previewCycleIdx}>{i + 1}</Text>
-            <Text style={styles.previewCycleEmoji}>{s === 'off' ? '☕' : '🌅'}</Text>
-            <Text style={[styles.previewCycleLabel, { color: s === 'off' ? colors.textMuted : colors.cyan }]}>
-              {SHIFT_LABEL_SHORT[s]}
-            </Text>
-          </View>
-        ))}
-      </View>
+      <CycleGrid cycle={previewPat} presets={presets} />
 
       <View style={styles.btnRow}>
         <TouchableOpacity onPress={onBack} style={[styles.btn, styles.btnGhost]}>
@@ -677,25 +771,12 @@ function CycleAssignStep({
 
       <PresetStrip presets={presets} onEdit={onEditPreset} compact />
 
-      <View style={styles.previewCycleRow}>
-        {cycle.map((s, i) => {
-          const def = presets[s];
-          return (
-            <TouchableOpacity
-              key={i}
-              onPress={() => setPickerForIdx(i)}
-              activeOpacity={0.85}
-              style={[styles.previewCycleCell, { borderColor: def.color }]}
-              testID={`cycle-cell-${i}`}
-            >
-              <Text style={styles.previewCycleIdx}>{i + 1}</Text>
-              <Text style={styles.previewCycleEmoji}>{def.icon}</Text>
-              <Text style={[styles.previewCycleLabel, { color: def.color }]}>{SHIFT_LABEL_SHORT[s]}</Text>
-              <Text style={styles.previewCycleTime}>{def.start_time}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+      <CycleGrid
+        cycle={cycle}
+        presets={presets}
+        onTapIndex={(i) => setPickerForIdx(i)}
+        showTime
+      />
 
       <View style={styles.btnRow}>
         <TouchableOpacity onPress={onBack} style={[styles.btn, styles.btnGhost]}>
@@ -745,30 +826,13 @@ function AnchorStep({
         Tap one cell to mark TODAY. We'll line up the rest of your 6-month calendar from there.
       </Text>
 
-      <View style={styles.previewCycleRow}>
-        {cycle.map((s, i) => {
-          const def = presets[s];
-          const selected = i === anchorIdx;
-          return (
-            <TouchableOpacity
-              key={i}
-              activeOpacity={0.85}
-              onPress={() => { Haptics.selectionAsync().catch(() => {}); setAnchorIdx(i); }}
-              style={[
-                styles.previewCycleCell,
-                { borderColor: def.color },
-                selected && styles.anchorSelected,
-              ]}
-              testID={`anchor-cell-${i}`}
-            >
-              {selected ? <Text style={styles.todayBadge}>TODAY</Text> : null}
-              <Text style={styles.previewCycleIdx}>{i + 1}</Text>
-              <Text style={styles.previewCycleEmoji}>{def.icon}</Text>
-              <Text style={[styles.previewCycleLabel, { color: def.color }]}>{SHIFT_LABEL_SHORT[s]}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+      <CycleGrid
+        cycle={cycle}
+        presets={presets}
+        selectedIdx={anchorIdx}
+        onTapIndex={(i) => { Haptics.selectionAsync().catch(() => {}); setAnchorIdx(i); }}
+        showTodayBadge
+      />
 
       <View style={styles.btnRow}>
         <TouchableOpacity onPress={onBack} style={[styles.btn, styles.btnGhost]}>
@@ -787,10 +851,12 @@ function DoneView({
   insets,
   schedule,
   onTapDay,
+  onReset,
 }: {
   insets: any;
   schedule: ShiftSchedule;
   onTapDay: (date_iso: string) => void;
+  onReset: () => void;
 }) {
   const months = useMemo(() => buildSixMonths(new Date()), []);
   const todayIso = iso(new Date());
@@ -819,13 +885,24 @@ function DoneView({
 
   return (
     <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.md, paddingBottom: insets.bottom + spacing.xl }}>
-      <View style={styles.legendRow}>
-        {SHIFT_ORDER.map((s) => (
-          <View key={s} style={[styles.legendChip, { borderColor: schedule.shifts[s].color }]}>
-            <Text style={{ fontSize: 14 }}>{schedule.shifts[s].icon}</Text>
-            <Text style={[styles.legendText, { color: schedule.shifts[s].color }]}>{SHIFT_LABEL_SHORT[s]}</Text>
-          </View>
-        ))}
+      <View style={styles.doneToolbar}>
+        <View style={styles.legendRow}>
+          {SHIFT_ORDER.map((s) => (
+            <View key={s} style={[styles.legendChip, { borderColor: schedule.shifts[s].color }]}>
+              <Text style={{ fontSize: 14 }}>{schedule.shifts[s].icon}</Text>
+              <Text style={[styles.legendText, { color: schedule.shifts[s].color }]}>{SHIFT_LABEL_SHORT[s]}</Text>
+            </View>
+          ))}
+        </View>
+        <TouchableOpacity
+          style={styles.resetTopBtn}
+          onPress={onReset}
+          activeOpacity={0.85}
+          testID="schedule-reset-btn"
+        >
+          <Ionicons name="refresh" size={14} color={colors.red} />
+          <Text style={styles.resetTopText}>Reset</Text>
+        </TouchableOpacity>
       </View>
 
       {months.map((m) => (
@@ -1254,6 +1331,40 @@ const styles = StyleSheet.create({
   btnGhostText: { color: colors.textSecondary, fontWeight: '800', fontSize: 13 },
   btnPrimary: { backgroundColor: colors.cyan },
   btnPrimaryText: { color: colors.bg, fontWeight: '900', fontSize: 13, letterSpacing: 0.3 },
+
+  // Cycle 7-col grid (Confirm / Assign / Anchor steps)
+  cycleGridWrap: { width: '100%', marginVertical: spacing.md },
+  cycleHeaderRow: { flexDirection: 'row', marginBottom: 4 },
+  cycleHeaderCell: { flex: 1, color: colors.textMuted, fontSize: 10, fontWeight: '800', textAlign: 'center', letterSpacing: 0.5 },
+  cycleGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  cycleCell: {
+    width: `${100 / 7}%`, aspectRatio: 0.9, padding: 2,
+    alignItems: 'center', justifyContent: 'center', gap: 1,
+    borderRadius: radii.sm, borderWidth: 1.5,
+  },
+  cycleCellSelected: { borderWidth: 3, transform: [{ scale: 1.04 }] },
+  cycleCellBlank: { backgroundColor: 'transparent', borderColor: 'transparent' as any },
+  cycleCellIdx: { color: colors.textMuted, fontSize: 8, fontWeight: '900' },
+  cycleCellEmoji: { fontSize: 18 },
+  cycleCellLabel: { fontSize: 10, fontWeight: '900' },
+  cycleCellTime: { color: colors.textSecondary, fontSize: 9 },
+
+  // Expand button on rotating-pick step
+  expandBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 12, marginTop: spacing.sm, borderRadius: radii.pill,
+    backgroundColor: colors.cyan + '15', borderWidth: 1, borderColor: colors.cyan + '88',
+  },
+  expandBtnText: { color: colors.cyan, fontSize: 12, fontWeight: '900' },
+
+  // Done view top toolbar (legend left, reset right)
+  doneToolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginVertical: spacing.sm, gap: 8 },
+  resetTopBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: radii.pill,
+    backgroundColor: colors.red + '15', borderWidth: 1, borderColor: colors.red + '88',
+  },
+  resetTopText: { color: colors.red, fontSize: 11, fontWeight: '900', letterSpacing: 0.3 },
 
   // Final 6-month view
   monthCard: {
