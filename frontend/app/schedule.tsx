@@ -14,7 +14,7 @@
  *  Master toggle lives on the Profile row. Wizard auto-skips when
  *  schedule.setup_complete is true; long-press Profile row reopens it.
  */
-import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -27,7 +27,6 @@ import {
   Modal,
   Platform,
   KeyboardAvoidingView,
-  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
@@ -35,7 +34,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics';
 import { api, type ShiftSchedule, type ShiftType } from '../src/api';
 import { colors, spacing, radii } from '../src/theme';
-import { showAlert, showConfirm } from '../src/uiAlert';
+import { showAlert } from '../src/uiAlert';
 import {
   iso,
   addDays,
@@ -52,8 +51,6 @@ const SHIFT_LABEL: Record<ShiftType, string> = { day: 'Day Shift', night: 'Night
 const SHIFT_LABEL_SHORT: Record<ShiftType, string> = { day: 'Day', night: 'Night', off: 'Off' };
 
 type WizardStep = 'intro' | 'weekly' | 'rotating-pick' | 'rotating-confirm' | 'rotating-shifts' | 'anchor' | 'done';
-
-const SCREEN_W = Dimensions.get('window').width;
 
 export default function ScheduleScreen() {
   const router = useRouter();
