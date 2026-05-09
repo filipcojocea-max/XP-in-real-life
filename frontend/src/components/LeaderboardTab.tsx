@@ -197,10 +197,11 @@ function WinnerSpotlight({ winner, onTap }: { winner: LeaderboardRow & { medal_r
           styles.winnerCard,
           revoked && { borderColor: colors.red + 'aa', backgroundColor: colors.red + '12' },
           !revoked && {
-            shadowColor: GOLD,
-            shadowOffset: { width: 0, height: 0 },
-            shadowOpacity: opacity as any,
-            shadowRadius: shadowRadius as any,
+            // Static glow — RN Animated can't interpolate boxShadow strings
+            // so the dynamic pulse is replaced with a constant gold halo.
+            boxShadow: `0 0 16px ${GOLD}CC`,
+            elevation: 8,
+            opacity: opacity as any,
           },
         ]}
       >

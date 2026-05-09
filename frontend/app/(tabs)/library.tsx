@@ -670,9 +670,8 @@ const styles = StyleSheet.create({
   },
   segmentBtnActive: {
     backgroundColor: colors.green,
-    shadowColor: colors.green,
-    shadowOpacity: 0.5,
-    shadowRadius: 10,
+    boxShadow: `0 0 10px ${colors.green}80`,
+    elevation: 6,
   },
   segmentText: { color: colors.textSecondary, fontSize: 13, fontWeight: '800', letterSpacing: 0.3 },
   segmentTextActive: { color: colors.bg },
@@ -729,9 +728,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     borderRadius: radii.pill,
     backgroundColor: colors.green,
-    shadowColor: colors.green,
-    shadowOpacity: 0.5,
-    shadowRadius: 12,
+    boxShadow: `0 0 12px ${colors.green}80`,
+    elevation: 6,
   },
   browseText: { color: colors.bg, fontWeight: '800', fontSize: 14 },
 

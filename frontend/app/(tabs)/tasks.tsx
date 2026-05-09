@@ -1079,10 +1079,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.green,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: colors.green,
-    shadowOpacity: 0.7,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 0 },
+    boxShadow: `0 0 16px ${colors.green}B3`,
+    elevation: 8,
     elevation: 10,
   },
 

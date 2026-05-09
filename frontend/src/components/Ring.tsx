@@ -65,10 +65,8 @@ export default function Ring({
             StyleSheet.absoluteFillObject,
             {
               borderRadius: size / 2,
-              shadowColor: color,
-              shadowOpacity: 0.5,
-              shadowRadius: 18,
-              shadowOffset: { width: 0, height: 0 },
+              boxShadow: `0 0 18px ${color}80`,
+              elevation: 6,
             },
           ]}
         />

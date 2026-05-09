@@ -571,10 +571,8 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     borderRadius: radii.pill,
     backgroundColor: colors.green,
-    shadowColor: colors.green,
-    shadowOpacity: 0.6,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 0 },
+    boxShadow: `0 0 16px ${colors.green}99`,
+    elevation: 8,
   },
   nextText: { color: colors.bg, fontSize: 16, fontWeight: '900', letterSpacing: 0.5 },
 });

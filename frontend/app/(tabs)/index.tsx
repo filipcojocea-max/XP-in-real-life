@@ -371,10 +371,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     flexDirection: 'row',
     gap: 8,
-    shadowColor: colors.green,
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 0 },
+    boxShadow: `0 0 16px ${colors.green}80`,
+    elevation: 8,
   },
   ctaText: { color: colors.bg, fontSize: 15, fontWeight: '800', letterSpacing: 0.5 },
 });
