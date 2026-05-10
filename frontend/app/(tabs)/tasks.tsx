@@ -15,6 +15,7 @@ import {
   Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect } from 'expo-router';
@@ -685,14 +686,20 @@ function TaskModal({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.modalBackdrop}
       >
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <ScrollView
+        <KeyboardAwareScrollView
+          // Auto-scrolls to the focused TextInput so the keyboard never
+          // covers what the user is typing. Critical for the long form
+          // (title + desc + custom XP value) that doesn't fit at once.
           style={{ width: '100%' }}
           contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
           keyboardShouldPersistTaps="handled"
+          extraScrollHeight={Platform.OS === 'ios' ? 16 : 96}
+          enableOnAndroid
+          enableResetScrollToCoords={false}
         >
           <View style={styles.modalSheet} testID="task-modal">
             <View style={styles.sheetHandle} />
@@ -914,7 +921,7 @@ function TaskModal({
               </TouchableOpacity>
             </View>
           </View>
-        </ScrollView>
+        </KeyboardAwareScrollView>
       </KeyboardAvoidingView>
     </Modal>
   );

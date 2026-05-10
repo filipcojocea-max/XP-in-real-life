@@ -10,6 +10,7 @@ That guarantees:
 """
 from __future__ import annotations
 import hashlib
+import random
 from datetime import date as _date
 
 # ─────────────────── 35+ Challenges ───────────────────
@@ -548,9 +549,39 @@ def get_today_quote(user_id: str, day: _date | None = None) -> dict:
     return QUOTES[_seeded_index(user_id, day, len(QUOTES), salt="quote")]
 
 
-def get_today_challenge(user_id: str, day: _date | None = None) -> dict:
+def get_today_challenge(
+    user_id: str,
+    day: _date | None = None,
+    *,
+    exclude_ids: set[str] | None = None,
+) -> dict:
+    """Picks the user's challenge for `day`.
+
+    The pool is the full CHALLENGES list MINUS any IDs in `exclude_ids`
+    (typically the set of challenge_ids the user has already completed).
+    The selection is shuffled per (user, day) so the order looks random
+    to the user, but is deterministic — opening the screen multiple times
+    on the same day always yields the SAME challenge. Once the user has
+    completed every available challenge, we fall back to the full pool
+    (so the experience never goes blank).
+    """
     day = day or _date.today()
-    return CHALLENGES[_seeded_index(user_id, day, len(CHALLENGES), salt="challenge")]
+    available = CHALLENGES
+    if exclude_ids:
+        filtered = [c for c in CHALLENGES if c["id"] not in exclude_ids]
+        # Wrap-around: when ALL challenges have been done, reuse the
+        # full library so the daily card keeps working.
+        if filtered:
+            available = filtered
+    # Stable per-day shuffle. We hash (user, day) → seed → permutation.
+    seed_bytes = hashlib.sha256(
+        f"{user_id}|{day.isoformat()}|challenge_perm".encode()
+    ).digest()
+    seed_int = int.from_bytes(seed_bytes[:8], "big")
+    rng = random.Random(seed_int)
+    pool = list(available)
+    rng.shuffle(pool)
+    return pool[0]
 
 
 def find_challenge(challenge_id: str) -> dict | None:

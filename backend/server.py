@@ -2657,6 +2657,28 @@ async def _tz_for_user(user_id: str) -> Optional[str]:
     return (prof or {}).get("timezone") or None
 
 
+async def _completed_challenge_ids(user_id: str) -> set[str]:
+    """All challenge_ids the user has SUCCESSFULLY completed (i.e. visible
+    in their Challenge History as a green entry). Used to filter the
+    daily-pick pool so already-completed challenges never repeat. The
+    auto-uncompleted entries (`auto_uncompleted=True`) are NOT excluded
+    so the user can have another shot at a challenge they ignored."""
+    out: set[str] = set()
+    cur = db.challenge_completions.find(
+        {
+            "user_id": user_id,
+            "completed": True,
+            "auto_uncompleted": {"$ne": True},
+        },
+        {"challenge_id": 1},
+    )
+    async for doc in cur:
+        cid = doc.get("challenge_id")
+        if cid:
+            out.add(cid)
+    return out
+
+
 async def _autoroll_uncompleted_challenges(user_id: str, current_day: "datetime.date") -> None:
     """For any challenge_state docs older than the current challenge day where
     the user did NOT complete the challenge, write an `Uncompleted` past entry
@@ -2733,7 +2755,7 @@ async def challenge_today(user_id: str = Depends(get_user_or_legacy)):
 
     today = cur_day.isoformat()
     quote = get_today_quote(user_id, cur_day)
-    ch = get_today_challenge(user_id, cur_day)
+    ch = get_today_challenge(user_id, cur_day, exclude_ids=await _completed_challenge_ids(user_id))
     state_doc = await db.challenge_state.find_one(
         {"user_id": user_id, "date": today}
     )
@@ -2756,7 +2778,7 @@ async def challenge_accept(user_id: str = Depends(get_user_or_legacy)):
     cur_day = _challenge_day_for_user(datetime.now(), wake, tz_name)
     await _autoroll_uncompleted_challenges(user_id, cur_day)
     today = cur_day.isoformat()
-    ch = get_today_challenge(user_id, cur_day)
+    ch = get_today_challenge(user_id, cur_day, exclude_ids=await _completed_challenge_ids(user_id))
     await db.challenge_state.update_one(
         {"user_id": user_id, "date": today},
         {"$set": {
@@ -2778,7 +2800,7 @@ async def challenge_reject(user_id: str = Depends(get_user_or_legacy)):
     cur_day = _challenge_day_for_user(datetime.now(), wake, tz_name)
     await _autoroll_uncompleted_challenges(user_id, cur_day)
     today = cur_day.isoformat()
-    ch = get_today_challenge(user_id, cur_day)
+    ch = get_today_challenge(user_id, cur_day, exclude_ids=await _completed_challenge_ids(user_id))
     await db.challenge_state.update_one(
         {"user_id": user_id, "date": today},
         {"$set": {
@@ -2803,7 +2825,7 @@ async def challenge_complete(
     cur_day = _challenge_day_for_user(datetime.now(), wake, tz_name)
     await _autoroll_uncompleted_challenges(user_id, cur_day)
     today = cur_day.isoformat()
-    ch = get_today_challenge(user_id, cur_day)
+    ch = get_today_challenge(user_id, cur_day, exclude_ids=await _completed_challenge_ids(user_id))
     # Difficulty-based XP: easy=30, difficult=60. Don't award if !completed.
     awarded_xp = 0
     if body.completed:

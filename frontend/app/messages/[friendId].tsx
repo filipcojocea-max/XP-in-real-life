@@ -25,6 +25,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import * as ImagePicker from 'expo-image-picker';
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing } from '../../src/theme';
@@ -177,17 +178,25 @@ export default function MessageThread() {
       </View>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
         {loading ? (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={colors.cyan} />
           </View>
         ) : (
-          <ScrollView
-            ref={scrollRef}
+          <KeyboardAwareScrollView
+            // Auto-scrolls so the focused TextInput is always above the
+            // keyboard. Without this the user has to type blindly because
+            // the keyboard sits on top of the message composer.
+            innerRef={(ref) => { (scrollRef as any).current = ref; }}
             style={{ flex: 1 }}
             contentContainerStyle={{ padding: spacing.md, gap: 6 }}
+            keyboardShouldPersistTaps="handled"
+            extraScrollHeight={Platform.OS === 'ios' ? 8 : 80}
+            enableOnAndroid
+            enableResetScrollToCoords={false}
           >
             {messages.length === 0 && (
               <Text style={styles.emptyChat}>
@@ -212,7 +221,7 @@ export default function MessageThread() {
                 </View>
               );
             })}
-          </ScrollView>
+          </KeyboardAwareScrollView>
         )}
 
         {/* AI refined preview — sits ABOVE the input pad */}
