@@ -1,7 +1,26 @@
 import type { FocusArea, TimeSlot } from './theme';
 import { getAuthToken, getAnonymousId, fireUnauthorized, fireAccountSuspended } from './AuthContext';
 
-const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
+/**
+ * API base URL resolution order:
+ *  1. EXPO_PUBLIC_API_URL — set this in your local .env (or your EAS build
+ *     env) when building a PRODUCTION app via `eas build`. It should point
+ *     to your real production backend (e.g. https://api.your-domain.com).
+ *  2. EXPO_PUBLIC_BACKEND_URL — what the Emergent preview environment
+ *     uses by default; falls back to it so dev/preview keeps working.
+ *
+ * IMPORTANT for production EAS builds:
+ *   Before running `eas build --platform android --profile production`,
+ *   either (a) add EXPO_PUBLIC_API_URL to your local .env, or (b) set it
+ *   as an EAS secret with:
+ *     eas secret:create --scope project --name EXPO_PUBLIC_API_URL \
+ *                       --type string --value https://api.your-domain.com
+ *   The Emergent preview ALWAYS uses EXPO_PUBLIC_BACKEND_URL so leaving
+ *   EXPO_PUBLIC_API_URL unset in this workspace does NOT break preview.
+ */
+const BASE =
+  (process.env.EXPO_PUBLIC_API_URL && process.env.EXPO_PUBLIC_API_URL.trim()) ||
+  process.env.EXPO_PUBLIC_BACKEND_URL;
 
 async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
