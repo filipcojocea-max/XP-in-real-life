@@ -365,7 +365,19 @@ export const api = {
     );
   },
 
-  // ── Admin: Global leaderboard (Creator only) ─────────────────────
+  // ── Admin: Player charts bundle (Creator only) ───────────────────
+  // Returns the same data shape used by the user's own /stats/weekly +
+  // /stats/monthly + /stats/by-area endpoints, bundled together for the
+  // "View Progress charts" drill-down on any player profile.
+  adminPlayerCharts: (playerId: string) =>
+    req<{
+      user_id: string;
+      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; tasks: number }[] };
+      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; tasks: number }[] };
+      by_area: Record<string, number>;
+    }>(`/admin/players/${playerId}/charts`),
+
+
   // Top-100 players by total XP, with switchable rolling window.
   adminGlobalLeaderboard: (opts: { period?: 'all' | 'week' | 'month' | 'year'; q?: string }) => {
     const qs = new URLSearchParams();

@@ -2193,6 +2193,69 @@ async def stats_by_area(user_id: str = Depends(get_user_or_legacy)):
     return {"by_area": result}
 
 
+# ─────────────── Admin: charts bundle for ANY player ───────────────
+# Powers the "View Progress charts" drill-down inside Creator-only
+# screens (Global Leaderboard → tap player → Progress tab). Returns the
+# same payload shape as /stats/weekly + /stats/monthly + /stats/by-area
+# concatenated, so the frontend can re-use the existing chart components
+# without any tweaks. Creator-only — 403 otherwise.
+@api_router.get("/admin/players/{player_id}/charts")
+async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or_legacy)):
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only.")
+    target = await db.profile.find_one({"_id": player_id}, {"_id": 1})
+    if not target:
+        raise HTTPException(404, "Player not found.")
+
+    today_d = datetime.now(timezone.utc).date()
+
+    # Pre-aggregate gifted XP per day for the entire 30-day window so
+    # we only do one DB scan for both weekly and monthly buckets.
+    gift_cur = db.gifts.find(
+        {"to_user_id": player_id, "kind": "xp"},
+        {"_id": 0, "created_at": 1, "amount": 1},
+    )
+    gifted_by_day: dict[str, int] = {}
+    async for g in gift_cur:
+        dt = (g.get("created_at") or "")[:10]
+        if dt:
+            gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
+
+    async def _bucket(days_back: int, label_fmt: str) -> list[dict]:
+        out: list[dict] = []
+        for i in range(days_back - 1, -1, -1):
+            d = today_d - timedelta(days=i)
+            d_str = d.isoformat()
+            logs = await db.task_logs.find(
+                {"user_id": player_id, "date": d_str}, {"_id": 0}
+            ).to_list(1000)
+            xp = sum(entry["xp_awarded"] for entry in logs)
+            out.append({
+                "date": d_str,
+                "day": d.strftime(label_fmt),
+                "xp": xp,
+                "gifted_xp": int(gifted_by_day.get(d_str, 0)),
+                "tasks": len(logs),
+            })
+        return out
+
+    weekly = await _bucket(7, "%a")
+    monthly = await _bucket(30, "%-d")
+
+    logs = await db.task_logs.find({"user_id": player_id}, {"_id": 0}).to_list(20000)
+    by_area = {area: 0 for area in FOCUS_AREAS}
+    for entry in logs:
+        area = entry.get("focus_area")
+        if area in by_area:
+            by_area[area] += entry.get("xp_awarded", 0)
+    return {
+        "user_id": player_id,
+        "weekly": {"days": weekly},
+        "monthly": {"days": monthly},
+        "by_area": by_area,
+    }
+
+
 # --------- Seed default tasks ---------
 DEFAULT_TASK_TEMPLATES = [
     {"title": "Morning reflection (5 min)", "focus_area": "mindset", "time_slot": "morning", "xp_value": 15, "description": "Set intentions for the day", "scheduled_time": "08:00"},
@@ -5432,20 +5495,28 @@ async def _refine_message_text(text: str) -> dict:
             api_key=api_key,
             session_id=f"msg-refine-{uuid.uuid4().hex[:8]}",
             system_message=(
-                "You are a strict but FRIENDLY message-safety + grammar editor for "
-                "private chat between friends inside a self-improvement app.\n"
+                "You are a MINIMAL-EDIT message-safety reviewer for private chat "
+                "between friends inside a self-improvement app.\n"
                 "INPUT: a single draft message the user is about to send.\n"
+                "GOLDEN RULE: PRESERVE the original text as exactly as possible. "
+                "Keep slang, capitalisation, abbreviations, emoji and tone intact. "
+                "Do NOT 'polish', re-phrase, or improve grammar/typos UNLESS leaving "
+                "them unchanged would feel jarringly broken.\n"
                 "TASKS:\n"
-                " 1. PRESERVE the original meaning and tone — refine, don't rewrite.\n"
-                " 2. Fix obvious typos and grammar.\n"
-                " 3. Replace profanity / swear words with PG-rated equivalents.\n"
-                " 4. Soften or remove direct threats, insults, or hate speech.\n"
-                " 5. If the draft contains anything sexual/explicit/predatory, threats of "
-                "violence, or self-harm encouragement → refined='' and severity='severe'.\n"
-                "    Otherwise: severity='mild' if you had to censor, else 'none'.\n"
-                "    flagged=true ONLY if severity='severe'.\n"
+                " 1. PASS-THROUGH 99% of normal chat (banter, jokes, swearing at oneself, "
+                "    excited messages, blunt feedback, criticism, frustration). severity='none'.\n"
+                " 2. ONLY soften when the message contains TARGETED HATE: slurs, dehumanising "
+                "    language, doxxing, or wording that reads like a personal attack on the "
+                "    recipient's identity (race, gender, religion, orientation, etc.). \n"
+                "    When you soften, change the MINIMUM number of words to make it feel less "
+                "    aggressive while keeping the speaker's point intact. severity='mild'.\n"
+                " 3. BLOCK (refined='', severity='severe', flagged=true) ONLY for: explicit "
+                "    sexual content directed at the recipient, credible violent threats, "
+                "    self-harm encouragement, or sexualised content involving minors.\n"
+                "Everyday profanity (e.g. 'damn', 'shit', 'fuck'), insults that aren't slurs, "
+                "frustration, or sarcasm are FINE — DO NOT touch them.\n"
                 "OUTPUT — return EXACTLY this JSON, no markdown:\n"
-                '{"refined": "<cleaned message>", "flagged": true|false, "severity": "none"|"mild"|"severe", "reason": "<short>"}'
+                '{"refined": "<text>", "flagged": true|false, "severity": "none"|"mild"|"severe", "reason": "<short>"}'
             ),
         ).with_model("openai", "gpt-4o-mini")
         msg = UserMessage(text=text[:MAX_MESSAGE_TEXT_LEN])
@@ -5473,14 +5544,29 @@ async def _check_image_safety(image_base64: str) -> dict:
         from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
         api_key = os.environ.get("EMERGENT_LLM_KEY")
         if not api_key:
-            return {"safe": False, "severity": "severe", "reason": "no-llm-key"}
+            # Fail-OPEN when LLM isn't configured: users have always been
+            # able to send screenshots of in-app content (leaderboards,
+            # profiles, etc.) — we never want to block them just because
+            # the moderation key is missing.
+            return {"safe": True, "severity": "none", "reason": "no-llm-key"}
         chat = LlmChat(
             api_key=api_key,
             session_id=f"msg-img-{uuid.uuid4().hex[:8]}",
             system_message=(
-                "You review images for a friend-to-friend DM in a self-improvement app. "
-                "Reject anything sexual/explicit/nude, violent/gore, hate-speech, or "
-                "minors. Reply ONLY with this JSON: "
+                "You review images for a friend-to-friend DM inside a self-improvement app.\n"
+                "ALLOW (mark safe=true) all of these — they are NEVER a violation:\n"
+                "  • Screenshots of THIS app (profile screens, leaderboards, tasks, badges, chats)\n"
+                "  • Screenshots of other apps, social media, websites, memes, text content\n"
+                "  • Photos of identifiable people (clothed, non-sexual) — friends sharing pics is normal\n"
+                "  • Names, usernames, public profile data, email addresses, phone numbers,\n"
+                "    addresses — none of these are 'personal information' violations here\n"
+                "  • Receipts, screenshots of conversations, anything text-heavy\n"
+                "REJECT (safe=false, severity=severe) ONLY if the image contains:\n"
+                "  • Sexual / explicit / nude content\n"
+                "  • Real-world graphic violence or gore\n"
+                "  • Hate-speech imagery (e.g. Nazi insignia)\n"
+                "  • Sexualized or exploitative content involving minors\n"
+                "When unsure, default to SAFE. Reply ONLY with this JSON:\n"
                 '{"safe": true|false, "severity": "none"|"mild"|"severe", "reason": "<short>"}'
             ),
         ).with_model("openai", "gpt-4o-mini")
@@ -5490,12 +5576,15 @@ async def _check_image_safety(image_base64: str) -> dict:
         import re, json as _json
         m = re.search(r"\{.*\}", raw, re.S)
         data = _json.loads(m.group(0)) if m else {}
-        sev = str(data.get("severity", "severe")).lower()
+        sev = str(data.get("severity", "none")).lower()
         if sev not in ("none", "mild", "severe"):
-            sev = "severe"
-        return {"safe": bool(data.get("safe", False)), "severity": sev, "reason": str(data.get("reason", ""))[:200]}
+            sev = "none"
+        # Only SEVERE strictly blocks. Mild is allowed through with a log entry.
+        safe = bool(data.get("safe", True)) and sev != "severe"
+        return {"safe": safe, "severity": sev, "reason": str(data.get("reason", ""))[:200]}
     except Exception as e:
-        return {"safe": False, "severity": "severe", "reason": f"check failed: {e}"}
+        # Fail-OPEN on errors so a flaky LLM never blocks innocent images.
+        return {"safe": True, "severity": "none", "reason": f"check failed: {e}"}
 
 
 async def _file_admin_report(reported_user_id: str, kind: str, severity: str, excerpt: str, reason: str):
@@ -5645,21 +5734,31 @@ async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_use
     if len(refined) > MAX_MESSAGE_TEXT_LEN:
         refined = refined[:MAX_MESSAGE_TEXT_LEN]
     severity = "none"
+    # Threads with the Creator on either side bypass the hard BLOCK gate
+    # entirely. The refinement still runs so typos/grammar can be polished
+    # and to keep the closeness-to-original behaviour, but a `severe`
+    # verdict no longer rejects the message — it's just logged for the
+    # admin report so the Creator stays aware. This unblocks Creator↔Player
+    # chats where the Creator regularly needs to send/receive screenshots,
+    # videos or blunt feedback that the default filter would otherwise gag.
+    is_admin_thread = bool(sender_is_admin or recipient_is_admin)
     if refined and not sender_is_admin:
-        # Admin/Creator messages bypass the safety/refinement filter —
-        # the Creator's text is trusted. /messages/refine is still
-        # available so the Creator can opt-in to grammar polishing.
         check = await _refine_message_text(refined)
         refined = (check.get("refined") or refined).strip()[:MAX_MESSAGE_TEXT_LEN]
         severity = check.get("severity", "none")
         if check.get("severity") == "severe":
             await _file_admin_report(user_id, "message_text", "severe", body.original_text or refined, check.get("reason", ""))
-            raise HTTPException(400, detail={"error": "blocked", "reason": "Message contains content that can't be sent. The incident has been logged."})
+            if not is_admin_thread:
+                raise HTTPException(400, detail={"error": "blocked", "reason": "Message contains content that can't be sent. The incident has been logged."})
+            # Admin thread: log but allow through. Restore the original
+            # text so the Creator sees what the user actually intended.
+            refined = (body.original_text or refined).strip()[:MAX_MESSAGE_TEXT_LEN] or refined
     if image_b64 and not sender_is_admin:
         ic = await _check_image_safety(image_b64)
         if not ic.get("safe"):
             await _file_admin_report(user_id, "message_image", ic.get("severity", "severe"), "<image>", ic.get("reason", ""))
-            raise HTTPException(400, detail={"error": "image_blocked", "reason": ic.get("reason", "Image rejected.")})
+            if not is_admin_thread:
+                raise HTTPException(400, detail={"error": "image_blocked", "reason": ic.get("reason", "Image rejected.")})
     msg = {
         "id": str(uuid.uuid4()),
         "thread_id": _thread_key(user_id, body.to_user_id),
