@@ -1958,6 +1958,10 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
     prof = await db.profile.find_one({"_id": user_id})
     await check_and_unlock_achievements(prof)
     goal.pop("_id", None)
+    # Surface is_locked + next_tick_available_at on the create response
+    # so the UI can show the countdown pill immediately for a freshly-
+    # created Monthly/Weekly goal (lock starts from `created_at`).
+    goal = _enrich_goal_lock_state(goal)
     return goal
 
 
@@ -1970,7 +1974,7 @@ async def update_goal(goal_id: str, body: GoalUpdate, user_id: str = Depends(get
     if res.matched_count == 0:
         raise HTTPException(404, "Goal not found")
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
-    return goal
+    return _enrich_goal_lock_state(goal) if goal else goal
 
 
 @api_router.post("/goals/{goal_id}/progress")
