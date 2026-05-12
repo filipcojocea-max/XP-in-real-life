@@ -1,57 +1,24 @@
 /**
- * Dynamic Expo config — exists only so we can override
- * `android.googleServicesFile` at EAS-build time using an EAS file
- * secret named `GOOGLE_SERVICES_JSON` (created with `eas secret:create
- * --scope project --name GOOGLE_SERVICES_JSON --type file --value
- * ./google-services.json`).
+ * Dynamic Expo config.
  *
- * Why this file exists:
- *   • `google-services.json` is in .gitignore (it shouldn't be committed
- *     to the repo by hand — and after the recent "Save to GitHub" push
- *     it isn't on the EAS build machine either).
- *   • EAS injects file-typed secrets as a temporary file path on disk
- *     at build time; we just read the path from `process.env`.
- *   • Local `expo start` / preview builds keep working because we fall
- *     back to the on-disk path that already exists in this workspace
- *     (`./google-services.json`) when the env var isn't present.
+ *  Firebase Cloud Messaging (FCM) has been REMOVED from this build per
+ *  user request — we now ship without `google-services.json` and the
+ *  `com.google.gms:google-services` Gradle plugin. The app still uses
+ *  `expo-notifications` for LOCAL notifications (scheduled reminders,
+ *  in-app foreground banners, etc.) which work fine without FCM.
  *
- * Everything else (icons, plugins, version codes, permissions, etc.)
- * stays in `app.json` as the source of truth — this file just spreads
- * that config and overrides one field.
+ *  REMOTE push from the backend (Expo push) will NOT deliver to Android
+ *  devices on this production build because Expo's Android delivery
+ *  pipeline requires FCM credentials. Re-enable later by:
+ *    1. Restoring `google-services.json`
+ *    2. Adding `"googleServicesFile": "./google-services.json"` to the
+ *       `expo.android` block of app.json (or piping via EAS file secret).
+ *
+ *  This file is intentionally a thin pass-through now — it stays around
+ *  so the project still has a JS-based config slot if we ever need to
+ *  inject env-driven overrides without editing app.json.
  */
 
-// `app.json` is auto-merged into `config` by Expo before this function
-// runs, so we don't need to import it manually. We only override the
-// android.googleServicesFile path.
 module.exports = ({ config }) => {
-  const android = config.android || {};
-
-  // 1. Highest priority: EAS-injected file path (real build).
-  // 2. If app.json has a placeholder secret-name string (no slash / dot),
-  //    treat it as "use the secret" and fall back to the on-disk file
-  //    when the env var isn't set (e.g. running `expo prebuild` locally
-  //    without `eas` invoking us). This keeps local Android prebuild
-  //    working even if someone forgets to export the env var.
-  // 3. Otherwise honour the literal path declared in app.json.
-  const declared = android.googleServicesFile;
-  const looksLikeSecretName =
-    typeof declared === 'string' &&
-    !declared.includes('/') &&
-    !declared.includes('.') &&
-    declared === declared.toUpperCase();
-
-  let resolved = declared;
-  if (process.env.GOOGLE_SERVICES_JSON) {
-    resolved = process.env.GOOGLE_SERVICES_JSON;
-  } else if (looksLikeSecretName) {
-    resolved = './google-services.json';
-  }
-
-  return {
-    ...config,
-    android: {
-      ...android,
-      googleServicesFile: resolved,
-    },
-  };
+  return { ...config };
 };
