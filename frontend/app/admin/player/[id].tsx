@@ -390,8 +390,8 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
 const CHART_W = Dimensions.get('window').width - spacing.md * 2 - spacing.md * 2;
 const CHART_H = 160;
 
-function BarChart({ days }: { days: { day: string; xp: number; tasks: number; penalty_xp?: number }[] }) {
-  const maxXp = useMemo(() => Math.max(10, ...days.map((d) => (d.xp || 0) + (d.penalty_xp || 0))), [days]);
+function BarChart({ days }: { days: { day: string; xp: number; tasks: number; penalty_xp?: number; goal_xp?: number }[] }) {
+  const maxXp = useMemo(() => Math.max(10, ...days.map((d) => (d.xp || 0) + (d.penalty_xp || 0) + (d.goal_xp || 0))), [days]);
   const pad = 18;
   const innerW = CHART_W - pad * 2;
   const innerH = CHART_H - pad * 2;
@@ -404,18 +404,22 @@ function BarChart({ days }: { days: { day: string; xp: number; tasks: number; pe
         {days.map((d, i) => {
           const x = pad + (innerW / days.length) * i + (innerW / days.length - bw) / 2;
           const earnedH = Math.max(2, (d.xp / maxXp) * innerH);
+          const goalH = d.goal_xp ? Math.max(2, (d.goal_xp / maxXp) * innerH) : 0;
           const penaltyH = d.penalty_xp ? Math.max(2, (d.penalty_xp / maxXp) * innerH) : 0;
           const yEarnedTop = pad + innerH - earnedH;
-          const yPenaltyTop = yEarnedTop - penaltyH;
+          const yGoalTop = yEarnedTop - goalH;
+          const yPenaltyTop = yGoalTop - penaltyH;
           return (
             <React.Fragment key={d.day + i}>
               {/* Earned XP segment (cyan) */}
               {d.xp > 0 ? (
                 <Rect x={x} y={yEarnedTop} width={bw} height={earnedH} rx={3} fill={colors.cyan} opacity={0.85} />
               ) : null}
-              {/* Penalty overlay (BLACK) — stacked on TOP of the earned bar so
-                  the visual height = earned + penalty (penalty subtracted
-                  from XP this day). */}
+              {/* GREEN goal-XP segment — stacked on the cyan task XP. */}
+              {goalH > 0 ? (
+                <Rect x={x} y={yGoalTop} width={bw} height={goalH} rx={3} fill="#22C55E" stroke="#16A34A" strokeWidth={1} />
+              ) : null}
+              {/* BLACK penalty overlay — stacked on top of earned+goal. */}
               {penaltyH > 0 ? (
                 <Rect x={x} y={yPenaltyTop} width={bw} height={penaltyH} rx={3} fill="#000000" stroke={colors.red} strokeWidth={1} />
               ) : null}
@@ -423,8 +427,8 @@ function BarChart({ days }: { days: { day: string; xp: number; tasks: number; pe
                 {d.day}
               </SvgText>
               {d.xp > 0 ? (
-                <SvgText x={x + bw / 2} y={Math.max(yPenaltyTop, yEarnedTop) - 3} fontSize={9} fill={colors.cyan} textAnchor="middle">
-                  {d.xp}
+                <SvgText x={x + bw / 2} y={Math.min(yPenaltyTop, yGoalTop, yEarnedTop) - 3} fontSize={9} fill={d.goal_xp ? '#22C55E' : colors.cyan} textAnchor="middle">
+                  {d.xp + (d.goal_xp || 0)}
                 </SvgText>
               ) : null}
               {penaltyH > 0 ? (
@@ -436,20 +440,21 @@ function BarChart({ days }: { days: { day: string; xp: number; tasks: number; pe
           );
         })}
       </Svg>
-      <Text style={styles.chartCaption}>XP earned per day · last 7 days · max {maxXp} · <Text style={{ color: colors.red }}>black = penalty</Text></Text>
+      <Text style={styles.chartCaption}>XP earned per day · last 7 days · max {maxXp} · <Text style={{ color: '#22C55E' }}>green = goal</Text> · <Text style={{ color: colors.red }}>black = penalty</Text></Text>
     </View>
   );
 }
 
-function LineChart({ days }: { days: { day: string; xp: number; penalty_xp?: number }[] }) {
-  const maxXp = useMemo(() => Math.max(10, ...days.map((d) => (d.xp || 0) + (d.penalty_xp || 0))), [days]);
+function LineChart({ days }: { days: { day: string; xp: number; penalty_xp?: number; goal_xp?: number }[] }) {
+  const maxXp = useMemo(() => Math.max(10, ...days.map((d) => (d.xp || 0) + (d.penalty_xp || 0) + (d.goal_xp || 0))), [days]);
   const pad = 18;
   const innerW = CHART_W - pad * 2;
   const innerH = CHART_H - pad * 2;
   const points = days.map((d, i) => {
+    const total = d.xp + (d.goal_xp || 0);
     const x = pad + (innerW / Math.max(1, days.length - 1)) * i;
-    const y = pad + innerH - (d.xp / maxXp) * innerH;
-    return { x, y, xp: d.xp, label: d.day, penaltyXp: d.penalty_xp || 0 };
+    const y = pad + innerH - (total / maxXp) * innerH;
+    return { x, y, xp: total, label: d.day, penaltyXp: d.penalty_xp || 0, goalXp: d.goal_xp || 0 };
   });
   const polyline = points.map((p) => `${p.x},${p.y}`).join(' ');
   return (
@@ -459,10 +464,8 @@ function LineChart({ days }: { days: { day: string; xp: number; penalty_xp?: num
         <Polyline points={polyline} fill="none" stroke={colors.cyan} strokeWidth={2} />
         {points.map((p, i) => (
           <React.Fragment key={i}>
-            <Circle cx={p.x} cy={p.y} r={p.xp > 0 ? 3 : 2} fill={p.xp > 0 ? colors.cyan : colors.textMuted} />
-            {/* BLACK marker on penalty days — drawn above the XP point at
-                a height proportional to the penalty so it visually maps
-                to the deduction. */}
+            <Circle cx={p.x} cy={p.y} r={p.xp > 0 ? 3 : 2} fill={p.goalXp > 0 ? '#22C55E' : p.xp > 0 ? colors.cyan : colors.textMuted} />
+            {/* BLACK marker on penalty days — height = deducted XP. */}
             {p.penaltyXp > 0 ? (
               <Circle
                 cx={p.x}
@@ -482,7 +485,7 @@ function LineChart({ days }: { days: { day: string; xp: number; penalty_xp?: num
           </SvgText>
         ))}
       </Svg>
-      <Text style={styles.chartCaption}>XP earned per day · last 30 days · max {maxXp} · <Text style={{ color: colors.red }}>black = penalty</Text></Text>
+      <Text style={styles.chartCaption}>XP earned per day · last 30 days · max {maxXp} · <Text style={{ color: '#22C55E' }}>green = goal</Text> · <Text style={{ color: colors.red }}>black = penalty</Text></Text>
     </View>
   );
 }

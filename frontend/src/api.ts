@@ -248,7 +248,7 @@ export type DailyStats = {
   xp_today: number;
 };
 
-export type WeeklyStats = { days: { date: string; day: string; xp: number; gifted_xp?: number; penalty_xp?: number; tasks: number }[] };
+export type WeeklyStats = { days: { date: string; day: string; xp: number; gifted_xp?: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
 
 export type OnboardingPayload = {
   name?: string;
@@ -391,8 +391,8 @@ export const api = {
   adminPlayerCharts: (playerId: string) =>
     req<{
       user_id: string;
-      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; tasks: number }[] };
-      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; tasks: number }[] };
+      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
+      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
       by_area: Record<string, number>;
     }>(`/admin/players/${playerId}/charts`),
 

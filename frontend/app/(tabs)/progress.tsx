@@ -101,8 +101,8 @@ export default function Progress() {
   // chart total per-day so users see ONE consolidated number for the
   // day — the colour split (green/cyan vs gold) still shows them
   // visually that part of the day's XP came from a gift.
-  const dayTotal = (d: { xp: number; gifted_xp?: number; penalty_xp?: number }) =>
-    d.xp + (d.gifted_xp || 0) + (d.penalty_xp || 0);
+  const dayTotal = (d: { xp: number; gifted_xp?: number; penalty_xp?: number; goal_xp?: number }) =>
+    d.xp + (d.gifted_xp || 0) + (d.penalty_xp || 0) + (d.goal_xp || 0);
   const maxXp = Math.max(1, ...days.map(dayTotal));
   // Wider chart for the monthly view so 30 bars don't overlap. Ensures
   // each bar still has at least ~3px of breathing room.
@@ -228,15 +228,18 @@ export default function Progress() {
             {days.map((d, i) => {
               const earnedXp = d.xp;
               const giftedXp = d.gifted_xp || 0;
+              const goalXp = (d as any).goal_xp || 0;
               const penaltyXp = (d as any).penalty_xp || 0;
-              const totalXp = earnedXp + giftedXp + penaltyXp;
+              const totalXp = earnedXp + giftedXp + goalXp + penaltyXp;
               const earnedH = ((chartH - pad * 2) * earnedXp) / maxXp;
+              const goalH = ((chartH - pad * 2) * goalXp) / maxXp;
               const giftedH = ((chartH - pad * 2) * giftedXp) / maxXp;
               const penaltyH = ((chartH - pad * 2) * penaltyXp) / maxXp;
               const x = pad + i * segmentW + (segmentW - barW) / 2;
               const yEarnedTop = chartH - pad - earnedH;
-              const yGiftedTop = chartH - pad - earnedH - giftedH;
-              const yPenaltyTop = chartH - pad - earnedH - giftedH - penaltyH;
+              const yGoalTop = chartH - pad - earnedH - goalH;
+              const yGiftedTop = chartH - pad - earnedH - goalH - giftedH;
+              const yPenaltyTop = chartH - pad - earnedH - goalH - giftedH - penaltyH;
               const isToday = i === todayIdx;
               const showLabel = totalXp > 0 && (i % showLabelEveryN === 0 || isToday);
               const showAxisLabel = i % showLabelEveryN === 0 || isToday || i === 0;
@@ -252,6 +255,22 @@ export default function Progress() {
                       // Today's bar uses the brighter cyan accent so users
                       // can see it rise in real time as they earn XP.
                       fill={isToday ? colors.cyan : colors.green}
+                    />
+                  ) : null}
+                  {/* GREEN goal-XP segment — XP earned from completing
+                      long-term goals on this day. Stacked on the earned
+                      cyan bar so users can clearly see big goal payouts
+                      contributing to their daily total. */}
+                  {goalXp > 0 ? (
+                    <Rect
+                      x={x}
+                      y={yGoalTop}
+                      width={barW}
+                      height={Math.max(2, goalH)}
+                      rx={4}
+                      fill="#22C55E"
+                      stroke="#16A34A"
+                      strokeWidth={1}
                     />
                   ) : null}
                   {/* YELLOW gifted-XP segment stacked on top of the
@@ -293,14 +312,14 @@ export default function Progress() {
                       fill="rgba(255,255,255,0.1)"
                     />
                   ) : null}
-                  {/* Total XP value above each bar (earned + gifted) */}
+                  {/* Total XP value above each bar (earned + gifted + goal) */}
                   {showLabel ? (
                     <SvgText
                       x={x + barW / 2}
-                      y={Math.min(yPenaltyTop, yGiftedTop, yEarnedTop) - 4}
+                      y={Math.min(yPenaltyTop, yGiftedTop, yGoalTop, yEarnedTop) - 4}
                       fontSize="10"
                       fontWeight="800"
-                      fill={penaltyXp > 0 ? '#FF3B5C' : giftedXp > 0 ? '#FFD700' : isToday ? colors.cyan : colors.text}
+                      fill={penaltyXp > 0 ? '#FF3B5C' : giftedXp > 0 ? '#FFD700' : goalXp > 0 ? '#22C55E' : isToday ? colors.cyan : colors.text}
                       textAnchor="middle"
                     >
                       {penaltyXp > 0 ? `-${penaltyXp}` : totalXp}
@@ -370,9 +389,10 @@ export default function Progress() {
             />
             {days.map((d, i) => {
               const cx = xCenters[i];
-              // Trend dot reflects the COMBINED total (earned + gifted)
-              // so creators' XP gifts visibly bump the curve.
-              const totalXpForDay = d.xp + (d.gifted_xp || 0);
+              // Trend dot reflects the COMBINED total (earned + gifted + goal)
+              // so creators' XP gifts AND long-term-goal payouts visibly
+              // bump the curve.
+              const totalXpForDay = d.xp + (d.gifted_xp || 0) + ((d as any).goal_xp || 0);
               const penaltyXpForDay = (d as any).penalty_xp || 0;
               const cy = yForXp(totalXpForDay);
               const cyPenalty = penaltyXpForDay > 0 ? yForXp(penaltyXpForDay) : null;

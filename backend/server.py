@@ -1826,11 +1826,14 @@ async def uncomplete_task(task_id: str, body: CompleteTaskBody, user_id: str = D
 # Long-term goals can only be ticked once per cycle. The cycle length depends
 # on the goal's `unit`:
 #   days   →  one tick per **calendar date** (resets at local midnight)
-#   weeks  →  one tick per 7-day rolling window (from last tick)
-#   months →  one tick per 29-day rolling window
+#   weeks  →  one tick per 7-day rolling window
+#   months →  one tick per 30-day rolling window (per user spec — used to be 29)
+# Additionally for weeks/months: the FIRST tick is locked for the same
+# duration measured from `created_at` so a freshly-created Monthly goal
+# with target=1 can't be auto-completed on the same day it was created.
 GOAL_CYCLE_LOCKOUT: dict = {
     "weeks": timedelta(days=7),
-    "months": timedelta(days=29),
+    "months": timedelta(days=30),
 }
 
 
@@ -1841,9 +1844,37 @@ def _goal_lockout_for(unit: Optional[str]) -> Optional[timedelta]:
 def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
     """Returns (locked, next_unlock_dt). For `days` we use calendar-date
     boundaries — a goal ticked on 2026-04-27 is locked until 2026-04-28 00:00
-    *local* (midnight). For weeks/months we use a rolling-window timedelta."""
+    *local* (midnight). For weeks/months we use a rolling-window timedelta.
+
+    NEW (per user request): For weeks/months we ALSO lock the FIRST tick
+    for the same duration measured from the goal's `created_at`. This
+    prevents a freshly-created Monthly goal with target=1 from being
+    auto-completed on the same day it was created.
+    """
     unit = (goal.get("unit") or "").lower()
     last_iso = goal.get("last_ticked_at")
+    lock = GOAL_CYCLE_LOCKOUT.get(unit)
+
+    # ── First-tick lock from creation date (weeks / months only) ──
+    # If the goal has NEVER been ticked and its cadence is weekly or
+    # monthly, the user must wait `lock` duration from `created_at`
+    # before the first tick is allowed.
+    if not last_iso and lock and unit in ("weeks", "months"):
+        created_iso = goal.get("created_at")
+        if created_iso:
+            try:
+                created = datetime.fromisoformat(str(created_iso).replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                next_at = created + lock
+                now = datetime.now(timezone.utc)
+                if now < next_at:
+                    return True, next_at
+            except Exception:
+                # Bad created_at → don't lock; goal must remain usable.
+                pass
+        return False, None
+
     if not last_iso:
         return False, None
     try:
@@ -1863,7 +1894,6 @@ def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
         now = datetime.now(next_local_midnight.tzinfo)
         return now < next_local_midnight, next_local_midnight
 
-    lock = GOAL_CYCLE_LOCKOUT.get(unit)
     if not lock:
         return False, None
     next_at = last + lock
@@ -2017,6 +2047,11 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     if completed and not goal.get("completed"):
         update["completed_at"] = now_iso()
         awarded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
+        # Persist the EXACT XP we awarded on this completion so a future
+        # un-tick refunds the right amount even if the goal's xp_reward
+        # has been edited since (per user's "scoped by goal_id" spec).
+        update["xp_awarded_on_complete"] = awarded_xp
+        update["last_completed_at"] = update["completed_at"]
         await db.profile.update_one(
             {"_id": user_id},
             {"$inc": {"goals_completed": 1, "total_xp": awarded_xp}},
@@ -2027,18 +2062,41 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
             user_id, awarded_xp,
             source="goal_complete",
             focus_area=goal.get("focus_area") or "mindset",
+            goal_id=goal_id,
+            kind="goal_complete",
         )
         prof = await db.profile.find_one({"_id": user_id})
         await check_and_unlock_achievements(prof)
     elif goal.get("completed") and not completed:
-        # User reduced progress below target after the goal had already been
-        # marked complete → revoke the previously-awarded XP.
-        refunded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
+        # User reduced progress below target after the goal had already
+        # been marked complete → revoke the previously-awarded XP using
+        # the EXACT amount we awarded on completion (scoped by goal_id
+        # per user spec). Fall back to xp_reward only if older goals
+        # don't have the field populated.
+        refunded_xp = int(
+            goal.get("xp_awarded_on_complete")
+            or goal.get("xp_reward")
+            or GOAL_XP_DEFAULT
+        )
         update["completed_at"] = None
+        update["xp_awarded_on_complete"] = None
         await db.profile.update_one(
             {"_id": user_id},
             {"$inc": {"goals_completed": -1, "total_xp": -refunded_xp}},
         )
+        # Mirror on the charts: delete the previously-inserted
+        # goal_complete row(s) for this goal so the green segment
+        # disappears for the day it was logged. Scoped strictly by
+        # (user_id, goal_id, kind='goal_complete') so other rows from
+        # other goals stay intact.
+        try:
+            await db.task_logs.delete_many({
+                "user_id": user_id,
+                "goal_id": goal_id,
+                "kind": "goal_complete",
+            })
+        except Exception:
+            logger.exception("[goal-uncomplete] chart row cleanup failed")
     await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
     goal = _enrich_goal_lock_state(goal)
@@ -2137,23 +2195,45 @@ async def stats_weekly(user_id: str = Depends(get_user_or_legacy)):
         dt = p.get("date")
         if dt:
             penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
+    # Pre-aggregate goal-completion XP so we can render a GREEN chart
+    # segment for "XP earned from completing long-term goals" on top of
+    # the cyan task-XP and gold gifted-XP bars.
+    goal_cur = db.task_logs.find(
+        {"user_id": user_id, "kind": "goal_complete"},
+        {"_id": 0, "date": 1, "xp_awarded": 1},
+    )
+    goal_by_day: dict[str, int] = {}
+    async for g in goal_cur:
+        dt = g.get("date")
+        if dt:
+            goal_by_day[dt] = goal_by_day.get(dt, 0) + int(g.get("xp_awarded", 0) or 0)
     for i in range(6, -1, -1):
         d = today_d - timedelta(days=i)
         d_str = d.isoformat()
         logs = await db.task_logs.find({"user_id": user_id, "date": d_str}, {"_id": 0}).to_list(1000)
         # Sum only positive task XP for the chart's "earned" segment so
         # the negative penalty mirror rows we insert into task_logs don't
-        # double-subtract from the displayed earned bar.
-        xp = sum(max(0, int(entry.get("xp_awarded") or 0)) for entry in logs)
+        # double-subtract from the displayed earned bar. Also EXCLUDE
+        # goal-complete rows since they're surfaced as the green segment.
+        xp = sum(
+            max(0, int(entry.get("xp_awarded") or 0))
+            for entry in logs
+            if entry.get("kind") != "goal_complete"
+        )
         gifted_xp = int(gifted_by_day.get(d_str, 0))
         penalty_xp = int(penalty_by_day.get(d_str, 0))
+        goal_xp = int(goal_by_day.get(d_str, 0))
         days.append({
             "date": d_str,
             "day": d.strftime("%a"),
             "xp": xp,
             "gifted_xp": gifted_xp,
             "penalty_xp": penalty_xp,
-            "tasks": len([e for e in logs if (e.get("kind") != "penalty")]),
+            "goal_xp": goal_xp,
+            "tasks": len([
+                e for e in logs
+                if e.get("kind") not in ("penalty", "goal_complete")
+            ]),
         })
     return {"days": days}
 
@@ -2189,6 +2269,16 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
         dt = p.get("date")
         if dt:
             penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
+    # Pre-aggregate goal-completion XP for the GREEN segment.
+    goal_cur = db.task_logs.find(
+        {"user_id": user_id, "kind": "goal_complete"},
+        {"_id": 0, "date": 1, "xp_awarded": 1},
+    )
+    goal_by_day: dict[str, int] = {}
+    async for g in goal_cur:
+        dt = g.get("date")
+        if dt:
+            goal_by_day[dt] = goal_by_day.get(dt, 0) + int(g.get("xp_awarded", 0) or 0)
     # 30-day window — covers a calendar month at the visual level even
     # though we don't anchor on the 1st.
     for i in range(29, -1, -1):
@@ -2197,16 +2287,25 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
         logs = await db.task_logs.find(
             {"user_id": user_id, "date": d_str}, {"_id": 0}
         ).to_list(1000)
-        xp = sum(max(0, int(entry.get("xp_awarded") or 0)) for entry in logs)
+        xp = sum(
+            max(0, int(entry.get("xp_awarded") or 0))
+            for entry in logs
+            if entry.get("kind") != "goal_complete"
+        )
         gifted_xp = int(gifted_by_day.get(d_str, 0))
         penalty_xp = int(penalty_by_day.get(d_str, 0))
+        goal_xp = int(goal_by_day.get(d_str, 0))
         days.append({
             "date": d_str,
             "day": d.strftime("%-d"),  # day-of-month for compact axis
             "xp": xp,
             "gifted_xp": gifted_xp,
             "penalty_xp": penalty_xp,
-            "tasks": len([e for e in logs if (e.get("kind") != "penalty")]),
+            "goal_xp": goal_xp,
+            "tasks": len([
+                e for e in logs
+                if e.get("kind") not in ("penalty", "goal_complete")
+            ]),
         })
     return {"days": days}
 
@@ -2262,6 +2361,17 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
         dt = p.get("date")
         if dt:
             penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
+    # Pre-aggregate goal-completion XP per day so the admin chart also
+    # surfaces the GREEN goal-XP segment for the player being inspected.
+    goal_cur = db.task_logs.find(
+        {"user_id": player_id, "kind": "goal_complete"},
+        {"_id": 0, "date": 1, "xp_awarded": 1},
+    )
+    goal_by_day: dict[str, int] = {}
+    async for g in goal_cur:
+        dt = g.get("date")
+        if dt:
+            goal_by_day[dt] = goal_by_day.get(dt, 0) + int(g.get("xp_awarded", 0) or 0)
 
     async def _bucket(days_back: int, label_fmt: str) -> list[dict]:
         out: list[dict] = []
@@ -2271,14 +2381,22 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
             logs = await db.task_logs.find(
                 {"user_id": player_id, "date": d_str}, {"_id": 0}
             ).to_list(1000)
-            xp = sum(max(0, int(entry.get("xp_awarded") or 0)) for entry in logs)
+            xp = sum(
+                max(0, int(entry.get("xp_awarded") or 0))
+                for entry in logs
+                if entry.get("kind") != "goal_complete"
+            )
             out.append({
                 "date": d_str,
                 "day": d.strftime(label_fmt),
                 "xp": xp,
                 "gifted_xp": int(gifted_by_day.get(d_str, 0)),
                 "penalty_xp": int(penalty_by_day.get(d_str, 0)),
-                "tasks": len([e for e in logs if (e.get("kind") != "penalty")]),
+                "goal_xp": int(goal_by_day.get(d_str, 0)),
+                "tasks": len([
+                    e for e in logs
+                    if e.get("kind") not in ("penalty", "goal_complete")
+                ]),
             })
         return out
 
@@ -3979,6 +4097,9 @@ async def _log_xp_to_charts(
     amount: int,
     source: str,
     focus_area: str = "mindset",
+    *,
+    goal_id: Optional[str] = None,
+    kind: Optional[str] = None,
 ) -> None:
     """Write an XP row that the Progress-tab charts read.
 
@@ -4001,6 +4122,11 @@ async def _log_xp_to_charts(
     collection (rendered as the gold stacked segment), and double-
     logging them would inflate the daily totals.
 
+    `goal_id` + `kind` are optional metadata used by the goal-uncomplete
+    flow to reverse a previously-awarded log row (delete by goal_id +
+    kind='goal_complete'), and by the chart endpoints to split the
+    per-day total into the GREEN goal-XP segment.
+
     Never raises — chart logging is non-critical and must not block the
     XP grant if Mongo is hot.
     """
@@ -4012,7 +4138,7 @@ async def _log_xp_to_charts(
         # doesn't get a garbage bucket.
         if focus_area not in FOCUS_AREAS:
             focus_area = "mindset"
-        await db.task_logs.insert_one({
+        row = {
             "id": str(uuid.uuid4()),
             "user_id": user_id,
             # Synthetic task_id so this row can never be confused with a
@@ -4025,7 +4151,15 @@ async def _log_xp_to_charts(
             "xp_multiplier": 1.0,
             "completed_at": now_iso(),
             "_source": source,  # tag for analytics; not read by chart
-        })
+        }
+        # Tag goal-XP rows so (a) the chart endpoints can split out a
+        # GREEN goal-XP segment and (b) the un-tick flow can find and
+        # delete the row by (user_id, goal_id, kind='goal_complete').
+        if goal_id:
+            row["goal_id"] = goal_id
+        if kind:
+            row["kind"] = kind
+        await db.task_logs.insert_one(row)
     except Exception as e:
         logger.warning("[xp-chart-log] failed for source=%s: %s", source, e)
 
