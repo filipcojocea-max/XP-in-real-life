@@ -23,7 +23,6 @@
     },
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
-      "googleServicesFile": null,
       "versionCode": 125,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
