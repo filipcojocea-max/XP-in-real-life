@@ -248,7 +248,7 @@ export type DailyStats = {
   xp_today: number;
 };
 
-export type WeeklyStats = { days: { date: string; day: string; xp: number; gifted_xp?: number; tasks: number }[] };
+export type WeeklyStats = { days: { date: string; day: string; xp: number; gifted_xp?: number; penalty_xp?: number; tasks: number }[] };
 
 export type OnboardingPayload = {
   name?: string;
@@ -391,10 +391,38 @@ export const api = {
   adminPlayerCharts: (playerId: string) =>
     req<{
       user_id: string;
-      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; tasks: number }[] };
-      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; tasks: number }[] };
+      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; tasks: number }[] };
+      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; tasks: number }[] };
       by_area: Record<string, number>;
     }>(`/admin/players/${playerId}/charts`),
+
+  // ── XP Penalty (Creator-only) ────────────────────────────────────
+  // Apply a penalty to a player. Subtracts XP, queues an in-app modal
+  // for the next time they open the app, and fires a push.
+  adminApplyPenalty: (playerId: string, amount: number, note: string) =>
+    req<{
+      ok: boolean;
+      penalty_id: string;
+      player_id: string;
+      amount: number;
+      note: string;
+      new_total_xp: number;
+      new_level: number;
+      created_at: string;
+    }>(`/admin/players/${playerId}/penalty`, {
+      method: 'POST',
+      body: JSON.stringify({ amount, note }),
+    }),
+  // Penalties — for the receiving player.
+  penaltiesPending: () =>
+    req<{ penalties: PenaltyNotice[] }>('/penalties/pending'),
+  penaltyAcknowledge: (id: string) =>
+    req<{ ok: boolean; already?: boolean }>(`/penalties/${id}/acknowledge`, { method: 'POST' }),
+  penaltiesHistory: (limit: number = 50) =>
+    req<{ penalties: PenaltyNotice[] }>(`/penalties/history?limit=${limit}`),
+  // Admin view of any player's penalty history.
+  adminPlayerPenalties: (playerId: string) =>
+    req<{ penalties: PenaltyNotice[] }>(`/admin/players/${playerId}/penalties`),
 
 
   // Top-100 players by total XP, with switchable rolling window.
@@ -1224,6 +1252,29 @@ export type Player = {
   // /friends/list endpoint (null elsewhere). Powers the unfriend
   // confirmation dialog's "You've been friends for X days" subtitle.
   friended_at?: string | null;
+  // Live counts surfaced by /friends/profile/{id} for the public
+  // profile card so every viewer sees the freshest XP/level/streaks/
+  // quest+goal counts. These are recomputed on every read so they
+  // never drift from the canonical task_logs / goals collections.
+  active_goals_count?: number;
+  total_goals_count?: number;
+  joined_at?: string | null;
+};
+
+/**
+ * XP Penalty notice — issued by the Creator/Admin and surfaced to the
+ * player via a full-screen modal on next app-open, plus a push
+ * notification. Stored in MongoDB as `xp_penalties`.
+ */
+export type PenaltyNotice = {
+  id: string;
+  creator_id: string;
+  player_id: string;
+  amount: number;          // positive XP value that was subtracted
+  note: string;
+  created_at: string;
+  date: string;            // YYYY-MM-DD (chart aggregation key)
+  acknowledged_at: string | null;
 };
 
 export type FriendRequestEntry = {

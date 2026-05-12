@@ -764,6 +764,25 @@ function PlayerProfileModal({
   const saving = savingId === player.user_id;
   const [showUnfriendConfirm, setShowUnfriendConfirm] = useState(false);
   const [unfriending, setUnfriending] = useState(false);
+  // Live-refresh the player's stats every time the modal opens, so the
+  // viewer always sees the most up-to-the-second XP/level/streak/quests/
+  // goals/last-active counters instead of a stale snapshot from the
+  // list endpoint.
+  const [livePlayer, setLivePlayer] = useState<Player>(player);
+  useEffect(() => { setLivePlayer(player); }, [player.user_id]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const fresh = await api.playerProfile(player.user_id);
+        if (!cancelled) setLivePlayer((prev) => ({ ...prev, ...fresh }));
+      } catch {/* keep snapshot on failure */}
+    })();
+    return () => { cancelled = true; };
+  }, [player.user_id]);
+  // Use livePlayer everywhere below so any later edits flip to fresh
+  // data without re-templating. We alias to `player` for minimal diff.
+  player = livePlayer;
 
   // Days since the friendship was accepted — drives the unfriend
   // confirmation dialog subtitle. Null when the server didn't send
@@ -845,6 +864,15 @@ function PlayerProfileModal({
             </View>
           )}
           <Text style={[styles.modalName, player.is_admin_view && { color: '#FFD700' }]}>{player.name}</Text>
+          {/* Live "last active" subtitle so the public profile card
+              clearly shows how fresh the player's activity is. Admin
+              creator profiles are always "Now" since they're omnipresent. */}
+          <Text style={styles.modalLastActive}>
+            <Ionicons name="time-outline" size={12} color={colors.textMuted} />{' '}
+            {player.is_admin_view
+              ? 'Last active: Now'
+              : `Last active: ${formatLastSeen((player as any).last_seen_at)}`}
+          </Text>
 
           <View style={styles.modalStatsGrid}>
             <ModalStat icon="flash" color={player.is_admin_view ? '#FFD700' : colors.amber}
@@ -857,6 +885,8 @@ function PlayerProfileModal({
               value={player.is_admin_view ? '∞' : player.tasks_completed.toString()} label="Quests" />
             <ModalStat icon="flag" color={player.is_admin_view ? '#FFD700' : colors.cyan}
               value={player.is_admin_view ? '∞' : player.goals_completed.toString()} label="Goals" />
+            <ModalStat icon="rocket" color={player.is_admin_view ? '#FFD700' : colors.cyan}
+              value={player.is_admin_view ? '∞' : ((player as any).active_goals_count ?? 0).toString()} label="Active goals" />
           </View>
 
           {player.bio && !player.is_admin_view ? (
@@ -1172,6 +1202,20 @@ function AdminControlsBlock({ userId, userName }: { userId: string; userName: st
         targetName={userName}
         onClose={() => setShowGift(false)}
       />
+
+      {/* Open the full creator-only player page where the XP Penalty
+          Subtraction tool + bar/line charts (with black penalty
+          overlay) + recent-penalty history live. */}
+      <TouchableOpacity
+        testID="admin-open-full-profile"
+        onPress={() => router.push(`/admin/player/${userId}` as any)}
+        style={styles.adminPenaltyBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="remove-circle" size={16} color={colors.red} />
+        <Text style={styles.adminPenaltyText}>XP Penalty Subtraction & Charts</Text>
+        <Ionicons name="chevron-forward" size={14} color={colors.red} />
+      </TouchableOpacity>
     </View>
   );
 }
@@ -1628,7 +1672,8 @@ const styles = StyleSheet.create({
   },
   levelPillText: { color: colors.bg, fontWeight: '900', fontSize: 11, letterSpacing: 0.5 },
 
-  modalName: { color: colors.text, fontWeight: '900', fontSize: 24, textAlign: 'center', marginBottom: spacing.lg },
+  modalName: { color: colors.text, fontWeight: '900', fontSize: 24, textAlign: 'center', marginBottom: 4 },
+  modalLastActive: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginBottom: spacing.lg, fontWeight: '600' },
 
   modalStatsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: spacing.md },
   modalStatBox: {
@@ -1845,6 +1890,19 @@ const styles = StyleSheet.create({
     borderColor: colors.cyan,
   },
   adminDMText: { color: colors.cyan, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  adminPenaltyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    backgroundColor: colors.red + '22',
+    borderWidth: 1,
+    borderColor: colors.red,
+    marginTop: 8,
+  },
+  adminPenaltyText: { color: colors.red, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
 
   // Admin moderation badges on player cards
   suspendedDot: {

@@ -2125,18 +2125,35 @@ async def stats_weekly(user_id: str = Depends(get_user_or_legacy)):
         dt = (g.get("created_at") or "")[:10]
         if dt:
             gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
+    # Pre-aggregate XP penalties (Creator-only feature) so the bar/line
+    # charts can render a BLACK overlay segment on penalty days. Stored
+    # as positive ints in `xp_penalties.amount`; we surface as `penalty_xp`.
+    pen_cur = db.xp_penalties.find(
+        {"player_id": user_id},
+        {"_id": 0, "date": 1, "amount": 1},
+    )
+    penalty_by_day: dict[str, int] = {}
+    async for p in pen_cur:
+        dt = p.get("date")
+        if dt:
+            penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
     for i in range(6, -1, -1):
         d = today_d - timedelta(days=i)
         d_str = d.isoformat()
         logs = await db.task_logs.find({"user_id": user_id, "date": d_str}, {"_id": 0}).to_list(1000)
-        xp = sum(entry["xp_awarded"] for entry in logs)
+        # Sum only positive task XP for the chart's "earned" segment so
+        # the negative penalty mirror rows we insert into task_logs don't
+        # double-subtract from the displayed earned bar.
+        xp = sum(max(0, int(entry.get("xp_awarded") or 0)) for entry in logs)
         gifted_xp = int(gifted_by_day.get(d_str, 0))
+        penalty_xp = int(penalty_by_day.get(d_str, 0))
         days.append({
             "date": d_str,
             "day": d.strftime("%a"),
             "xp": xp,
             "gifted_xp": gifted_xp,
-            "tasks": len(logs),
+            "penalty_xp": penalty_xp,
+            "tasks": len([e for e in logs if (e.get("kind") != "penalty")]),
         })
     return {"days": days}
 
@@ -2161,6 +2178,17 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
         dt = (g.get("created_at") or "")[:10]
         if dt:
             gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
+    # Pre-aggregate XP penalties so monthly chart can show the black
+    # overlay for any penalty days within the 30-day window.
+    pen_cur = db.xp_penalties.find(
+        {"player_id": user_id},
+        {"_id": 0, "date": 1, "amount": 1},
+    )
+    penalty_by_day: dict[str, int] = {}
+    async for p in pen_cur:
+        dt = p.get("date")
+        if dt:
+            penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
     # 30-day window — covers a calendar month at the visual level even
     # though we don't anchor on the 1st.
     for i in range(29, -1, -1):
@@ -2169,14 +2197,16 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
         logs = await db.task_logs.find(
             {"user_id": user_id, "date": d_str}, {"_id": 0}
         ).to_list(1000)
-        xp = sum(entry["xp_awarded"] for entry in logs)
+        xp = sum(max(0, int(entry.get("xp_awarded") or 0)) for entry in logs)
         gifted_xp = int(gifted_by_day.get(d_str, 0))
+        penalty_xp = int(penalty_by_day.get(d_str, 0))
         days.append({
             "date": d_str,
             "day": d.strftime("%-d"),  # day-of-month for compact axis
             "xp": xp,
             "gifted_xp": gifted_xp,
-            "tasks": len(logs),
+            "penalty_xp": penalty_xp,
+            "tasks": len([e for e in logs if (e.get("kind") != "penalty")]),
         })
     return {"days": days}
 
@@ -2221,6 +2251,18 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
         if dt:
             gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
 
+    # Pre-aggregate XP penalties (Creator-only feature) so admin chart
+    # can show the BLACK overlay on penalty days for this player.
+    pen_cur = db.xp_penalties.find(
+        {"player_id": player_id},
+        {"_id": 0, "date": 1, "amount": 1},
+    )
+    penalty_by_day: dict[str, int] = {}
+    async for p in pen_cur:
+        dt = p.get("date")
+        if dt:
+            penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
+
     async def _bucket(days_back: int, label_fmt: str) -> list[dict]:
         out: list[dict] = []
         for i in range(days_back - 1, -1, -1):
@@ -2229,13 +2271,14 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
             logs = await db.task_logs.find(
                 {"user_id": player_id, "date": d_str}, {"_id": 0}
             ).to_list(1000)
-            xp = sum(entry["xp_awarded"] for entry in logs)
+            xp = sum(max(0, int(entry.get("xp_awarded") or 0)) for entry in logs)
             out.append({
                 "date": d_str,
                 "day": d.strftime(label_fmt),
                 "xp": xp,
                 "gifted_xp": int(gifted_by_day.get(d_str, 0)),
-                "tasks": len(logs),
+                "penalty_xp": int(penalty_by_day.get(d_str, 0)),
+                "tasks": len([e for e in logs if (e.get("kind") != "penalty")]),
             })
         return out
 
@@ -3176,7 +3219,7 @@ def _serialize_silence_state(prof: dict) -> Optional[dict]:
     }
 
 
-def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = False) -> dict:
+def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = False, live_extras: Optional[dict] = None) -> dict:
     """Public-facing trimmed profile for player cards / detail views.
 
     Special-case for the Creator/Admin: when OTHERS view this player,
@@ -3190,12 +3233,22 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
         dot next to their name in the admin's view of every list.
     These fields are omitted entirely for non-admin viewers so a regular
     user CANNOT discover that a player was previously suspended.
+
+    `live_extras` (optional) supplies freshly-computed values that override
+    the static profile snapshot — used by /friends/profile/{id} so the
+    public profile card always shows up-to-the-second XP/level/streak/
+    goal-count/quest-count even when the cached counters drift.
     """
     total_xp = int(prof.get("total_xp", 0) or 0)
     user_id = prof.get("_id") or prof.get("user_id")
     is_admin = _is_admin_email(prof.get("_email_cache"))
     viewing_self = status == "self"
     show_unlimited = is_admin and not viewing_self
+
+    # Derive a fresh level from total_xp on every read so a recent
+    # XP gift or penalty surfaces immediately (the cached `level`
+    # field can lag).
+    derived_level = level_from_xp(max(0, total_xp))
 
     base = {
         "user_id": user_id,
@@ -3208,12 +3261,15 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
             if (is_admin and not viewing_self)
             else (prof.get("full_name") or prof.get("name") or "Anonymous")
         ),
-        "level": int(prof.get("level", 1) or 1),
+        "level": int(prof.get("level", derived_level) or derived_level),
         "total_xp": total_xp,
         "current_streak": int(prof.get("current_streak", 0) or 0),
-        "best_streak": int(prof.get("best_streak", 0) or 0),
+        "best_streak": int(prof.get("best_streak", 0) or prof.get("longest_streak", 0) or 0),
         "goals_completed": int(prof.get("goals_completed", 0) or 0),
         "tasks_completed": int(prof.get("tasks_completed", 0) or 0),
+        # Live goal counts — overwritten by live_extras when supplied.
+        "active_goals_count": int(prof.get("active_goals_count", 0) or 0),
+        "total_goals_count": int(prof.get("total_goals_count", 0) or 0),
         "bio": prof.get("bio") or "",
         "avatar_base64": prof.get("avatar_base64"),
         "friend_status": status,  # none | pending_outgoing | pending_incoming | friends | self
@@ -3223,7 +3279,17 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
         # app / hit our API. Refreshed (throttled to once-per-minute) by
         # `_touch_last_seen` inside `get_user_or_legacy`.
         "last_seen_at": prof.get("last_seen_at"),
+        "joined_at": prof.get("created_at"),
     }
+    # Apply live-recomputed extras AFTER the snapshot has been built so
+    # they take precedence over any stale counters.
+    if live_extras:
+        for k, v in live_extras.items():
+            if v is not None:
+                base[k] = v
+        # Recompute level from (possibly) updated XP.
+        if "total_xp" in live_extras:
+            base["level"] = level_from_xp(max(0, int(live_extras["total_xp"])))
     if show_unlimited:
         base.update({
             "level": 999,         # special sentinel, frontend renders ∞
@@ -3232,6 +3298,8 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
             "best_streak": -1,
             "goals_completed": -1,
             "tasks_completed": -1,
+            "active_goals_count": -1,
+            "total_goals_count": -1,
             "bio": "",            # cleared as requested
         })
     if viewer_is_admin and not is_admin:
@@ -3347,7 +3415,39 @@ async def player_profile(other_id: str, user_id: str = Depends(get_user_or_legac
     rel = await _find_relationship(user_id, other_id)
     status = "self" if other_id == user_id else _relationship_status(rel, user_id)
     viewer_is_admin = await _is_admin_user(user_id)
-    return _serialize_player(prof, status, viewer_is_admin=viewer_is_admin)
+    # Compute LIVE-fresh stats by counting straight from the canonical
+    # collections. This guarantees the public profile card always shows
+    # up-to-the-second values even if the cached counters on the profile
+    # doc drift (e.g. due to a manual edit or a missed increment).
+    live_extras: dict = {}
+    try:
+        # Quest/task completions = positive-XP rows in task_logs.
+        completed_tasks = await db.task_logs.count_documents(
+            {"user_id": other_id, "xp_awarded": {"$gt": 0}}
+        )
+        # Goal counts (active + total).
+        active_goals = await db.goals.count_documents(
+            {"user_id": other_id, "completed": {"$ne": True}}
+        )
+        total_goals = await db.goals.count_documents({"user_id": other_id})
+        completed_goals = await db.goals.count_documents(
+            {"user_id": other_id, "completed": True}
+        )
+        live_extras = {
+            "tasks_completed": int(completed_tasks),
+            "active_goals_count": int(active_goals),
+            "total_goals_count": int(total_goals),
+            "goals_completed": int(completed_goals),
+            # XP and streak come from the profile doc which is updated
+            # synchronously on every task complete + penalty — those are
+            # already live, so we just forward the freshest read.
+            "total_xp": int(prof.get("total_xp", 0) or 0),
+            "current_streak": int(prof.get("current_streak", 0) or 0),
+            "best_streak": int(prof.get("best_streak", 0) or prof.get("longest_streak", 0) or 0),
+        }
+    except Exception:
+        logger.exception("[friends/profile] live_extras failed for %s", other_id)
+    return _serialize_player(prof, status, viewer_is_admin=viewer_is_admin, live_extras=live_extras)
 
 
 @api_router.get("/friends/profile/{other_id}/details")
@@ -8997,3 +9097,24 @@ async def focus_session_complete(
 # Final include for any endpoints declared AFTER the previous includes —
 # specifically the /admin/scheduler/* diagnostic endpoints above.
 app.include_router(api_router)
+
+
+# ═══════════════ XP Penalty system (Creator-only) ═══════════════
+# Wires the penalty router as a separate module to keep server.py from
+# growing further. Endpoints exposed under /api/admin/players/{id}/penalty
+# and /api/penalties/* — see penalties.py for the full contract.
+try:
+    from penalties import init_penalties as _init_penalties, attach_routes as _attach_penalty_routes  # noqa: E402
+    _init_penalties(
+        db=db,
+        is_admin_user=_is_admin_user,
+        get_user_or_legacy=get_user_or_legacy,
+        now_iso=now_iso,
+        send_expo_push=_send_expo_push,
+        serialize_profile=serialize_profile,
+        level_from_xp=level_from_xp,
+    )
+    _attach_penalty_routes(app, get_user_or_legacy)
+    logger.info("[penalty] routes attached")
+except Exception:
+    logger.exception("[penalty] failed to attach routes")

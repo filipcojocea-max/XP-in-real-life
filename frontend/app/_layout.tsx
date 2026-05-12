@@ -18,6 +18,7 @@ import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
 import { LevelUpReviewModal } from '../src/components/LevelUpReviewModal';
 import { useLevelUpDetector } from '../src/hooks/useLevelUpDetector';
 import { StripeReturnHandler } from '../src/StripeReturnHandler';
+import { PenaltyHost } from '../src/PenaltyHost';
 
 /**
  * LevelUpPromptHost — wires the level-up detector hook to the modal.
@@ -220,6 +221,12 @@ export default function RootLayout() {
                 confirmation alert if the webhook hasn't already
                 inserted the OWNED row. */}
             <StripeReturnHandler />
+            {/* Pops a full-screen "XP Penalty Received" modal the next
+                time the player opens the app after the Creator has
+                applied an XP deduction against them. Hold-to-close
+                gesture (2s) acknowledges + dismisses, then we advance
+                to the next pending penalty if any. */}
+            <PenaltyHost />
           </AuthGate>
         </View>
       </ImmersiveProvider>
