@@ -1,6 +1,6 @@
 {
   "cli": {
-    "version": ">= 18.9.1",
+    "version": ">= 10.2.2",
     "appVersionSource": "local"
   },
   "build": {
@@ -12,7 +12,10 @@
       "distribution": "internal"
     },
     "production": {
-      "autoIncrement": false
+      "autoIncrement": false,
+      "android": {
+        "credentialsSource": "local"
+      }
     }
   },
   "submit": {
