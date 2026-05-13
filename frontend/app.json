@@ -2,7 +2,7 @@
   "expo": {
     "name": "XP in Real Life",
     "slug": "xp-confidence",
-    "version": "1.0.22",
+    "version": "1.0.24",
     "orientation": "portrait",
     "icon": "./assets/images/new-icon.png",
     "scheme": "xpconfidence",
@@ -14,7 +14,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.emergent.xpconfidencec2316dfc",
-      "buildNumber": "126",
+      "buildNumber": "1019",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
         "NSCameraUsageDescription": "Take photos for profile and Spot the Object challenges",
@@ -24,7 +24,7 @@
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 126,
+      "versionCode": 1019,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/new-icon.png",
         "backgroundColor": "#000000"
