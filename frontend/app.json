@@ -14,7 +14,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.emergent.xpconfidencec2316dfc",
-      "buildNumber": "1022",
+      "buildNumber": "1023",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
         "NSCameraUsageDescription": "Take photos for profile and Spot the Object challenges",
@@ -24,7 +24,7 @@
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 1022,
+      "versionCode": 1023,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/new-icon.png",
         "backgroundColor": "#000000"
