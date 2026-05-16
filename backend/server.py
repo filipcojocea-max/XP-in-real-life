@@ -9501,6 +9501,8 @@ try:
         is_admin_user=_is_admin_user,
         now_iso=now_iso,
         admin_emails=list(ADMIN_EMAILS),
+        send_push=_send_expo_push,
+        friend_ids_fn=_friend_ids,
     )
     _attach_bt_routes(app, get_user_or_legacy)
     logger.info("[buried_treasure] routes attached")

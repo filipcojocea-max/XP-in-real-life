@@ -56,6 +56,18 @@ _db = None
 _now_iso = None
 _is_admin_user = None
 _admin_emails_set: set[str] = set()
+_send_push = None             # async fn(token, title, body, data) — wired by init
+_friend_ids_fn = None         # async fn(user_id) -> list[str] — wired by init
+_match_tick_task = None       # asyncio.Task for the 60s match expiry tick
+
+# ── Friends-mode (Relay-Race) tuning ──
+MATCH_DURATION_H = 12             # 12 hours after burial → expires
+INVITE_EXPIRY_MIN = 30            # Seeker has 30 min to Accept / Reject
+MATCH_FIND_RING_M = 12            # same proximity tolerance as solo
+XP_FIND_SEEKER = 100              # awarded to seeker on successful find
+XP_FIND_HIDER = 50                # awarded to hider on successful find
+XP_EXPIRY_HIDER = 50              # awarded to hider when seeker fails to find
+PUSH_CH_BT_INVITE = "bt_invite"   # Android channel for sticky-like priority
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 OVERPASS_TIMEOUT_S = 7.0
@@ -73,12 +85,36 @@ _HINTS = [
 ]
 
 
-def init_buried_treasure(*, db, is_admin_user, now_iso, admin_emails: list[str] | None = None):
+def init_buried_treasure(
+    *,
+    db,
+    is_admin_user,
+    now_iso,
+    admin_emails: list[str] | None = None,
+    send_push=None,
+    friend_ids_fn=None,
+):
     global _db, _now_iso, _is_admin_user, _admin_emails_set
+    global _send_push, _friend_ids_fn, _match_tick_task
     _db = db
     _is_admin_user = is_admin_user
     _now_iso = now_iso
     _admin_emails_set = set((admin_emails or []))
+    _send_push = send_push
+    _friend_ids_fn = friend_ids_fn
+
+    # Boot the 60-s background tick that handles match expiries +
+    # invite expiries. We schedule it only once per process even if the
+    # init function is called twice (hot reload, tests).
+    if _match_tick_task is None or _match_tick_task.done():
+        try:
+            loop = asyncio.get_event_loop()
+            _match_tick_task = loop.create_task(_match_expiry_loop())
+            logger.info("[bt-matches] expiry tick started (60s)")
+        except RuntimeError:
+            # No running loop yet (called before app startup); the
+            # scheduler will get created lazily on the first request.
+            logger.warning("[bt-matches] no event loop yet; will lazy-start")
 
 
 # ─────────────────────── geo helpers ───────────────────────
@@ -275,6 +311,227 @@ def _serialize_chest(c: dict) -> dict:
         "daylight_only": bool(c.get("daylight_only", False)),
         "has_photo": bool(c.get("photo_base64")),
     }
+
+
+# ═════════════════════ Friends-Mode (Relay Race) ═════════════════════
+#
+# A "match" is a 1-on-1 challenge between a Hider and a Seeker. Phase
+# transitions (see `state` enum below):
+#
+#   pending_accept  → Hider invited Seeker. Seeker can Accept or Reject
+#                     within 30 min, else state becomes `expired_invite`.
+#   awaiting_burial → Seeker accepted. Hider must physically walk to the
+#                     spot and call /bury (uses live GPS) to plant.
+#   in_progress     → Chest is buried. Seeker has 12 h to find it.
+#   found           → Seeker tapped /find inside the 12 m proximity ring.
+#                     Awards: Seeker +100 XP, Hider +50 XP.
+#   expired         → 12 h passed without a find. Hider wins +50 XP, the
+#                     Seeker gets 0.
+#   rejected        → Seeker declined the invite.
+#   cancelled       → Hider cancelled before chest was buried.
+#   expired_invite  → Seeker didn't respond in 30 min.
+#
+# Persistence: collection `bt_matches`. Auto-posts (when allow_photo_post
+# is on) go into `bt_feed_posts`, visible to both players + friends.
+async def _push_to_user(user_id: str, title: str, body: str, data: dict | None = None):
+    """Best-effort push to ALL of a user's registered Expo tokens.
+    Never raises — push failures must never break a match transition.
+    """
+    if not _send_push or not _db:
+        return
+    try:
+        tokens = await _db.push_tokens.find({"user_id": user_id}).to_list(20)
+    except Exception:
+        logger.exception("[bt-push] token lookup failed")
+        return
+    for t in tokens or []:
+        tok = t.get("token") or ""
+        if not tok:
+            continue
+        try:
+            await _send_push(tok, title, body, data or {})
+        except Exception:
+            logger.warning("[bt-push] send failed for %s", user_id, exc_info=False)
+
+
+async def _profile_summary(uid: str) -> dict:
+    """Lightweight {id,name,avatar_base64} for the match opponent card."""
+    if not _db:
+        return {"id": uid, "name": "Player", "avatar_base64": None}
+    p = await _db.profile.find_one(
+        {"_id": uid}, {"full_name": 1, "name": 1, "avatar_base64": 1}
+    ) or {}
+    return {
+        "id": uid,
+        "name": p.get("full_name") or p.get("name") or "Player",
+        "avatar_base64": p.get("avatar_base64"),
+    }
+
+
+async def _are_friends(a: str, b: str) -> bool:
+    if a == b:
+        return False
+    if _friend_ids_fn is not None:
+        try:
+            return b in (await _friend_ids_fn(a))
+        except Exception:
+            logger.exception("[bt-friends] fn failed; fallback to direct query")
+    # Fallback: direct DB query
+    if not _db:
+        return False
+    fr = await _db.friend_requests.find_one({
+        "status": "accepted",
+        "$or": [
+            {"from_user_id": a, "to_user_id": b},
+            {"from_user_id": b, "to_user_id": a},
+        ],
+    })
+    return fr is not None
+
+
+def _serialize_match(m: dict, viewer_id: str | None = None) -> dict:
+    """Strip internal _id, normalise fields. If viewer_id is given, also
+    annotate the viewer's role (hider/seeker) for client convenience.
+    """
+    out = {
+        "id": m.get("_id"),
+        "hider_id": m.get("hider_id"),
+        "seeker_id": m.get("seeker_id"),
+        "state": m.get("state"),
+        "invited_at": m.get("invited_at"),
+        "accepted_at": m.get("accepted_at"),
+        "rejected_at": m.get("rejected_at"),
+        "cancelled_at": m.get("cancelled_at"),
+        "buried_at": m.get("buried_at"),
+        "expires_at": m.get("expires_at"),
+        "found_at": m.get("found_at"),
+        "winner": m.get("winner"),
+        "xp_seeker": int(m.get("xp_seeker", 0)),
+        "xp_hider": int(m.get("xp_hider", 0)),
+        "hint": m.get("hint"),
+        "allow_photo_post": bool(m.get("allow_photo_post", False)),
+        # Chest coords + photos are only revealed to the seeker AFTER
+        # burial (so the hider can't post the answer in the match list).
+        # Hider always sees them. After resolution, both see them.
+        "lat": None,
+        "lng": None,
+        "has_chest_photo": bool(m.get("photo_buried_b64")),
+        "has_found_photo": bool(m.get("photo_found_b64")),
+    }
+    state = m.get("state")
+    reveal_to_all = state in ("found", "expired")
+    if viewer_id == m.get("hider_id") or reveal_to_all or state == "in_progress":
+        out["lat"] = m.get("lat")
+        out["lng"] = m.get("lng")
+    return out
+
+
+async def _award_xp(user_id: str, amount: int, *, reason: str):
+    if not _db or amount <= 0:
+        return
+    try:
+        await _db.profile.update_one(
+            {"_id": user_id}, {"$inc": {"total_xp": int(amount)}}
+        )
+    except Exception:
+        logger.exception("[bt-xp] award failed user=%s reason=%s", user_id, reason)
+
+
+async def _match_expiry_loop():
+    """Background tick — fires every 60 s.
+
+    Two cleanups:
+      1. Pending-accept invites older than INVITE_EXPIRY_MIN → expire,
+         notify the Hider (state = `expired_invite`).
+      2. In-progress matches whose `expires_at` is in the past →
+         resolve as Hider-win, award +50 XP, notify both players,
+         auto-post to feed if `allow_photo_post` was on.
+    """
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if _db is None:
+                continue
+            now_dt = datetime.now(timezone.utc)
+            now = now_dt.isoformat()
+
+            # ── (1) 30-min invite expiry ──────────────────────────────
+            invite_cutoff = (
+                now_dt - timedelta(minutes=INVITE_EXPIRY_MIN)
+            ).isoformat()
+            cursor = _db.bt_matches.find({
+                "state": "pending_accept",
+                "invited_at": {"$lt": invite_cutoff},
+            })
+            async for m in cursor:
+                upd = await _db.bt_matches.find_one_and_update(
+                    {"_id": m["_id"], "state": "pending_accept"},
+                    {"$set": {
+                        "state": "expired_invite",
+                        "invite_expired_at": now,
+                    }},
+                    return_document=True,
+                )
+                if not upd:
+                    continue
+                try:
+                    seeker = await _profile_summary(m["seeker_id"])
+                    await _push_to_user(
+                        m["hider_id"],
+                        "🏴‍☠️ Invite expired",
+                        f"{seeker['name']} didn't respond in 30 min.",
+                        {"kind": "bt_match_invite_expired",
+                         "match_id": m["_id"], "channelId": PUSH_CH_BT_INVITE},
+                    )
+                except Exception:
+                    logger.exception("[bt-tick] invite-expired notify failed")
+
+            # ── (2) 12-h hunt expiry → Hider wins ─────────────────────
+            cursor = _db.bt_matches.find({
+                "state": "in_progress",
+                "expires_at": {"$lte": now},
+            })
+            async for m in cursor:
+                upd = await _db.bt_matches.find_one_and_update(
+                    {"_id": m["_id"], "state": "in_progress"},
+                    {"$set": {
+                        "state": "expired",
+                        "winner": "hider",
+                        "resolved_at": now,
+                        "xp_hider": XP_EXPIRY_HIDER,
+                        "xp_seeker": 0,
+                    }},
+                    return_document=True,
+                )
+                if not upd:
+                    continue
+                await _award_xp(m["hider_id"], XP_EXPIRY_HIDER,
+                                reason="bt_match_expiry_win")
+                try:
+                    hider = await _profile_summary(m["hider_id"])
+                    seeker = await _profile_summary(m["seeker_id"])
+                    await _push_to_user(
+                        m["hider_id"],
+                        "⏰ Time's up — you win!",
+                        f"{seeker['name']} didn't find your chest. +{XP_EXPIRY_HIDER} XP.",
+                        {"kind": "bt_match_expired_win",
+                         "match_id": m["_id"], "channelId": PUSH_CH_BT_INVITE},
+                    )
+                    await _push_to_user(
+                        m["seeker_id"],
+                        "⏰ Hunt expired",
+                        f"{hider['name']}'s chest got away. Better luck next round.",
+                        {"kind": "bt_match_expired_loss",
+                         "match_id": m["_id"], "channelId": PUSH_CH_BT_INVITE},
+                    )
+                except Exception:
+                    logger.exception("[bt-tick] hunt-expired notify failed")
+
+        except asyncio.CancelledError:
+            logger.info("[bt-matches] expiry loop cancelled")
+            return
+        except Exception:
+            logger.exception("[bt-matches] tick crashed; sleeping")
 
 
 # ─────────────────────── routes ───────────────────────
@@ -507,4 +764,432 @@ def attach_routes(app, get_user_or_legacy):
         return {"id": rid, "sent_to_admin_count": len(sent_ids)}
 
     app.include_router(sub)
+
+    # ═════════════════ Friends-Mode (Relay Race) endpoints ═════════════════
+    @sub.post("/bt/match/invite")
+    async def _match_invite(
+        body: dict = Body(...), user_id: str = Depends(get_user_or_legacy)
+    ):
+        friend_id = (body.get("friend_id") or "").strip()
+        if not friend_id or friend_id == user_id:
+            raise HTTPException(400, "friend_id required")
+        if not await _are_friends(user_id, friend_id):
+            raise HTTPException(403, "You can only invite accepted friends.")
+        # Reject if there's already an active (pending/awaiting/in_progress)
+        # match between these two — don't allow duplicates.
+        existing = await _db.bt_matches.find_one({
+            "$or": [
+                {"hider_id": user_id, "seeker_id": friend_id},
+                {"hider_id": friend_id, "seeker_id": user_id},
+            ],
+            "state": {"$in": [
+                "pending_accept", "awaiting_burial", "in_progress",
+            ]},
+        })
+        if existing:
+            raise HTTPException(
+                409, "There's already an active match between you two."
+            )
+        # Hider needs a location set so the chest spawn area is defined.
+        # (Seeker doesn't strictly need one for Friends Mode — chest
+        # coords come from the Hider's GPS at /bury time.)
+        if not await _db.bt_locations.find_one({"_id": user_id}):
+            raise HTTPException(400, "Set your hunt area first.")
+        mid = str(uuid.uuid4())
+        now = _now_iso()
+        doc = {
+            "_id": mid,
+            "hider_id": user_id,
+            "seeker_id": friend_id,
+            "state": "pending_accept",
+            "invited_at": now,
+            "accepted_at": None,
+            "rejected_at": None,
+            "cancelled_at": None,
+            "buried_at": None,
+            "expires_at": None,
+            "found_at": None,
+            "found_lat": None,
+            "found_lng": None,
+            "lat": None,
+            "lng": None,
+            "hint": None,
+            "photo_buried_b64": None,
+            "photo_found_b64": None,
+            "allow_photo_post": True,  # default ON, hider can flip at /bury
+            "winner": None,
+            "xp_seeker": 0,
+            "xp_hider": 0,
+            "resolved_at": None,
+        }
+        await _db.bt_matches.insert_one(doc)
+        try:
+            hider = await _profile_summary(user_id)
+            await _push_to_user(
+                friend_id,
+                "🏴‍☠️ Treasure Challenge",
+                f"{hider['name']} invited you to a 12-hour hunt!",
+                {
+                    "kind": "bt_match_invite",
+                    "match_id": mid,
+                    "channelId": PUSH_CH_BT_INVITE,
+                    "sticky": True,
+                },
+            )
+        except Exception:
+            logger.exception("[bt-invite] push failed")
+        return {"match": _serialize_match(doc, user_id)}
+
+    async def _load_match_or_404(mid: str, user_id: str) -> dict:
+        m = await _db.bt_matches.find_one({"_id": mid})
+        if not m:
+            raise HTTPException(404, "Match not found.")
+        if user_id not in (m.get("hider_id"), m.get("seeker_id")):
+            raise HTTPException(403, "Not your match.")
+        return m
+
+    @sub.post("/bt/match/{mid}/accept")
+    async def _match_accept(mid: str, user_id: str = Depends(get_user_or_legacy)):
+        m = await _load_match_or_404(mid, user_id)
+        if user_id != m["seeker_id"]:
+            raise HTTPException(403, "Only the invited seeker can accept.")
+        if m["state"] != "pending_accept":
+            raise HTTPException(400, f"Can't accept — state is {m['state']}.")
+        now = _now_iso()
+        upd = await _db.bt_matches.find_one_and_update(
+            {"_id": mid, "state": "pending_accept"},
+            {"$set": {"state": "awaiting_burial", "accepted_at": now}},
+            return_document=True,
+        )
+        if not upd:
+            raise HTTPException(409, "Match state changed — refresh.")
+        try:
+            seeker = await _profile_summary(user_id)
+            await _push_to_user(
+                m["hider_id"],
+                "🏴‍☠️ Hunt accepted!",
+                f"{seeker['name']} is ready. Walk to your spot and bury the chest.",
+                {"kind": "bt_match_accepted", "match_id": mid,
+                 "channelId": PUSH_CH_BT_INVITE},
+            )
+        except Exception:
+            logger.exception("[bt-accept] push failed")
+        return {"match": _serialize_match(upd, user_id)}
+
+    @sub.post("/bt/match/{mid}/reject")
+    async def _match_reject(mid: str, user_id: str = Depends(get_user_or_legacy)):
+        m = await _load_match_or_404(mid, user_id)
+        if user_id != m["seeker_id"]:
+            raise HTTPException(403, "Only the invited seeker can reject.")
+        if m["state"] != "pending_accept":
+            raise HTTPException(400, f"Can't reject — state is {m['state']}.")
+        now = _now_iso()
+        upd = await _db.bt_matches.find_one_and_update(
+            {"_id": mid, "state": "pending_accept"},
+            {"$set": {"state": "rejected", "rejected_at": now}},
+            return_document=True,
+        )
+        if not upd:
+            raise HTTPException(409, "Match state changed — refresh.")
+        try:
+            seeker = await _profile_summary(user_id)
+            await _push_to_user(
+                m["hider_id"],
+                "Maybe next time",
+                f"{seeker['name']} declined your challenge.",
+                {"kind": "bt_match_rejected", "match_id": mid,
+                 "channelId": PUSH_CH_BT_INVITE},
+            )
+        except Exception:
+            logger.exception("[bt-reject] push failed")
+        return {"match": _serialize_match(upd, user_id)}
+
+    @sub.post("/bt/match/{mid}/cancel")
+    async def _match_cancel(mid: str, user_id: str = Depends(get_user_or_legacy)):
+        m = await _load_match_or_404(mid, user_id)
+        if user_id != m["hider_id"]:
+            raise HTTPException(403, "Only the hider can cancel.")
+        if m["state"] not in ("pending_accept", "awaiting_burial"):
+            raise HTTPException(400, "Can't cancel once the hunt is live.")
+        now = _now_iso()
+        upd = await _db.bt_matches.find_one_and_update(
+            {"_id": mid, "state": m["state"]},
+            {"$set": {"state": "cancelled", "cancelled_at": now}},
+            return_document=True,
+        )
+        if not upd:
+            raise HTTPException(409, "Match state changed — refresh.")
+        try:
+            hider = await _profile_summary(user_id)
+            await _push_to_user(
+                m["seeker_id"],
+                "Hunt cancelled",
+                f"{hider['name']} cancelled the match.",
+                {"kind": "bt_match_cancelled", "match_id": mid,
+                 "channelId": PUSH_CH_BT_INVITE},
+            )
+        except Exception:
+            logger.exception("[bt-cancel] push failed")
+        return {"match": _serialize_match(upd, user_id)}
+
+    @sub.post("/bt/match/{mid}/bury")
+    async def _match_bury(
+        mid: str,
+        body: dict = Body(...),
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        m = await _load_match_or_404(mid, user_id)
+        if user_id != m["hider_id"]:
+            raise HTTPException(403, "Only the hider can bury the chest.")
+        if m["state"] != "awaiting_burial":
+            raise HTTPException(
+                400, f"Can't bury — state is {m['state']}. Need accept first."
+            )
+        try:
+            lat = float(body.get("lat"))
+            lng = float(body.get("lng"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "lat/lng required (numeric)")
+        if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+            raise HTTPException(400, "lat/lng out of range")
+        # Burial must be inside Hider's hunt area (anti-cheat: stops
+        # remote pinning from anywhere on Earth).
+        loc = await _db.bt_locations.find_one({"_id": user_id})
+        if loc and _haversine_m(loc["lat"], loc["lng"], lat, lng) > float(loc["radius_m"]):
+            raise HTTPException(
+                400, "You're outside your hunt area — walk into the circle to bury.",
+            )
+        hint = (body.get("hint") or "").strip()[:240] or "Look around — it's nearby."
+        photo_b64 = (body.get("photo_b64") or body.get("photo_base64") or "")[:500_000] or None
+        allow_post = bool(body.get("allow_photo_post", True))
+        now_dt = datetime.now(timezone.utc)
+        expires_at = (now_dt + timedelta(hours=MATCH_DURATION_H)).isoformat()
+        upd = await _db.bt_matches.find_one_and_update(
+            {"_id": mid, "state": "awaiting_burial"},
+            {"$set": {
+                "state": "in_progress",
+                "lat": lat, "lng": lng,
+                "hint": hint,
+                "photo_buried_b64": photo_b64,
+                "allow_photo_post": allow_post,
+                "buried_at": _now_iso(),
+                "expires_at": expires_at,
+            }},
+            return_document=True,
+        )
+        if not upd:
+            raise HTTPException(409, "Match state changed — refresh.")
+        try:
+            hider = await _profile_summary(user_id)
+            await _push_to_user(
+                m["seeker_id"],
+                "🏴‍☠️ Chest is buried!",
+                f"{hider['name']} hid it. 12h to find it. Hint: {hint[:80]}",
+                {"kind": "bt_match_buried", "match_id": mid,
+                 "channelId": PUSH_CH_BT_INVITE},
+            )
+        except Exception:
+            logger.exception("[bt-bury] push failed")
+        return {"match": _serialize_match(upd, user_id)}
+
+    @sub.post("/bt/match/{mid}/find")
+    async def _match_find(
+        mid: str,
+        body: dict = Body(...),
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        m = await _load_match_or_404(mid, user_id)
+        if user_id != m["seeker_id"]:
+            raise HTTPException(403, "Only the seeker can claim a find.")
+        if m["state"] != "in_progress":
+            raise HTTPException(400, f"Can't find — state is {m['state']}.")
+        try:
+            lat = float(body.get("lat"))
+            lng = float(body.get("lng"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "lat/lng required")
+        if m.get("lat") is None or m.get("lng") is None:
+            raise HTTPException(500, "Chest coords missing — contact support.")
+        dist = _haversine_m(m["lat"], m["lng"], lat, lng)
+        if dist > MATCH_FIND_RING_M:
+            raise HTTPException(
+                400,
+                f"Still {int(dist)} m away — get within {MATCH_FIND_RING_M} m.",
+            )
+        photo_b64 = (body.get("photo_b64") or body.get("photo_base64") or "")[:500_000] or None
+        now = _now_iso()
+        upd = await _db.bt_matches.find_one_and_update(
+            {"_id": mid, "state": "in_progress"},
+            {"$set": {
+                "state": "found",
+                "winner": "seeker",
+                "found_at": now,
+                "found_lat": lat,
+                "found_lng": lng,
+                "photo_found_b64": photo_b64,
+                "resolved_at": now,
+                "xp_seeker": XP_FIND_SEEKER,
+                "xp_hider": XP_FIND_HIDER,
+            }},
+            return_document=True,
+        )
+        if not upd:
+            raise HTTPException(409, "Match state changed — refresh.")
+        await _award_xp(user_id, XP_FIND_SEEKER, reason="bt_match_seeker_win")
+        await _award_xp(m["hider_id"], XP_FIND_HIDER, reason="bt_match_hider_complete")
+
+        # ── Auto-post to bt_feed_posts if hider consented at burial ──
+        feed_post_id = None
+        if upd.get("allow_photo_post"):
+            try:
+                seeker = await _profile_summary(user_id)
+                hider = await _profile_summary(m["hider_id"])
+                # duration string
+                try:
+                    b_dt = datetime.fromisoformat(
+                        (upd.get("buried_at") or "").replace("Z", "+00:00")
+                    )
+                    f_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+                    secs = max(0, int((f_dt - b_dt).total_seconds()))
+                except Exception:
+                    secs = 0
+                feed_post_id = str(uuid.uuid4())
+                await _db.bt_feed_posts.insert_one({
+                    "_id": feed_post_id,
+                    "match_id": mid,
+                    "seeker_id": user_id,
+                    "hider_id": m["hider_id"],
+                    "seeker_name": seeker["name"],
+                    "seeker_avatar_base64": seeker["avatar_base64"],
+                    "hider_name": hider["name"],
+                    "hider_avatar_base64": hider["avatar_base64"],
+                    "duration_seconds": secs,
+                    "hint": upd.get("hint"),
+                    "photo_found_b64": photo_b64,
+                    "photo_buried_b64": upd.get("photo_buried_b64"),
+                    "lat": upd.get("lat"),
+                    "lng": upd.get("lng"),
+                    "xp_seeker": XP_FIND_SEEKER,
+                    "xp_hider": XP_FIND_HIDER,
+                    "created_at": now,
+                    "likes": [],
+                    "comments": [],
+                })
+            except Exception:
+                logger.exception("[bt-feed] auto-post failed (non-fatal)")
+
+        # Notify the hider that their chest got found
+        try:
+            seeker_p = await _profile_summary(user_id)
+            await _push_to_user(
+                m["hider_id"],
+                "🏴‍☠️ Your chest was found!",
+                f"{seeker_p['name']} found it. +{XP_FIND_HIDER} XP earned.",
+                {"kind": "bt_match_found", "match_id": mid,
+                 "channelId": PUSH_CH_BT_INVITE},
+            )
+        except Exception:
+            logger.exception("[bt-find] push failed")
+        out = _serialize_match(upd, user_id)
+        out["xp_awarded"] = XP_FIND_SEEKER
+        out["feed_post_id"] = feed_post_id
+        return out
+
+    @sub.get("/bt/matches")
+    async def _matches_list(user_id: str = Depends(get_user_or_legacy)):
+        """All matches I'm part of, newest first. Includes opponent info."""
+        cur = _db.bt_matches.find({
+            "$or": [{"hider_id": user_id}, {"seeker_id": user_id}],
+        }).sort("invited_at", -1).limit(50)
+        rows = []
+        async for m in cur:
+            other_id = m["seeker_id"] if m["hider_id"] == user_id else m["hider_id"]
+            op = await _profile_summary(other_id)
+            out = _serialize_match(m, user_id)
+            out["my_role"] = "hider" if m["hider_id"] == user_id else "seeker"
+            out["opponent"] = op
+            rows.append(out)
+        return {"matches": rows}
+
+    @sub.get("/bt/match/{mid}")
+    async def _match_get(mid: str, user_id: str = Depends(get_user_or_legacy)):
+        m = await _load_match_or_404(mid, user_id)
+        other_id = m["seeker_id"] if m["hider_id"] == user_id else m["hider_id"]
+        op = await _profile_summary(other_id)
+        out = _serialize_match(m, user_id)
+        out["my_role"] = "hider" if m["hider_id"] == user_id else "seeker"
+        out["opponent"] = op
+        # Embed the photos only when the requester is allowed to see them
+        # (Hider always, Seeker only after the hunt is resolved or chest
+        # is buried for hint preview).
+        if m.get("photo_buried_b64") and (
+            user_id == m["hider_id"] or m.get("state") in ("found", "expired")
+        ):
+            out["photo_buried_b64"] = m["photo_buried_b64"]
+        if m.get("photo_found_b64"):
+            out["photo_found_b64"] = m["photo_found_b64"]
+        return out
+
+    @sub.get("/bt/feed")
+    async def _bt_feed(user_id: str = Depends(get_user_or_legacy), limit: int = 50):
+        """Friends-mode feed: posts where I'm a participant or where I'm
+        friends with the seeker or the hider."""
+        friend_ids: list[str] = []
+        if _friend_ids_fn is not None:
+            try:
+                friend_ids = await _friend_ids_fn(user_id)
+            except Exception:
+                friend_ids = []
+        visible_ids = list({user_id, *friend_ids})
+        cur = _db.bt_feed_posts.find({
+            "$or": [
+                {"seeker_id": {"$in": visible_ids}},
+                {"hider_id": {"$in": visible_ids}},
+            ],
+        }).sort("created_at", -1).limit(max(1, min(200, int(limit))))
+        out = []
+        async for p in cur:
+            out.append({
+                "id": p["_id"],
+                "match_id": p.get("match_id"),
+                "seeker": {
+                    "id": p.get("seeker_id"),
+                    "name": p.get("seeker_name"),
+                    "avatar_base64": p.get("seeker_avatar_base64"),
+                },
+                "hider": {
+                    "id": p.get("hider_id"),
+                    "name": p.get("hider_name"),
+                    "avatar_base64": p.get("hider_avatar_base64"),
+                },
+                "duration_seconds": int(p.get("duration_seconds", 0)),
+                "hint": p.get("hint"),
+                "photo_found_b64": p.get("photo_found_b64"),
+                "photo_buried_b64": p.get("photo_buried_b64"),
+                "xp_seeker": int(p.get("xp_seeker", 0)),
+                "xp_hider": int(p.get("xp_hider", 0)),
+                "created_at": p.get("created_at"),
+                "likes": p.get("likes") or [],
+                "like_count": len(p.get("likes") or []),
+                "comment_count": len(p.get("comments") or []),
+                "liked_by_you": user_id in (p.get("likes") or []),
+                "is_self": user_id in (p.get("seeker_id"), p.get("hider_id")),
+            })
+        return {"entries": out, "count": len(out)}
+
+    @sub.post("/bt/feed/{pid}/like")
+    async def _bt_feed_like(pid: str, user_id: str = Depends(get_user_or_legacy)):
+        p = await _db.bt_feed_posts.find_one({"_id": pid})
+        if not p:
+            raise HTTPException(404, "Post not found.")
+        likes = set(p.get("likes") or [])
+        if user_id in likes:
+            likes.remove(user_id)
+        else:
+            likes.add(user_id)
+        await _db.bt_feed_posts.update_one(
+            {"_id": pid}, {"$set": {"likes": list(likes)}}
+        )
+        return {"like_count": len(likes), "liked_by_you": user_id in likes}
+
     return sub
