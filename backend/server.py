@@ -1852,12 +1852,12 @@ def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
     auto-completed on the same day it was created.
     """
     unit = (goal.get("unit") or "").lower()
-    # Lock based on when the goal was last COMPLETED, NOT the last tick.
-    # Otherwise a 3/5 → 4/5 forward step would trigger the daily cycle
-    # lockout even though the user hasn't yet hit the target. Fallback to
-    # last_ticked_at preserves the original behaviour for historical
-    # goals that don't have last_completed_at set yet.
-    last_iso = goal.get("last_completed_at") or goal.get("last_ticked_at")
+    # Cycle lockout fires ONLY after a completion. We deliberately do NOT
+    # fall back to last_ticked_at — sub-completion progress ticks (e.g.
+    # 3/5 → 4/5 on a daily goal) must NOT be blocked by the lockout, and
+    # the un-tick path clears last_completed_at so re-completing in the
+    # same cycle is allowed.
+    last_iso = goal.get("last_completed_at")
     lock = GOAL_CYCLE_LOCKOUT.get(unit)
 
     # ── First-tick lock from creation date (weeks / months only) ──
@@ -2123,6 +2123,11 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
         )
         update["completed_at"] = None
         update["xp_awarded_on_complete"] = None
+        # Clear last_completed_at so the cycle-lockout doesn't keep
+        # firing after the user has un-completed the goal. They should
+        # be free to re-tick / re-complete immediately within the same
+        # cycle if they choose to.
+        update["last_completed_at"] = None
         await db.profile.update_one(
             {"_id": user_id},
             {"$inc": {"goals_completed": -1, "total_xp": -refunded_xp}},
