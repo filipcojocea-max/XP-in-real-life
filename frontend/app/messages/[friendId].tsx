@@ -42,6 +42,7 @@ import {
 } from '../../src/api';
 import type { ChatPreferences, DMMessage } from '../../src/api';
 import { ChatSettingsSheet } from '../../src/components/ChatSettingsSheet';
+import { useGuestGate } from '../../src/components/GuestGate';
 
 const REFINE_DEBOUNCE_MS = 600;
 
@@ -63,6 +64,18 @@ export default function MessageThread() {
   const router = useRouter();
   const { friendId } = useLocalSearchParams<{ friendId: string }>();
   const fid = String(friendId || '');
+  // Guest gate — DM is a real-account-only feature. If the user
+  // somehow lands here while anonymous (e.g. deep link), redirect them
+  // back to friends and pop the sign-in modal.
+  const guard = useGuestGate();
+  useEffect(() => {
+    if (guard.isAnonymous) {
+      guard.block('send a message');
+      router.replace('/friends');
+    }
+    // We only want to react when isAnonymous flips, not every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guard.isAnonymous]);
 
   const [messages, setMessages] = useState<DMMessage[]>([]);
   const [loading, setLoading] = useState(true);

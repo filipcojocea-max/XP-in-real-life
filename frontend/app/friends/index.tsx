@@ -28,11 +28,16 @@ import {
   PlayerPriceOverridesModal,
   DeletePlayerConfirmModal,
 } from '../../src/components/AdminPlayerTools';
+import { useGuestGate } from '../../src/components/GuestGate';
 
 type TopTab = 'players' | 'friends' | 'leaderboard';
 type FriendsSubTab = 'requests' | 'mine';
 
 export default function FriendsScreen() {
+  // Guest-gate: anonymous users can browse this screen (see the players
+  // list, leaderboard, etc.) but tapping a player or sending a friend
+  // request must show the sign-in prompt instead of opening the action.
+  const guard = useGuestGate();
   const [topTab, setTopTab] = useState<TopTab>('players');
   const [subTab, setSubTab] = useState<FriendsSubTab>('requests');
 
@@ -134,6 +139,7 @@ export default function FriendsScreen() {
   };
 
   const onAddFriend = async (p: Player) => {
+    if (guard.block('add a friend')) return;
     setSavingId(p.user_id);
     try {
       const r = await api.sendFriendRequest(p.user_id);
@@ -147,6 +153,7 @@ export default function FriendsScreen() {
   };
 
   const onAccept = async (p: Player) => {
+    if (guard.block('accept the friend request')) return;
     setSavingId(p.user_id);
     try {
       await api.acceptFriendRequest(p.user_id);
@@ -237,7 +244,12 @@ export default function FriendsScreen() {
           loading={loadingPlayers}
           refreshing={refreshing}
           onRefresh={onRefresh}
-          onPress={setOpenProfile}
+          // Guests can SEE players but tapping a player to open
+          // their profile sheet must show the sign-in prompt instead.
+          onPress={(p) => {
+            if (guard.block('view this player')) return;
+            setOpenProfile(p);
+          }}
           onAddFriend={onAddFriend}
           savingId={savingId}
         />
@@ -254,7 +266,10 @@ export default function FriendsScreen() {
           onRefresh={onRefresh}
           onAccept={onAccept}
           onDecline={onDecline}
-          onPress={setOpenProfile}
+          onPress={(p) => {
+            if (guard.block('view this player')) return;
+            setOpenProfile(p);
+          }}
           savingId={savingId}
         />
       ) : (

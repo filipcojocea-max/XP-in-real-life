@@ -19,6 +19,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { api, Profile, SpotEntry } from '../../src/api';
 import { showAlert, showConfirm } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
+import { useGuestGate } from '../../src/components/GuestGate';
 
 export default function SpotHub() {
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -289,6 +290,11 @@ function SpotEntryModal({
   const [submitting, setSubmitting] = useState(false);
   const [liking, setLiking] = useState(false);
   const [local, setLocal] = useState<SpotEntry | null>(null);
+  // Guest-gate — anonymous players can SCROLL the feed but tapping
+  // like / comment must show the sign-in modal so social attribution
+  // stays tied to a real account.
+  const _guard = useGuestGate();
+  const gateBlock = (label?: string) => _guard.block(label);
   // Edit state:
   //   editing=true  → the filter toolbar is visible over the photo.
   //   activeFilter  → which filter the server has applied in the preview.
@@ -314,6 +320,7 @@ function SpotEntryModal({
   if (!entry || !local) return null;
 
   const onLike = async () => {
+    if (gateBlock('like a post')) return;
     setLiking(true);
     try {
       const r = await api.spotLike(local.id);
@@ -327,6 +334,7 @@ function SpotEntryModal({
   };
 
   const onComment = async () => {
+    if (gateBlock('comment on a post')) return;
     const txt = comment.trim();
     if (!txt) return;
     setSubmitting(true);

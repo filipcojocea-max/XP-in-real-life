@@ -19,6 +19,8 @@ import { LevelUpReviewModal } from '../src/components/LevelUpReviewModal';
 import { useLevelUpDetector } from '../src/hooks/useLevelUpDetector';
 import { StripeReturnHandler } from '../src/StripeReturnHandler';
 import { PenaltyHost } from '../src/PenaltyHost';
+import { GuestGateHost } from '../src/components/GuestGate';
+import { GuestProgressMigrationHost } from '../src/components/GuestProgressMigrationHost';
 
 /**
  * LevelUpPromptHost — wires the level-up detector hook to the modal.
@@ -227,6 +229,16 @@ export default function RootLayout() {
                 gesture (2s) acknowledges + dismisses, then we advance
                 to the next pending penalty if any. */}
             <PenaltyHost />
+            {/* Singleton modal shown when a guest tries to take an
+                action that requires a real account (friends, DM, buy,
+                duo, BT/Spot invite, etc). useGuestGate() hook pokes
+                this host. */}
+            <GuestGateHost />
+            {/* Pops after the new user finishes onboarding if they had
+                guest-mode progress before signing in / registering.
+                Offers two options: migrate everything to the new
+                account, or start fresh and discard the guest data. */}
+            <GuestProgressMigrationHost />
           </AuthGate>
         </View>
       </ImmersiveProvider>

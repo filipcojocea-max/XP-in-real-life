@@ -26,6 +26,7 @@ import { showAlert } from '../uiAlert';
 import { colors, radii, spacing } from '../theme';
 import { api } from '../api';
 import type { DuoGroup, DuoOffer, LibraryAppPricing } from '../api';
+import { useGuestGate } from './GuestGate';
 
 const DUO_COLOR = '#B388FF';
 
@@ -253,6 +254,14 @@ export function DuoJoinModal({
   const [loading, setLoading] = useState(false);
   const [codeInput, setCodeInput] = useState('');
   const [tick, setTick] = useState(Date.now());
+  // Guest-gate — anonymous users can VIEW the duo offer / discount
+  // badge but tapping "Start a duo group" or "Join by code" must prompt
+  // them to sign in (we attribute the discount to a real user).
+  const _guard = useGuestGate();
+  const gateBlock = useCallback(
+    (label?: string) => _guard.block(label),
+    [_guard],
+  );
 
   // Reset state when the modal is dismissed.
   useEffect(() => {
@@ -310,6 +319,7 @@ export function DuoJoinModal({
 
   const onCreate = useCallback(async () => {
     if (!appId) return;
+    if (gateBlock('start a duo group')) return;
     setLoading(true);
     try {
       const g = await api.duoCreate(appId);
@@ -320,9 +330,10 @@ export function DuoJoinModal({
     } finally {
       setLoading(false);
     }
-  }, [appId]);
+  }, [appId, gateBlock]);
 
   const onJoinByCode = useCallback(async () => {
+    if (gateBlock('join a duo group')) return;
     const c = codeInput.trim().toUpperCase();
     if (c.length < 4) {
       showAlert('Invalid code', 'Enter the 6-character code your friend shared.');
@@ -338,7 +349,7 @@ export function DuoJoinModal({
     } finally {
       setLoading(false);
     }
-  }, [codeInput]);
+  }, [codeInput, gateBlock]);
 
   const onLeave = useCallback(async () => {
     if (!group) return;

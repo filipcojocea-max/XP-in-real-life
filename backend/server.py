@@ -9508,3 +9508,15 @@ try:
     logger.info("[buried_treasure] routes attached")
 except Exception:
     logger.exception("[buried_treasure] failed to attach routes")
+
+# ── Guest-mode migration (POST /api/guest/migrate) ──────────────────
+try:
+    from guest_migration import (
+        init_guest_migration as _init_gm,
+        attach_routes as _attach_gm_routes,
+    )
+    _init_gm(db=db, real_user_dep=get_current_user)
+    _attach_gm_routes(app)
+    logger.info("[guest_migration] routes attached")
+except Exception:
+    logger.exception("[guest_migration] failed to attach routes")

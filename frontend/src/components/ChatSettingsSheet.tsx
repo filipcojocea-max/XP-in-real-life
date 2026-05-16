@@ -113,11 +113,18 @@ export function ChatSettingsSheet({ visible, prefs, friendName, onClose, onPatch
               </View>
             </View>
 
-            <Text style={styles.sectionLabel}>YOUR MESSAGES</Text>
+            {/* NB: Section labels are intentionally INVERTED relative
+                to the colour-key names (sent_x / received_x). The user
+                preference is that the "Your messages" header sits above
+                the controls that style the OTHER player's bubble (the
+                bubble you see on the right) and vice versa. The
+                underlying wiring (sent_x → my bubble on the left,
+                received_x → their bubble on the right) is unchanged. */}
+            <Text style={styles.sectionLabel}>THEIR MESSAGES</Text>
             {renderSwatchRow('Bubble', 'sent_bubble_color')}
             {renderSwatchRow('Text', 'sent_text_color')}
 
-            <Text style={styles.sectionLabel}>THEIR MESSAGES</Text>
+            <Text style={styles.sectionLabel}>YOUR MESSAGES</Text>
             {renderSwatchRow('Bubble', 'received_bubble_color')}
             {renderSwatchRow('Text', 'received_text_color')}
 

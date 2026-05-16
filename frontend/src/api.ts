@@ -289,6 +289,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ email }),
     }),
+  // ── Guest mode → registered account migration ────────────────────
+  guestMigrate: (anonymous_id: string) =>
+    req<{ moved: number; collections_touched: number; merged_profile: boolean }>(
+      '/guest/migrate',
+      {
+        method: 'POST',
+        body: JSON.stringify({ anonymous_id }),
+      },
+    ),
+  guestHasProgress: (anonymous_id: string) =>
+    req<{ has_progress: boolean; user_id: string }>(
+      `/guest/has_progress?anon_id=${encodeURIComponent(anonymous_id)}`,
+    ),
   authForgotPassword: (email: string, app_origin?: string) =>
     req<{
       message: string;

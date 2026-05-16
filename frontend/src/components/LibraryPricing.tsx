@@ -49,6 +49,7 @@ import * as Haptics from 'expo-haptics';
 import { colors, spacing, radii } from '../theme';
 import { api, type LibraryAppPricing } from '../api';
 import { presentNativePaymentSheet } from '../PaymentSheetNative';
+import { useGuestGate } from './GuestGate';
 
 export type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence';
 export type BoostId = 'triple_day' | 'double_week' | 'double_month';
@@ -831,6 +832,10 @@ export function BuyAppModal({
   const [confirming, setConfirming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [successView, setSuccessView] = useState(false);
+  // Guest gate — anonymous users can browse the prices but tapping
+  // "Buy" must show the sign-in prompt rather than firing checkout.
+  const _guard = useGuestGate();
+  const gateBlock = (label?: string) => _guard.block(label);
 
   useEffect(() => {
     if (!visible) {
@@ -855,6 +860,10 @@ export function BuyAppModal({
 
   const openCheckout = async () => {
     Haptics.selectionAsync().catch(() => {});
+    // Guests can VIEW prices but tapping "Buy" must show the sign-in
+    // modal — purchases are tied to a real account so we can attribute
+    // the unlock and tax records correctly.
+    if (gateBlock('buy this')) return;
     setRedirecting(true);
     setRedirectError(null);
     setErr(null);
