@@ -28,6 +28,7 @@ const APP_LIST: { id: string; label: string }[] = [
   { id: 'challenges', label: 'Challenge Tasks' },
   { id: 'spot', label: 'Spot the Object' },
   { id: 'confidence', label: 'Build Confidence' },
+  { id: 'treasure', label: 'Buried Treasure' },
 ];
 
 function fmtPrice(amount: number, currency: string) {

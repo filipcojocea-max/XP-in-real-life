@@ -34,13 +34,19 @@ import type { LibraryAppPricing, DuoGroup } from '../../src/api';
 type Tab = 'add' | 'mine';
 
 // IDs that match the backend's LIBRARY_APP_IDS list. Keep in sync.
-type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence';
+// `treasure` joins the original 4 mini-apps in v1.0.29 — it now needs
+// to flow through the pricing menu / duo-discount modals just like the
+// rest, so we add it to the union here. NB: APP_LABELS / APP_TINTS /
+// EMPTY_PRICING / initial ratings record are all keyed on this type, so
+// the compiler will scream if we forget any of them.
+type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence' | 'treasure';
 
 const APP_LABELS: Record<MiniAppId, string> = {
   sleep: 'Improve Sleeping',
   challenges: 'Challenge Tasks',
   spot: 'Spot the Object',
   confidence: 'Build Self-Confidence',
+  treasure: 'Buried Treasure',
 };
 
 const APP_TINTS: Record<MiniAppId, string> = {
@@ -48,6 +54,7 @@ const APP_TINTS: Record<MiniAppId, string> = {
   challenges: colors.green,
   spot: colors.amber,
   confidence: '#00FF88',
+  treasure: '#FFC857',
 };
 
 const EMPTY_STATS: MiniAppRatingStats = { average: 0, count: 0, user_rating: null };
@@ -63,13 +70,14 @@ export default function Library() {
     challenges: EMPTY_STATS,
     spot: EMPTY_STATS,
     confidence: EMPTY_STATS,
+    treasure: EMPTY_STATS,
   });
   const [rateTarget, setRateTarget] = useState<MiniAppId | null>(null);
   const [submittingRating, setSubmittingRating] = useState(false);
 
   // ── Pricing state ───────────────────────────────────────────────
   const EMPTY_PRICING: Record<MiniAppId, LibraryAppPricing | null> = {
-    sleep: null, challenges: null, spot: null, confidence: null,
+    sleep: null, challenges: null, spot: null, confidence: null, treasure: null,
   };
   const [pricing, setPricing] = useState<Record<MiniAppId, LibraryAppPricing | null>>(EMPTY_PRICING);
   const [currencies, setCurrencies] = useState<string[]>(['USD', 'EUR', 'GBP', 'AUD', 'CAD']);
