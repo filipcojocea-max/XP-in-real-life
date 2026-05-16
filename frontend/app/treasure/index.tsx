@@ -33,7 +33,12 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
-import MapView, { Circle, Marker } from 'react-native-maps';
+// Use MapShim wrapper so the web preview doesn't crash on
+// react-native-maps' `codegenNativeComponent` call. On iOS/Android the
+// shim re-exports the real react-native-maps components; on web it
+// renders a friendly placeholder. See /src/components/MapShim.tsx +
+// MapShim.web.tsx.
+import MapView, { Circle, Marker } from '../../src/components/MapShim';
 import { showAlert } from '../../src/uiAlert';
 import { colors, radii, spacing } from '../../src/theme';
 import { api } from '../../src/api';
