@@ -751,6 +751,33 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ value }),
     }),
+
+  // ─── Duo Referral Discounts (Library+) ─────────────────────────
+  libraryDuoOfferSet: (appId: string, requiredPeople: number, discountedPrice: number, currency = 'USD') =>
+    req<{ saved: boolean; duo_offer: DuoOffer | null }>(`/library/pricing/${appId}/duo-discount`, {
+      method: 'POST',
+      body: JSON.stringify({
+        required_people: requiredPeople,
+        discounted_price: discountedPrice,
+        currency,
+      }),
+    }),
+  libraryDuoOfferClear: (appId: string) =>
+    req<{ saved: boolean; duo_offer: null }>(`/library/pricing/${appId}/duo-discount`, {
+      method: 'DELETE',
+    }),
+  libraryDuoOfferGet: (appId: string) =>
+    req<{ duo_offer: DuoOffer | null }>(`/library/duo-offer/${appId}`),
+  duoCreate: (appId: string) =>
+    req<DuoGroup>('/duo/create', { method: 'POST', body: JSON.stringify({ app_id: appId }) }),
+  duoJoin: (codeOrGroupId: { code?: string; group_id?: string }) =>
+    req<DuoGroup>('/duo/join', { method: 'POST', body: JSON.stringify(codeOrGroupId) }),
+  duoLeave: (groupId: string) =>
+    req<DuoGroup>(`/duo/${groupId}/leave`, { method: 'POST', body: '{}' }),
+  duoMy: () => req<{ groups: DuoGroup[] }>('/duo/my'),
+  duoGet: (groupId: string) => req<DuoGroup>(`/duo/${groupId}`),
+  adminPurchaseHistory: () =>
+    req<{ purchases: AdminPurchaseRow[]; count: number }>('/admin/purchase-history'),
   // Health Connect debug reporter — used by the Sleep / "Connect Samsung
   // Health" flow to ship native crashes + error messages to the server
   // so we can audit why the system permission dialog never appears.
@@ -1649,6 +1676,17 @@ export type LibraryAppPricing = {
   app_id: 'sleep' | 'challenges' | 'spot' | 'confidence';
   price: number;
   currency: string;
+  purchase_url: string;
+  discount_percent: number;
+  discount_active: boolean;
+  discount_starts_at: string | null;
+  discount_ends_at: string | null;
+  effective_price: number;
+  is_free: boolean;
+  purchased: boolean;
+  /** Duo Referral Discount, if Creator has an active offer for the app. */
+  duo_offer?: DuoOffer | null;
+};
 
 // ─── Per-friend chat preferences (bubble colors + mute + soft-block) ───
 export type ChatPreferences = {
@@ -1661,6 +1699,70 @@ export type ChatPreferences = {
   muted: boolean;
   blocked: boolean;
   updated_at: string | null;
+};
+
+// ─── Duo Referral Discount ─────────────────────────────────────────
+export type DuoOffer = {
+  app_id: string;
+  required_people: number;       // 1..5
+  discounted_price: number;
+  currency: string;
+  active: boolean;
+  updated_at?: string | null;
+};
+
+export type DuoMember = {
+  user_id: string;
+  joined_at: string;
+  paid_at: string | null;
+  name: string;
+  avatar_base64: string | null;
+};
+
+export type DuoGroupStatus = 'waiting' | 'full' | 'completed' | 'expired';
+
+export type DuoGroup = {
+  group_id: string;
+  app_id: string;
+  code: string;
+  host_id: string;
+  is_host: boolean;
+  is_member: boolean;
+  required_people: number;
+  discounted_price: number;
+  currency: string;
+  status: DuoGroupStatus;
+  members: DuoMember[];
+  members_count: number;
+  is_full: boolean;
+  created_at: string;
+  expires_at: string;
+  completed_at: string | null;
+  already_exists?: boolean;
+  already_member?: boolean;
+};
+
+export type AdminPurchaseRow = {
+  id: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  user_avatar_base64: string | null;
+  app_id: string;
+  paid_amount: number | null;
+  paid_currency: string | null;
+  source: string;                    // 'stripe' | 'koffi' | 'free' | 'duo'
+  stripe_session_id: string | null;
+  stripe_payment_intent: string | null;
+  duo_group_id: string | null;
+  duo: {
+    group_id: string;
+    code: string;
+    host_id: string;
+    required_people: number;
+    members_count: number;
+  } | null;
+  purchased_at: string;
 };
 
 export type ChatPreferencesPatch = {
@@ -1697,16 +1799,6 @@ export const CHAT_PRESET_COLORS: { name: string; hex: string }[] = [
   { name: 'Slate',   hex: '#2E2E3A' },
   { name: 'Black',   hex: '#0A0A0F' },
 ];
-
-  purchase_url: string;
-  discount_percent: number;
-  discount_active: boolean;
-  discount_starts_at: string | null;
-  discount_ends_at: string | null;
-  effective_price: number;
-  is_free: boolean;
-  purchased: boolean;
-};
 
 
 // ── Build Self-Confidence mini-app ────────────────────────────────

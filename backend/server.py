@@ -8066,7 +8066,18 @@ async def library_pricing_get(user_id: str = Depends(get_user_or_legacy)):
     purchased_set = {p.get("app_id") for p in purchased_rows}
     out = {}
     for aid in LIBRARY_APP_IDS:
-        out[aid] = _pricing_doc_to_pub(by_app.get(aid), aid, aid in purchased_set)
+        pricing = _pricing_doc_to_pub(by_app.get(aid), aid, aid in purchased_set)
+        # Enrich each entry with the active Duo Referral Offer (if any)
+        # so the Library+ card can render the "🎟 $X w/ N friends" badge.
+        if _duo_active_offer is not None:
+            try:
+                pricing["duo_offer"] = await _duo_active_offer(aid)
+            except Exception:
+                logger.exception("[duo_discounts] enrich offer failed for %s", aid)
+                pricing["duo_offer"] = None
+        else:
+            pricing["duo_offer"] = None
+        out[aid] = pricing
     return {"pricing": out, "currencies": SUPPORTED_PRICE_CURRENCIES}
 
 
@@ -8244,6 +8255,7 @@ def _stripe_amount(price: float, currency: str) -> int:
 async def _stripe_record_purchase(
     user_id: str, app_id: str, session_id: str,
     payment_intent: str | None, amount: int, currency: str,
+    duo_group_id: str | None = None,
 ):
     """Idempotent purchase record from Stripe events."""
     if not user_id or not app_id:
@@ -8258,10 +8270,12 @@ async def _stripe_record_purchase(
     if existing:
         # Backfill stripe_session_id if record was created via /library/purchase fallback.
         if not existing.get("stripe_session_id"):
+            patch = {"stripe_session_id": session_id, "stripe_payment_intent": payment_intent}
+            if duo_group_id and not existing.get("duo_group_id"):
+                patch["duo_group_id"] = duo_group_id
+                patch["source"] = "duo"
             await db.library_purchases.update_one(
-                {"_id": existing["_id"]},
-                {"$set": {"stripe_session_id": session_id,
-                          "stripe_payment_intent": payment_intent}},
+                {"_id": existing["_id"]}, {"$set": patch},
             )
         return False
     await db.library_purchases.insert_one({
@@ -8273,9 +8287,11 @@ async def _stripe_record_purchase(
         "paid_currency": currency.upper(),
         "stripe_session_id": session_id,
         "stripe_payment_intent": payment_intent,
-        "source": "stripe",
+        "source": "duo" if duo_group_id else "stripe",
+        "duo_group_id": duo_group_id or None,
     })
-    logger.info("[stripe] purchase recorded user=%s app=%s session=%s", user_id, app_id, session_id)
+    logger.info("[stripe] purchase recorded user=%s app=%s session=%s duo=%s",
+                user_id, app_id, session_id, duo_group_id or "-")
     return True
 
 
@@ -8315,8 +8331,25 @@ async def stripe_create_payment_intent(
         owns = await db.library_purchases.find_one({"user_id": user_id, "app_id": item_id})
         if owns:
             raise HTTPException(409, "You already own this mini-app.")
-    currency = pub["currency"]
-    amount = _stripe_amount(pub["effective_price"], currency)
+    # Duo Referral Discount path — if the body includes a duo_group_id, we
+    # override the price with the GROUP's snapshotted discounted_price.
+    # The validate helper enforces: caller is a member, group is FULL, not
+    # expired, hasn't paid yet. Server-side authoritative — user can't tamper.
+    duo_group_id = (body.get("duo_group_id") or "").strip() if kind == "library" else ""
+    duo_group_doc = None
+    if duo_group_id:
+        if _duo_validate_payment is None:
+            raise HTTPException(503, "Duo discounts unavailable.")
+        duo_price, duo_currency, duo_group_doc = await _duo_validate_payment(
+            user_id, item_id, duo_group_id
+        )
+        currency = duo_currency
+        amount = _stripe_amount(duo_price, currency)
+        effective_price = duo_price
+    else:
+        currency = pub["currency"]
+        amount = _stripe_amount(pub["effective_price"], currency)
+        effective_price = pub["effective_price"]
 
     user_doc = await db.users.find_one({"_id": user_id}) or {}
     prof_doc = await db.profile.find_one({"_id": user_id}) or {}
@@ -8350,9 +8383,11 @@ async def stripe_create_payment_intent(
                 "app_id": item_id if kind == "library" else "",
                 "boost_id": item_id if kind == "boost" else "",
                 "currency": currency,
-                "price": str(pub["effective_price"]),
+                "price": str(effective_price),
+                "duo_group_id": duo_group_id,
             },
-            description=f"{pretty} — {'Library+' if kind == 'library' else 'Points+ Boost'}",
+            description=f"{pretty} — {'Library+' if kind == 'library' else 'Points+ Boost'}"
+                        + (" (Duo)" if duo_group_id else ""),
         )
     except Exception as e:
         logger.error("[stripe] create payment intent failed: %s", e)
@@ -8366,10 +8401,11 @@ async def stripe_create_payment_intent(
         "publishable_key": pk,
         "amount": amount,
         "currency": currency,
-        "effective_price": pub["effective_price"],
+        "effective_price": effective_price,
         "app_id": item_id,
         "kind": kind,
         "payment_intent_id": intent.id,
+        "duo_group_id": duo_group_id or None,
     }
 
 
@@ -8511,6 +8547,7 @@ async def stripe_webhook(request: Request):
                     )
                     logger.info("[stripe] boost granted user=%s boost=%s pi=%s", user, boost_id, pi_id)
         else:
+            duo_gid = md.get("duo_group_id") or None
             await _stripe_record_purchase(
                 user_id=md.get("user_id", ""),
                 app_id=md.get("app_id", ""),
@@ -8518,7 +8555,15 @@ async def stripe_webhook(request: Request):
                 payment_intent=obj.get("id"),
                 amount=obj.get("amount_received", 0) or obj.get("amount", 0) or 0,
                 currency=(obj.get("currency") or "USD").upper(),
+                duo_group_id=duo_gid,
             )
+            # Also bookkeep the duo group: mark this member paid + flip
+            # group to 'completed' if all members have paid.
+            if duo_gid and _duo_record_payment is not None:
+                try:
+                    await _duo_record_payment(md.get("user_id", ""), duo_gid, obj.get("id", ""))
+                except Exception:
+                    logger.exception("[duo] record_duo_payment failed")
     return {"received": True, "type": etype}
 
 
@@ -9308,3 +9353,29 @@ except Exception:
     logger.exception("[chat_preferences] failed to attach routes")
     _chat_pref_for_pair = None  # type: ignore
     _chat_blocked_for = None  # type: ignore
+
+# ═══════════════ Duo Referral Discounts (Library+ group-buy) ═══════════════
+# Wires the duo discounts router (see duo_discounts.py).
+try:
+    from duo_discounts import (
+        init_duo_discounts as _init_duo,
+        attach_routes as _attach_duo_routes,
+        get_active_offer as _duo_active_offer,
+        validate_duo_for_payment as _duo_validate_payment,
+        record_duo_payment as _duo_record_payment,
+    )
+    _init_duo(
+        db=db,
+        is_admin_user=_is_admin_user,
+        now_iso=now_iso,
+        library_app_ids=LIBRARY_APP_IDS,
+        supported_currencies=list(_STRIPE_MINOR_UNITS.keys()),
+        default_currency=DEFAULT_PRICE_CURRENCY,
+    )
+    _attach_duo_routes(app, get_user_or_legacy)
+    logger.info("[duo_discounts] routes attached")
+except Exception:
+    logger.exception("[duo_discounts] failed to attach routes")
+    _duo_active_offer = None  # type: ignore
+    _duo_validate_payment = None  # type: ignore
+    _duo_record_payment = None  # type: ignore
