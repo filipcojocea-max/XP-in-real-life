@@ -8,6 +8,13 @@
  *  - Send button submits the REFINED text only — never the raw draft.
  *  - severity='severe' → input is locked, refined card shows a red
  *    'Blocked' label, and the incident is logged on the backend.
+ *
+ * Per-friend chat preferences (v1.0.29):
+ *  - Bubble + text colors customisable in the ChatSettingsSheet
+ *    (curated swatches + custom HSL picker).
+ *  - 🔕 Mute   = no push pings (badge stays).
+ *  - 🔒 Block  = no push + no badge + lock icon in topbar
+ *                (soft block — messages still arrive, history readable).
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -29,9 +36,28 @@ import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view
 import * as ImagePicker from 'expo-image-picker';
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing } from '../../src/theme';
-import { api, type DMMessage } from '../../src/api';
+import {
+  api,
+  CHAT_DEFAULTS,
+} from '../../src/api';
+import type { ChatPreferences, DMMessage } from '../../src/api';
+import { ChatSettingsSheet } from '../../src/components/ChatSettingsSheet';
 
 const REFINE_DEBOUNCE_MS = 600;
+
+function defaultPrefs(friendId: string): ChatPreferences {
+  return {
+    owner_id: '',
+    friend_id: friendId,
+    sent_bubble_color: CHAT_DEFAULTS.sent_bubble_color,
+    sent_text_color: CHAT_DEFAULTS.sent_text_color,
+    received_bubble_color: CHAT_DEFAULTS.received_bubble_color,
+    received_text_color: CHAT_DEFAULTS.received_text_color,
+    muted: false,
+    blocked: false,
+    updated_at: null,
+  };
+}
 
 export default function MessageThread() {
   const router = useRouter();
@@ -48,6 +74,9 @@ export default function MessageThread() {
   const [meId, setMeId] = useState<string | null>(null);
   const [pickedImage, setPickedImage] = useState<string | null>(null);
   const [imageChecking, setImageChecking] = useState(false);
+  const [prefs, setPrefs] = useState<ChatPreferences>(() => defaultPrefs(fid));
+  const [friendName, setFriendName] = useState<string>('Chat');
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const refineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<ScrollView | null>(null);
 
@@ -67,6 +96,18 @@ export default function MessageThread() {
     } finally {
       setLoading(false);
     }
+  }, [fid]);
+
+  // One-shot load: friend profile (for display name) + chat preferences.
+  useEffect(() => {
+    if (!fid) return;
+    api.chatPrefsGet(fid).then(setPrefs).catch(() => {});
+    api
+      .playerProfile(fid)
+      .then((pl) => {
+        if (pl?.name) setFriendName(pl.name);
+      })
+      .catch(() => {});
   }, [fid]);
 
   useFocusEffect(
@@ -167,14 +208,57 @@ export default function MessageThread() {
     }
   };
 
+  // Apply a single-field patch optimistically then persist.
+  const onPatchPrefs = useCallback(
+    (patch: Partial<ChatPreferences>) => {
+      setPrefs((prev) => ({ ...prev, ...patch }));
+      const send: any = { ...patch };
+      delete send.owner_id;
+      delete send.friend_id;
+      delete send.updated_at;
+      api
+        .chatPrefsUpsert(fid, send)
+        .then((fresh) => setPrefs(fresh))
+        .catch((e) => {
+          showAlert('Could not save', String(e?.message || e));
+        });
+    },
+    [fid],
+  );
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => router.back()} hitSlop={10}>
           <Ionicons name="chevron-back" size={26} color={colors.text} />
         </TouchableOpacity>
-        <Text style={styles.topTitle}>Chat</Text>
-        <View style={{ width: 26 }} />
+        <View style={styles.topTitleRow}>
+          {prefs.blocked ? (
+            <Ionicons
+              name="lock-closed"
+              size={14}
+              color={colors.red}
+              style={{ marginRight: 6 }}
+              testID="chat-topbar-blocked-lock"
+            />
+          ) : prefs.muted ? (
+            <Ionicons
+              name="notifications-off"
+              size={14}
+              color={colors.amber}
+              style={{ marginRight: 6 }}
+              testID="chat-topbar-muted-icon"
+            />
+          ) : null}
+          <Text style={styles.topTitle} numberOfLines={1}>{friendName || 'Chat'}</Text>
+        </View>
+        <TouchableOpacity
+          onPress={() => setSettingsOpen(true)}
+          hitSlop={10}
+          testID="chat-settings-open"
+        >
+          <Ionicons name="settings-outline" size={22} color={colors.text} />
+        </TouchableOpacity>
       </View>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
@@ -205,9 +289,21 @@ export default function MessageThread() {
             )}
             {messages.map((m) => {
               const mine = m.from_user_id === meId;
+              const bubbleBg = mine ? prefs.sent_bubble_color : prefs.received_bubble_color;
+              const textColor = mine ? prefs.sent_text_color : prefs.received_text_color;
               return (
-                <View key={m.id} style={[styles.bubbleRow, mine ? { justifyContent: 'flex-end' } : null]}>
-                  <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleTheirs]}>
+                <View
+                  key={m.id}
+                  style={[styles.bubbleRow, mine ? { justifyContent: 'flex-end' } : null]}
+                >
+                  <View
+                    style={[
+                      styles.bubble,
+                      mine ? styles.bubbleMine : styles.bubbleTheirs,
+                      { backgroundColor: bubbleBg },
+                      !mine && { borderColor: colors.border, borderWidth: 1 },
+                    ]}
+                  >
                     {m.image_base64 ? (
                       <Image
                         source={{ uri: `data:image/jpeg;base64,${m.image_base64}` }}
@@ -215,7 +311,7 @@ export default function MessageThread() {
                       />
                     ) : null}
                     {m.text ? (
-                      <Text style={[styles.bubbleText, mine ? { color: colors.bg } : null]}>{m.text}</Text>
+                      <Text style={[styles.bubbleText, { color: textColor }]}>{m.text}</Text>
                     ) : null}
                   </View>
                 </View>
@@ -306,6 +402,14 @@ export default function MessageThread() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      <ChatSettingsSheet
+        visible={settingsOpen}
+        prefs={prefs}
+        friendName={friendName}
+        onClose={() => setSettingsOpen(false)}
+        onPatch={onPatchPrefs}
+      />
     </SafeAreaView>
   );
 }
@@ -320,14 +424,20 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
-  topTitle: { flex: 1, color: colors.text, fontSize: 18, fontWeight: '900', paddingLeft: 10 },
+  topTitleRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 10,
+  },
+  topTitle: { color: colors.text, fontSize: 18, fontWeight: '900', flex: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   emptyChat: { color: colors.textMuted, fontSize: 13, textAlign: 'center', padding: 24 },
   bubbleRow: { flexDirection: 'row', marginBottom: 4 },
   bubble: { maxWidth: '78%', borderRadius: 14, padding: 10, gap: 6 },
-  bubbleMine: { backgroundColor: colors.cyan, borderBottomRightRadius: 4 },
-  bubbleTheirs: { backgroundColor: colors.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: colors.border },
-  bubbleText: { color: colors.text, fontSize: 14, lineHeight: 19 },
+  bubbleMine: { borderBottomRightRadius: 4 },
+  bubbleTheirs: { borderBottomLeftRadius: 4 },
+  bubbleText: { fontSize: 14, lineHeight: 19 },
   bubbleImg: { width: 200, height: 200, borderRadius: 10 },
   refineCard: {
     marginHorizontal: spacing.md,

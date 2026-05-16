@@ -730,6 +730,27 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ token, platform }),
     }),
+
+  // ─── Per-friend chat preferences (colors + mute + soft-block) ─────
+  chatPrefsBulk: () =>
+    req<{ preferences: ChatPreferences[] }>('/chat/preferences'),
+  chatPrefsGet: (friendId: string) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}`),
+  chatPrefsUpsert: (friendId: string, patch: Partial<ChatPreferencesPatch>) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}`, {
+      method: 'POST',
+      body: JSON.stringify(patch),
+    }),
+  chatPrefsMute: (friendId: string, value: boolean) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}/mute`, {
+      method: 'POST',
+      body: JSON.stringify({ value }),
+    }),
+  chatPrefsBlock: (friendId: string, value: boolean) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}/block`, {
+      method: 'POST',
+      body: JSON.stringify({ value }),
+    }),
   // Health Connect debug reporter — used by the Sleep / "Connect Samsung
   // Health" flow to ship native crashes + error messages to the server
   // so we can audit why the system permission dialog never appears.
@@ -1571,6 +1592,8 @@ export type DMThread = {
   friend_avatar_base64: string | null;
   last_message: DMMessage | null;
   unread_count: number;
+  /** Set true by the backend when the caller has soft-blocked this friend. */
+  blocked?: boolean;
 };
 export type AdminReport = {
   id: string;
@@ -1626,6 +1649,55 @@ export type LibraryAppPricing = {
   app_id: 'sleep' | 'challenges' | 'spot' | 'confidence';
   price: number;
   currency: string;
+
+// ─── Per-friend chat preferences (bubble colors + mute + soft-block) ───
+export type ChatPreferences = {
+  owner_id: string;
+  friend_id: string;
+  sent_bubble_color: string;
+  sent_text_color: string;
+  received_bubble_color: string;
+  received_text_color: string;
+  muted: boolean;
+  blocked: boolean;
+  updated_at: string | null;
+};
+
+export type ChatPreferencesPatch = {
+  sent_bubble_color: string;
+  sent_text_color: string;
+  received_bubble_color: string;
+  received_text_color: string;
+  muted: boolean;
+  blocked: boolean;
+};
+
+/** Default colors used when the server has no row for the pair yet —
+ *  mirrors the backend constants in chat_preferences.py. */
+export const CHAT_DEFAULTS = {
+  sent_bubble_color: '#00E1FF',
+  sent_text_color: '#0A0A0F',
+  received_bubble_color: '#1A1A24',
+  received_text_color: '#E6E6F0',
+} as const;
+
+/** Curated palette tab — 12 high-contrast colors that pair well with
+ *  dark backgrounds. Users can also enter a custom HEX via the picker. */
+export const CHAT_PRESET_COLORS: { name: string; hex: string }[] = [
+  { name: 'Cyan',    hex: '#00E1FF' },
+  { name: 'Green',   hex: '#00E68F' },
+  { name: 'Amber',   hex: '#FFC857' },
+  { name: 'Red',     hex: '#FF4D6D' },
+  { name: 'Purple',  hex: '#B388FF' },
+  { name: 'Pink',    hex: '#FF6FB5' },
+  { name: 'Blue',    hex: '#4F9CFF' },
+  { name: 'Teal',    hex: '#00C9A7' },
+  { name: 'Gold',    hex: '#FFD166' },
+  { name: 'White',   hex: '#FFFFFF' },
+  { name: 'Slate',   hex: '#2E2E3A' },
+  { name: 'Black',   hex: '#0A0A0F' },
+];
+
   purchase_url: string;
   discount_percent: number;
   discount_active: boolean;

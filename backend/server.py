@@ -6015,14 +6015,27 @@ async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_use
     sender_name = sender_prof.get("full_name") or sender_prof.get("name") or "A friend"
     if sender_is_admin:
         sender_name = ADMIN_PUBLIC_DISPLAY_NAME
-    recipient_tokens = await db.push_tokens.find({"user_id": body.to_user_id}).to_list(10)
-    for tok_doc in recipient_tokens:
-        await _send_expo_push(
-            tok_doc.get("token", ""),
-            f"💬 {sender_name}",
-            (refined or "📷 Sent you a photo")[:200],
-            {"type": "message", "from_user_id": user_id, "message_id": msg["id"]},
-        )
+    # Check recipient's chat_preferences for the sender. If muted OR blocked,
+    # skip the push. (Badge suppression for "blocked" happens server-side in
+    # /messages/unread-summary + /messages/threads.) Admin pushes still go
+    # through — Creator/Admin can't be muted/blocked by design.
+    suppress_push = False
+    if not sender_is_admin and _chat_pref_for_pair is not None:
+        try:
+            recipient_pref = await _chat_pref_for_pair(body.to_user_id, user_id)
+            if recipient_pref.get("muted") or recipient_pref.get("blocked"):
+                suppress_push = True
+        except Exception:
+            logger.exception("[messages] chat_pref lookup failed")
+    if not suppress_push:
+        recipient_tokens = await db.push_tokens.find({"user_id": body.to_user_id}).to_list(10)
+        for tok_doc in recipient_tokens:
+            await _send_expo_push(
+                tok_doc.get("token", ""),
+                f"💬 {sender_name}",
+                (refined or "📷 Sent you a photo")[:200],
+                {"type": "message", "from_user_id": user_id, "message_id": msg["id"]},
+            )
     return {"message": _serialize_message(msg)}
 
 
@@ -6049,10 +6062,21 @@ async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
         if other and other != user_id:
             friend_ids.add(other)
     rows = []
+    # Pre-fetch which friend_ids the caller has soft-blocked so we can
+    # zero out their unread counts here (the blocker can still see the
+    # thread + read history, just no red badge).
+    blocked_set: set[str] = set()
+    if _chat_blocked_for is not None:
+        try:
+            blocked_set = await _chat_blocked_for(user_id)
+        except Exception:
+            logger.exception("[messages] blocked filter (threads) failed")
     for fid in friend_ids:
         thread_id = _thread_key(user_id, fid)
         last = await db.messages.find_one({"thread_id": thread_id}, sort=[("created_at", -1)])
         unread = await db.messages.count_documents({"thread_id": thread_id, "to_user_id": user_id, "read_at": None})
+        if fid in blocked_set:
+            unread = 0
         prof = await db.profile.find_one({"_id": fid}) or {}
         u = await db.users.find_one({"_id": fid}, {"email": 1}) or {}
         is_admin = _is_admin_email(u.get("email"))
@@ -6063,6 +6087,7 @@ async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
             "last_message": _serialize_message(last) if last else None,
             "unread_count": int(unread),
             "is_admin_thread": bool(is_admin),
+            "blocked": bool(fid in blocked_set),
         })
     rows.sort(key=lambda r: (r["last_message"] or {}).get("created_at") or "", reverse=True)
     return {"threads": rows}
@@ -6108,6 +6133,16 @@ async def messages_unread_summary(user_id: str = Depends(get_user_or_legacy)):
     summary = {}
     async for row in db.messages.aggregate(pipeline):
         summary[row["_id"]] = int(row["unread"])
+    # Soft-block: messages still arrive but their unread count is NOT
+    # surfaced as a red badge to the blocker. The blocker can still
+    # open the thread and read/reply normally.
+    if _chat_blocked_for is not None:
+        try:
+            blocked = await _chat_blocked_for(user_id)
+            for fid in blocked:
+                summary.pop(fid, None)
+        except Exception:
+            logger.exception("[messages] blocked filter failed")
     return {"unread_by_friend": summary, "total_unread": sum(summary.values())}
 
 
@@ -9256,3 +9291,20 @@ try:
     logger.info("[penalty] routes attached")
 except Exception:
     logger.exception("[penalty] failed to attach routes")
+
+# ═══════════════ Chat preferences (per-friend colors, mute, block) ═══════════════
+# Wires the chat preferences router (see chat_preferences.py).
+try:
+    from chat_preferences import (
+        init_chat_preferences as _init_chat_prefs,
+        attach_routes as _attach_chat_pref_routes,
+        get_pref_for_pair as _chat_pref_for_pair,
+        list_blocked_for as _chat_blocked_for,
+    )
+    _init_chat_prefs(db=db, get_user_or_legacy=get_user_or_legacy, now_iso=now_iso)
+    _attach_chat_pref_routes(app, get_user_or_legacy)
+    logger.info("[chat_preferences] routes attached")
+except Exception:
+    logger.exception("[chat_preferences] failed to attach routes")
+    _chat_pref_for_pair = None  # type: ignore
+    _chat_blocked_for = None  # type: ignore

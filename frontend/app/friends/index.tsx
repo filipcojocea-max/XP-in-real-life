@@ -44,6 +44,9 @@ export default function FriendsScreen() {
   const [friends, setFriends] = useState<Player[]>([]);
   // Per-friend unread DM counts → drives the red dot on each friend card.
   const [unreadByFriend, setUnreadByFriend] = useState<Record<string, number>>({});
+  // Set of friend_ids the caller has soft-blocked (v1.0.29 chat prefs).
+  // Drives the lock-icon overlay on each row's Message button.
+  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
   const [loadingFriends, setLoadingFriends] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -82,14 +85,20 @@ export default function FriendsScreen() {
   const loadFriendsData = useCallback(async () => {
     setLoadingFriends(true);
     try {
-      const [reqs, fr, unread] = await Promise.all([
+      const [reqs, fr, unread, prefs] = await Promise.all([
         api.listFriendRequests(),
         api.listFriends(),
         api.messagesUnreadSummary().catch(() => ({ unread_by_friend: {}, total_unread: 0 })),
+        api.chatPrefsBulk().catch(() => ({ preferences: [] })),
       ]);
       setRequests(reqs);
       setFriends(fr.friends);
       setUnreadByFriend(unread.unread_by_friend || {});
+      const blocked = new Set<string>();
+      for (const p of (prefs.preferences || [])) {
+        if (p.blocked && p.friend_id) blocked.add(p.friend_id);
+      }
+      setBlockedIds(blocked);
     } catch (e: any) {
       console.log('friends', e);
     } finally {
@@ -225,6 +234,7 @@ export default function FriendsScreen() {
           requests={requests}
           friends={friends}
           unreadByFriend={unreadByFriend}
+          blockedIds={blockedIds}
           loading={loadingFriends}
           refreshing={refreshing}
           onRefresh={onRefresh}
@@ -329,7 +339,7 @@ function PlayersTab({
 }
 
 function FriendsTab({
-  subTab, setSubTab, requests, friends, unreadByFriend, loading, refreshing, onRefresh,
+  subTab, setSubTab, requests, friends, unreadByFriend, blockedIds, loading, refreshing, onRefresh,
   onAccept, onDecline, onPress, savingId,
 }: {
   subTab: FriendsSubTab;
@@ -337,6 +347,7 @@ function FriendsTab({
   requests: { incoming: FriendRequestEntry[]; outgoing: FriendRequestEntry[] };
   friends: Player[];
   unreadByFriend: Record<string, number>;
+  blockedIds: Set<string>;
   loading: boolean;
   refreshing: boolean;
   onRefresh: () => void;
@@ -439,6 +450,7 @@ function FriendsTab({
               onMessage={() => router.push(`/messages/${item.user_id}`)}
               saving={savingId === item.user_id}
               unreadCount={unreadByFriend[item.user_id] || 0}
+              isBlocked={blockedIds.has(item.user_id)}
             />
           )}
         />
@@ -523,13 +535,14 @@ function PulsingUnreadDot({ count, testID }: { count: number; testID?: string })
   );
 }
 
-function PlayerCard({ player, onPress, onAddFriend, onMessage, saving, unreadCount }: {
+function PlayerCard({ player, onPress, onAddFriend, onMessage, saving, unreadCount, isBlocked }: {
   player: Player;
   onPress: () => void;
   onAddFriend?: () => void;
   onMessage?: () => void;
   saving?: boolean;
   unreadCount?: number;
+  isBlocked?: boolean;
 }) {
   const adminView = !!player.is_admin_view;
   // ── Admin moderation visuals (only the Creator sees these flags) ──
@@ -625,6 +638,15 @@ function PlayerCard({ player, onPress, onAddFriend, onMessage, saving, unreadCou
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         >
           <Ionicons name="chatbubble-ellipses" size={18} color={colors.cyan} />
+          {isBlocked ? (
+            <View
+              style={styles.quickMessageLock}
+              testID={`friend-blocked-lock-${player.user_id}`}
+              pointerEvents="none"
+            >
+              <Ionicons name="lock-closed" size={9} color="#fff" />
+            </View>
+          ) : null}
         </TouchableOpacity>
       ) : onAddFriend ? (
         <FriendActionButton player={player} onAddFriend={onAddFriend} saving={saving} />
@@ -1619,6 +1641,21 @@ const styles = StyleSheet.create({
     backgroundColor: colors.cyan + '18',
     borderWidth: 1,
     borderColor: colors.cyan + '66',
+  },
+  /** Tiny red lock badge overlayed on the Message button when the
+   *  caller has soft-blocked this friend (chat_preferences.blocked). */
+  quickMessageLock: {
+    position: 'absolute',
+    bottom: -4,
+    right: -4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: colors.red,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.bg,
   },
 
   actionBtn: {
