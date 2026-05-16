@@ -239,10 +239,14 @@ export function CreatorPricingMenu({
   appId: MiniAppId | BoostId | null;
   pricing: LibraryAppPricing | null;
   onClose: () => void;
-  onChoose: (which: 'price' | 'discount') => void;
+  /** 'price' = change full price, 'discount' = solo % discount,
+   *  'duo'   = friends/duo group-buy discount (Library+ only). */
+  onChoose: (which: 'price' | 'discount' | 'duo') => void;
   kind?: PricingKind;
 }) {
   if (!appId) return null;
+  // Duo is Library+ only — boosts can't be group-bought.
+  const showDuo = kind === 'library';
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <TouchableOpacity activeOpacity={1} onPress={onClose} style={menuStyles.backdrop}>
@@ -258,6 +262,9 @@ export function CreatorPricingMenu({
                 : pricing.discount_active
                   ? `${formatPrice(pricing.effective_price, pricing.currency)} (${pricing.discount_percent}% off ${formatPrice(pricing.price, pricing.currency)})`
                   : formatPrice(pricing.price, pricing.currency)}
+              {pricing.duo_offer
+                ? `\n🎟 Duo: ${formatPrice(pricing.duo_offer.discounted_price, pricing.duo_offer.currency)} w/ ${pricing.duo_offer.required_people} friends`
+                : ''}
             </Text>
           ) : null}
 
@@ -283,11 +290,29 @@ export function CreatorPricingMenu({
           >
             <Ionicons name="flame" size={20} color="#FFD700" />
             <View style={{ flex: 1 }}>
-              <Text style={[menuStyles.rowTitle, { color: '#FFD700' }]}>Add discount</Text>
+              <Text style={[menuStyles.rowTitle, { color: '#FFD700' }]}>Solo discount</Text>
               <Text style={menuStyles.rowSub}>% off for a limited time (days / weeks / months).</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color="#FFD700" />
           </TouchableOpacity>
+
+          {showDuo ? (
+            <TouchableOpacity
+              testID="pricing-menu-duo"
+              onPress={() => onChoose('duo')}
+              style={[menuStyles.row, { borderColor: '#B388FF88', backgroundColor: '#B388FF15' }]}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="people-circle" size={20} color="#B388FF" />
+              <View style={{ flex: 1 }}>
+                <Text style={[menuStyles.rowTitle, { color: '#B388FF' }]}>Friends / Duo discount</Text>
+                <Text style={menuStyles.rowSub}>
+                  Group-buy unlock — 1–5 friends together pay a lower price.
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color="#B388FF" />
+            </TouchableOpacity>
+          ) : null}
 
           <TouchableOpacity onPress={onClose} style={menuStyles.cancel}>
             <Text style={menuStyles.cancelText}>Cancel</Text>
@@ -783,6 +808,7 @@ export function BuyAppModal({
   onClose,
   onPurchased,
   kind = 'library',
+  duoGroupId = null,
 }: {
   visible: boolean;
   appId: MiniAppId | BoostId | null;
@@ -791,6 +817,9 @@ export function BuyAppModal({
   onClose: () => void;
   onPurchased: () => void;
   kind?: PricingKind;
+  /** When set, the create-payment-intent is sent with this group id and
+   *  the backend charges the snapshotted duo discounted price. */
+  duoGroupId?: string | null;
 }) {
   const [redirecting, setRedirecting] = useState(false);
   const [redirectError, setRedirectError] = useState<string | null>(null);
@@ -832,7 +861,7 @@ export function BuyAppModal({
       try {
         // Pass kind to backend so it knows whether to read price from
         // library_pricing or boost_pricing.
-        const intent = await api.paymentsCreatePaymentIntent(appId as any, kind);
+        const intent = await api.paymentsCreatePaymentIntent(appId as any, kind, duoGroupId || undefined);
         await new Promise((res) => setTimeout(res, 450));
         const r = await presentNativePaymentSheet({
           publishableKey: intent.publishable_key,

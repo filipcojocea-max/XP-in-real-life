@@ -205,6 +205,16 @@ export default function FriendsScreen() {
             <Text style={[adminStrip.title, { color: colors.cyan }]}>Global Leaderboard</Text>
             <Text style={adminStrip.sub}>Top 100 · week / month / year / all</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[adminStrip.card, { borderColor: '#B388FF99' }]}
+            activeOpacity={0.85}
+            onPress={() => router.push('/admin/purchase-history' as any)}
+            testID="admin-purchase-history"
+          >
+            <Ionicons name="receipt" size={18} color="#B388FF" />
+            <Text style={[adminStrip.title, { color: '#B388FF' }]}>Purchase History</Text>
+            <Text style={adminStrip.sub}>Library+ buys + duo referral activity</Text>
+          </TouchableOpacity>
         </View>
       ) : null}
 

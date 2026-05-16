@@ -1016,11 +1016,11 @@ agent_communication:
 
   - task: "v1.0.29 Duo Referral Discounts (group-buy for Library+)"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/duo_discounts.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"

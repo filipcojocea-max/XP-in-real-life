@@ -24,7 +24,12 @@ import {
   SetDiscountModal,
   BuyAppModal,
 } from '../../src/components/LibraryPricing';
-import type { LibraryAppPricing } from '../../src/api';
+import {
+  SetDuoDiscountModal,
+  DuoBadge,
+  DuoJoinModal,
+} from '../../src/components/DuoDiscount';
+import type { LibraryAppPricing, DuoGroup } from '../../src/api';
 
 type Tab = 'add' | 'mine';
 
@@ -71,6 +76,13 @@ export default function Library() {
   const [creatorMenuApp, setCreatorMenuApp] = useState<MiniAppId | null>(null);
   const [setPriceFor, setSetPriceFor] = useState<MiniAppId | null>(null);
   const [setDiscountFor, setSetDiscountFor] = useState<MiniAppId | null>(null);
+  /** Admin upsert sheet for the v1.0.29 "Friends/Duo" group-buy. */
+  const [setDuoDiscountFor, setSetDuoDiscountFor] = useState<MiniAppId | null>(null);
+  /** User-facing "start or join a duo group" modal. */
+  const [duoJoinFor, setDuoJoinFor] = useState<MiniAppId | null>(null);
+  /** Set when the user has reached a FULL duo group and tapped "Pay" — drives
+   *  the Buy modal to checkout with duo_group_id attached. */
+  const [duoBuyContext, setDuoBuyContext] = useState<DuoGroup | null>(null);
   const [buyAppFor, setBuyAppFor] = useState<MiniAppId | null>(null);
 
   const loadPricing = useCallback(async () => {
@@ -314,6 +326,10 @@ export default function Library() {
                   testID="pricing-badge-sleep"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.sleep?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('sleep') : setDuoJoinFor('sleep'))}
+              />
             </TouchableOpacity>
 
             {/* Challenge Tasks mini-app — featured */}
@@ -374,6 +390,10 @@ export default function Library() {
                   testID="pricing-badge-challenges"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.challenges?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('challenges') : setDuoJoinFor('challenges'))}
+              />
             </TouchableOpacity>
 
             {/* Spot the Object mini-app — featured */}
@@ -434,6 +454,10 @@ export default function Library() {
                   testID="pricing-badge-spot"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.spot?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('spot') : setDuoJoinFor('spot'))}
+              />
             </TouchableOpacity>
             {/* Build Self-Confidence mini-app — featured */}
             <TouchableOpacity
@@ -493,6 +517,10 @@ export default function Library() {
                   testID="pricing-badge-confidence"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.confidence?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('confidence') : setDuoJoinFor('confidence'))}
+              />
             </TouchableOpacity>
           </View>
         ) : (
@@ -591,7 +619,8 @@ export default function Library() {
           const id = creatorMenuApp;
           setCreatorMenuApp(null);
           if (which === 'price') setSetPriceFor(id);
-          else setSetDiscountFor(id);
+          else if (which === 'discount') setSetDiscountFor(id);
+          else if (which === 'duo') setSetDuoDiscountFor(id);
         }}
       />
       <SetPriceModal
@@ -609,6 +638,35 @@ export default function Library() {
         onClose={() => setSetDiscountFor(null)}
         onSaved={onPricingSaved}
       />
+      <SetDuoDiscountModal
+        visible={setDuoDiscountFor !== null}
+        appId={setDuoDiscountFor}
+        pricing={setDuoDiscountFor ? pricing[setDuoDiscountFor] : null}
+        onClose={() => setSetDuoDiscountFor(null)}
+        onSaved={onPricingSaved}
+      />
+      <DuoJoinModal
+        visible={duoJoinFor !== null}
+        appId={duoJoinFor}
+        appName={duoJoinFor ? APP_LABELS[duoJoinFor] : ''}
+        offer={duoJoinFor ? pricing[duoJoinFor]?.duo_offer || null : null}
+        onClose={() => setDuoJoinFor(null)}
+        onCheckout={(group: DuoGroup) => {
+          // Hand off to the existing PaymentSheet flow on the same screen
+          // with duo_group_id attached so the backend uses the snapshotted
+          // discounted_price. The BuyAppModal already supports the kind
+          // 'library' PaymentSheet — we open it with extra context.
+          setDuoJoinFor(null);
+          if (duoJoinFor) {
+            // Stash group id on a global ref the BuyAppModal can pick up.
+            // Simpler: open the buy modal with duo_group_id as a hint via
+            // a state field. For MVP we re-use buyAppFor and pass the
+            // group via a sibling state set just below.
+            setBuyAppFor(group.app_id as MiniAppId);
+            setDuoBuyContext(group);
+          }
+        }}
+      />
       {/* Buy modal — opens when a non-Creator taps a priced/un-purchased card */}
       <BuyAppModal
         visible={buyAppFor !== null}
@@ -625,8 +683,9 @@ export default function Library() {
                   ? 'Daily speaking + posture drills, gratitude prompts, and an AI Style Coach.'
                   : ''
         }
-        onClose={() => setBuyAppFor(null)}
+        onClose={() => { setBuyAppFor(null); setDuoBuyContext(null); }}
         onPurchased={onPurchaseConfirmed}
+        duoGroupId={duoBuyContext?.group_id || null}
       />
     </SafeAreaView>
   );

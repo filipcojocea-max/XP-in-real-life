@@ -951,6 +951,7 @@ export const api = {
   paymentsCreatePaymentIntent: (
     app_id: string,
     kind: 'library' | 'boost' = 'library',
+    duo_group_id?: string,
   ) =>
     req<{
       payment_intent_client_secret: string;
@@ -963,9 +964,10 @@ export const api = {
       app_id: string;
       kind: string;
       payment_intent_id: string;
+      duo_group_id?: string | null;
     }>('/payments/create-payment-intent', {
       method: 'POST',
-      body: JSON.stringify({ app_id, kind }),
+      body: JSON.stringify({ app_id, kind, duo_group_id: duo_group_id || undefined }),
     }),
 
   // Polled after returning from Stripe — finalises OWNED state if the
