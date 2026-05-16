@@ -984,11 +984,11 @@ agent_communication:
 
   - task: "v1.0.29 Chat preferences (per-friend bubble/text colors + mute + soft-block)"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/chat_preferences.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
