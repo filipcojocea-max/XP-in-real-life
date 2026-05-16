@@ -24,6 +24,10 @@ import LeaderboardTab from '../../src/components/LeaderboardTab';
 import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
 import { SuspendUserModal } from '../../src/components/SuspendUserModal';
 import { GiftComposerModal } from '../../src/components/GiftComposerModal';
+import {
+  PlayerPriceOverridesModal,
+  DeletePlayerConfirmModal,
+} from '../../src/components/AdminPlayerTools';
 
 type TopTab = 'players' | 'friends' | 'leaderboard';
 type FriendsSubTab = 'requests' | 'mine';
@@ -939,7 +943,18 @@ function PlayerProfileModal({
               sees this block. Non-self only. Lets the Creator suspend
               the player straight from their profile modal. */}
           {viewerIsAdmin && player.friend_status !== 'self' && !player.is_admin_view ? (
-            <AdminControlsBlock userId={player.user_id} userName={player.name} />
+            <AdminControlsBlock
+              userId={player.user_id}
+              userName={player.name}
+              userEmail={(player as any).email}
+              onAccountDeleted={() => {
+                // Close the modal and trigger the parent's refresh hook so
+                // the just-deleted player drops out of the list / search
+                // results immediately.
+                onClose();
+                onFriendChanged?.();
+              }}
+            />
           ) : null}
 
           {/* Action area */}
@@ -1106,11 +1121,25 @@ function ModalStat({ icon, color, value, label }: { icon: string; color: string;
  * Suspend/Lift Suspension buttons. Sending Gifts and admin-bypass DM
  * will be added to this block in subsequent phases.
  */
-function AdminControlsBlock({ userId, userName }: { userId: string; userName: string }) {
+function AdminControlsBlock({
+  userId,
+  userName,
+  userEmail,
+  onAccountDeleted,
+}: {
+  userId: string;
+  userName: string;
+  userEmail?: string;
+  /** Called after cascade delete succeeds — parent should close the
+   *  profile modal and refresh the players list. */
+  onAccountDeleted?: () => void;
+}) {
   const [status, setStatus] = useState<{ suspended: boolean; forever?: boolean; remaining_seconds?: number | null; until?: string | null; reason?: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showSuspend, setShowSuspend] = useState(false);
   const [showGift, setShowGift] = useState(false);
+  const [showOverrides, setShowOverrides] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
   const [working, setWorking] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -1217,6 +1246,18 @@ function AdminControlsBlock({ userId, userName }: { userId: string; userName: st
         <Text style={styles.adminGiftText}>Send Gift</Text>
       </TouchableOpacity>
 
+      {/* Per-player price overrides — Creator-set custom prices on the
+          four Library+ mini-apps that ONLY this player sees. v1.0.29. */}
+      <TouchableOpacity
+        testID="admin-overrides-btn"
+        onPress={() => setShowOverrides(true)}
+        style={styles.adminOverridesBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="pricetags" size={16} color="#FFD700" />
+        <Text style={styles.adminOverridesText}>Per-Player Prices</Text>
+      </TouchableOpacity>
+
       {/* Direct message — admin can DM anyone, no friendship needed */}
       <TouchableOpacity
         testID="admin-dm-btn"
@@ -1233,6 +1274,37 @@ function AdminControlsBlock({ userId, userName }: { userId: string; userName: st
         targetUserId={userId}
         targetName={userName}
         onClose={() => setShowGift(false)}
+      />
+
+      <PlayerPriceOverridesModal
+        visible={showOverrides}
+        userId={userId}
+        userName={userName}
+        onClose={() => setShowOverrides(false)}
+      />
+
+      {/* Delete this account — RED danger zone with two-step
+          type-DELETE-to-confirm guard. v1.0.29. */}
+      <TouchableOpacity
+        testID="admin-delete-account-btn"
+        onPress={() => setShowDelete(true)}
+        style={styles.adminDangerBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="trash" size={16} color={colors.red} />
+        <Text style={styles.adminDangerText}>Delete Account</Text>
+      </TouchableOpacity>
+
+      <DeletePlayerConfirmModal
+        visible={showDelete}
+        userId={userId}
+        userName={userName}
+        userEmail={userEmail}
+        onClose={() => setShowDelete(false)}
+        onDeleted={() => {
+          showAlert('Deleted', `${userName} has been removed.`);
+          onAccountDeleted?.();
+        }}
       />
 
       {/* Open the full creator-only player page where the XP Penalty
@@ -1925,6 +1997,23 @@ const styles = StyleSheet.create({
     borderColor: '#FFD700',
   },
   adminGiftText: { color: '#FFD700', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  /** Per-Player Prices — admin opens the price-override editor for the
+   *  Library+ mini-apps for THIS player only. v1.0.29. */
+  adminOverridesBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 12, borderRadius: radii.pill,
+    backgroundColor: 'rgba(255, 215, 0, 0.12)',
+    borderWidth: 1, borderColor: '#FFD70088', marginTop: 6,
+  },
+  adminOverridesText: { color: '#FFD700', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  /** RED danger zone — Delete Account (two-step type-DELETE confirm). */
+  adminDangerBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 12, borderRadius: radii.pill,
+    backgroundColor: colors.red + '15',
+    borderWidth: 1, borderColor: colors.red + '99', marginTop: 12,
+  },
+  adminDangerText: { color: colors.red, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
   adminDMBtn: {
     flexDirection: 'row',
     alignItems: 'center',

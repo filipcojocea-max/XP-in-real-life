@@ -778,6 +778,35 @@ export const api = {
   duoGet: (groupId: string) => req<DuoGroup>(`/duo/${groupId}`),
   adminPurchaseHistory: () =>
     req<{ purchases: AdminPurchaseRow[]; count: number }>('/admin/purchase-history'),
+
+  // ─── v1.0.29 Admin Player Tools ────────────────────────────────
+  /** Per-player price overrides (Creator-set, applies only to that player). */
+  adminPriceOverridesList: (userId: string) =>
+    req<{ user_id: string; overrides: Record<string, PriceOverrideRow> }>(
+      `/admin/players/${userId}/price-overrides`,
+    ),
+  adminPriceOverrideUpsert: (userId: string, appId: string, overridePrice: number, currency = 'USD') =>
+    req<{ user_id: string; overrides: Record<string, PriceOverrideRow> }>(
+      `/admin/players/${userId}/price-overrides/${appId}`,
+      { method: 'POST', body: JSON.stringify({ override_price: overridePrice, currency }) },
+    ),
+  adminPriceOverrideClear: (userId: string, appId: string) =>
+    req<{ user_id: string; overrides: Record<string, PriceOverrideRow> }>(
+      `/admin/players/${userId}/price-overrides/${appId}`,
+      { method: 'DELETE' },
+    ),
+  /** Hard-delete a player account. Cascades to every collection. Body
+   *  must include {confirm:'DELETE'} as a guard against accidental taps. */
+  adminDeletePlayer: (userId: string) =>
+    req<{ deleted: boolean; user_id: string; email: string; name: string; summary: Record<string, number> }>(
+      `/admin/players/${userId}`,
+      { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE' }) },
+    ),
+  /** Inactive players list — bucket '2w' | '1m' | '6m'. */
+  adminInactivePlayers: (bucket: '2w' | '1m' | '6m') =>
+    req<{ bucket: string; threshold_days: number; count: number; players: InactivePlayerRow[] }>(
+      `/admin/players/inactive?bucket=${bucket}`,
+    ),
   // Health Connect debug reporter — used by the Sleep / "Connect Samsung
   // Health" flow to ship native crashes + error messages to the server
   // so we can audit why the system permission dialog never appears.
@@ -1765,6 +1794,25 @@ export type AdminPurchaseRow = {
     members_count: number;
   } | null;
   purchased_at: string;
+};
+
+// ─── v1.0.29 Admin Player Tools ──────────────────────────────────
+export type PriceOverrideRow = {
+  app_id: string;
+  override_price: number;
+  currency: string;
+  updated_at: string | null;
+};
+
+export type InactivePlayerRow = {
+  user_id: string;
+  name: string;
+  email: string;
+  avatar_base64: string | null;
+  level: number;
+  total_xp: number;
+  last_active_at: string;
+  days_inactive: number;
 };
 
 export type ChatPreferencesPatch = {

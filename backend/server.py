@@ -8126,6 +8126,27 @@ async def library_pricing_get(user_id: str = Depends(get_user_or_legacy)):
     out = {}
     for aid in LIBRARY_APP_IDS:
         pricing = _pricing_doc_to_pub(by_app.get(aid), aid, aid in purchased_set)
+        # Per-player price override (Creator-set, applies only to this caller).
+        # Beats both the solo % discount and the duo offer — when present,
+        # `effective_price` becomes the override and a marker field is
+        # exposed so the UI can render an "Exclusive price" pill.
+        if _admin_price_override_for is not None:
+            try:
+                ov = await _admin_price_override_for(user_id, aid)
+                if ov:
+                    pricing["effective_price"] = ov["override_price"]
+                    pricing["currency"] = ov["currency"]
+                    pricing["discount_active"] = False
+                    pricing["override_price"] = ov["override_price"]
+                    pricing["override_currency"] = ov["currency"]
+                    pricing["has_override"] = True
+                else:
+                    pricing["has_override"] = False
+            except Exception:
+                logger.exception("[price-override] enrich failed for %s", aid)
+                pricing["has_override"] = False
+        else:
+            pricing["has_override"] = False
         # Enrich each entry with the active Duo Referral Offer (if any)
         # so the Library+ card can render the "🎟 $X w/ N friends" badge.
         if _duo_active_offer is not None:
@@ -9447,3 +9468,24 @@ except Exception:
     _duo_active_offer = None  # type: ignore
     _duo_validate_payment = None  # type: ignore
     _duo_record_payment = None  # type: ignore
+
+# ═══════════════ Admin Player Tools (per-player overrides, delete, inactive) ═══════════════
+try:
+    from admin_player_tools import (
+        init_admin_player_tools as _init_admin_tools,
+        attach_routes as _attach_admin_tool_routes,
+        get_price_override_for as _admin_price_override_for,
+    )
+    _init_admin_tools(
+        db=db,
+        is_admin_user=_is_admin_user,
+        now_iso=now_iso,
+        library_app_ids=LIBRARY_APP_IDS,
+        supported_currencies=list(_STRIPE_MINOR_UNITS.keys()),
+        default_currency=DEFAULT_PRICE_CURRENCY,
+    )
+    _attach_admin_tool_routes(app, get_user_or_legacy)
+    logger.info("[admin_player_tools] routes attached")
+except Exception:
+    logger.exception("[admin_player_tools] failed to attach routes")
+    _admin_price_override_for = None  # type: ignore
