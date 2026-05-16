@@ -88,8 +88,8 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Check local weather for outfit advice",
-          "locationWhenInUsePermission": "Check local weather for outfit advice",
+          "locationAlwaysAndWhenInUsePermission": "Used by Buried Treasure to spawn chests near you and confirm your find — only while the app is open.",
+          "locationWhenInUsePermission": "Used by Buried Treasure to spawn chests near you and confirm your find — only while the app is open.",
           "isIosBackgroundLocationEnabled": false,
           "isAndroidBackgroundLocationEnabled": false
         }

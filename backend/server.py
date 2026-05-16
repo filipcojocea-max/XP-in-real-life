@@ -7778,7 +7778,7 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
 #   }
 # Composite uniqueness: (user_id, app_id). We enforce it via upsert.
 
-LIBRARY_APP_IDS = ["sleep", "challenges", "spot", "confidence"]
+LIBRARY_APP_IDS = ["sleep", "challenges", "spot", "confidence", "treasure"]
 APP_PRETTY = {
     "sleep": "Improve Sleeping",
     "challenges": "Challenge Tasks",

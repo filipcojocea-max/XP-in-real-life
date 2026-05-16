@@ -17,6 +17,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Image,
+  Linking,
   Modal,
   Platform,
   ScrollView,
@@ -28,7 +29,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Stack, useRouter } from 'expo-router';
+import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -80,6 +81,14 @@ export default function BuriedTreasureScreen() {
   const [daylightOnly, setDaylightOnly] = useState(false);
   const [finds, setFinds] = useState<BTFind[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  // Live foreground-location permission state. The Buried Treasure
+  // mini-app is unplayable without it (chest spawns + compass + find
+  // confirmation all need real coords), so we surface a non-dismissible
+  // banner-style modal when the OS denies it. `null` = haven't asked
+  // yet; 'granted' | 'denied' | 'undetermined' otherwise.
+  const [locPerm, setLocPerm] = useState<
+    null | 'granted' | 'denied' | 'undetermined'
+  >(null);
 
   // ── Boot: load location → settings → chest ──
   const load = useCallback(async () => {
@@ -105,12 +114,56 @@ export default function BuriedTreasureScreen() {
 
   useEffect(() => { load(); }, [load]);
 
+  // ── Foreground-location permission gate ──
+  // The user explicitly requested a popup that ALWAYS prompts for
+  // location access on entering this mini-app. We:
+  //   1. Check the current status on mount + every screen focus.
+  //   2. If undetermined → call requestForegroundPermissionsAsync
+  //      so iOS/Android shows the system dialog.
+  //   3. If denied → render a modal with "Open Settings" deep link
+  //      (because the OS won't show its own dialog a second time).
+  // Web preview always returns 'granted' from getForegroundPermissionsAsync
+  // (geolocation handled by the browser instead), so this is harmless.
+  const askPermission = useCallback(async () => {
+    try {
+      const cur = await Location.getForegroundPermissionsAsync();
+      if (cur.status === 'granted') {
+        setLocPerm('granted');
+        return 'granted' as const;
+      }
+      // Some statuses can request again; once 'denied' (after a "Don't
+      // Allow"), the system won't show the dialog again — fall through
+      // to the in-app modal.
+      if (cur.canAskAgain !== false) {
+        const r = await Location.requestForegroundPermissionsAsync();
+        setLocPerm(r.status === 'granted' ? 'granted' : 'denied');
+        return r.status === 'granted' ? 'granted' : 'denied';
+      }
+      setLocPerm('denied');
+      return 'denied' as const;
+    } catch {
+      setLocPerm('denied');
+      return 'denied' as const;
+    }
+  }, []);
+
+  useEffect(() => { askPermission(); }, [askPermission]);
+  useFocusEffect(
+    React.useCallback(() => {
+      // Re-check on every focus so if the user toggles the permission
+      // in iOS Settings and comes back, we pick up the new status.
+      askPermission();
+      return undefined;
+    }, [askPermission]),
+  );
+
   // ── Live device position (always-on while screen is mounted) ──
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      // Don't ask again here — askPermission already handled the prompt
+      // and surfaced the in-app modal if the user said no.
+      if (locPerm !== 'granted') return;
       const cur = await Location.getCurrentPositionAsync({});
       setPos({ lat: cur.coords.latitude, lng: cur.coords.longitude });
       sub = await Location.watchPositionAsync(
@@ -119,7 +172,7 @@ export default function BuriedTreasureScreen() {
       );
     })();
     return () => { sub?.remove(); };
-  }, []);
+  }, [locPerm]);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -194,6 +247,21 @@ export default function BuriedTreasureScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <Stack.Screen options={{ headerShown: false }} />
+      <PermissionDeniedModal
+        visible={locPerm === 'denied'}
+        onRetry={async () => {
+          const r = await askPermission();
+          if (r === 'denied') {
+            // Likely "Don't allow again" — only Settings can fix it.
+            try {
+              await Linking.openSettings();
+            } catch {
+              /* ignore */
+            }
+          }
+        }}
+        onClose={() => router.back()}
+      />
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => router.back()} hitSlop={10}>
           <Ionicons name="chevron-back" size={22} color={colors.text} />
@@ -900,4 +968,145 @@ const styles = StyleSheet.create({
   findCoords: { color: colors.textMuted, fontSize: 10, marginTop: 2 },
   findXp: { color: TREASURE_GOLD, fontSize: 11, fontWeight: '900' },
   emptyHistory: { color: colors.textMuted, fontSize: 12, textAlign: 'center', paddingVertical: 8 },
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Permission-denied modal — surfaces the "Buried Treasure needs your
+// location" rationale + an "Open Settings" deep link when the OS will
+// no longer show its own dialog (user tapped "Don't Allow"). Renders a
+// Modal so it sits on top of the map / hint card and prevents the user
+// from playing without granting access.
+// ────────────────────────────────────────────────────────────────────
+function PermissionDeniedModal({
+  visible,
+  onRetry,
+  onClose,
+}: {
+  visible: boolean;
+  onRetry: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={permStyles.backdrop}>
+        <View style={permStyles.card} testID="treasure-permission-modal">
+          <View style={permStyles.iconWrap}>
+            <Ionicons name="navigate" size={32} color={TREASURE_GOLD} />
+          </View>
+          <Text style={permStyles.kicker}>LOCATION REQUIRED</Text>
+          <Text style={permStyles.title}>
+            Buried Treasure needs access to your location
+          </Text>
+          <Text style={permStyles.body}>
+            We use your live position only while this mini-app is open — to
+            spawn the daily chest on real parks near you, point the compass
+            arrow, and confirm you&apos;re inside the 12&nbsp;m proximity ring
+            when you tap &quot;Found it!&quot;.
+          </Text>
+          <Text style={permStyles.bodyDim}>
+            Nothing is recorded in the background. The permission level we
+            ask for is &quot;While Using the App&quot; — you can revoke it any
+            time from Settings.
+          </Text>
+          <TouchableOpacity onPress={onRetry} style={permStyles.btnPrimary} activeOpacity={0.85}>
+            <Ionicons name="lock-open" size={16} color={colors.bg} />
+            <Text style={permStyles.btnPrimaryText}>Grant access / Open settings</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={onClose} style={permStyles.btnGhost} activeOpacity={0.7}>
+            <Text style={permStyles.btnGhostText}>Leave the mini-app</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const permStyles = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  card: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: colors.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: TREASURE_GOLD + '88',
+    padding: 22,
+    alignItems: 'center',
+  },
+  iconWrap: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: TREASURE_GOLD + '22',
+    borderWidth: 1,
+    borderColor: TREASURE_GOLD + '88',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  kicker: {
+    color: TREASURE_GOLD,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 2,
+    marginTop: 4,
+  },
+  title: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '900',
+    textAlign: 'center',
+    marginTop: 6,
+    marginBottom: 8,
+    lineHeight: 24,
+  },
+  body: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  bodyDim: {
+    color: colors.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
+    textAlign: 'center',
+    marginBottom: 16,
+    fontStyle: 'italic',
+  },
+  btnPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: TREASURE_GOLD,
+    paddingVertical: 13,
+    paddingHorizontal: 20,
+    borderRadius: 999,
+    width: '100%',
+  },
+  btnPrimaryText: {
+    color: colors.bg,
+    fontWeight: '900',
+    fontSize: 13,
+    letterSpacing: 0.3,
+  },
+  btnGhost: {
+    paddingVertical: 12,
+    alignItems: 'center',
+    width: '100%',
+  },
+  btnGhostText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+    textDecorationLine: 'underline',
+  },
 });

@@ -47,7 +47,7 @@ const APP_TINTS: Record<MiniAppId, string> = {
   sleep: colors.cyan,
   challenges: colors.green,
   spot: colors.amber,
-  confidence: '#FFD700',
+  confidence: '#00FF88',
 };
 
 const EMPTY_STATS: MiniAppRatingStats = { average: 0, count: 0, user_rating: null };
@@ -464,9 +464,9 @@ export default function Library() {
               testID="library-card-confidence"
               activeOpacity={0.85}
               onPress={() => handleCardTap('confidence', '/confidence')}
-              style={[styles.featureCard, { marginTop: spacing.md, borderColor: '#FFD70055' }]}
+              style={[styles.featureCard, { marginTop: spacing.md, borderColor: '#00FF8855' }]}
             >
-              <View style={[styles.featureGlow, { backgroundColor: '#FFD70022' }]} />
+              <View style={[styles.featureGlow, { backgroundColor: '#00FF8822' }]} />
               <View style={styles.featureRow}>
                 <MiniAppRatingStrip
                   testID="rating-strip-confidence"
@@ -474,12 +474,12 @@ export default function Library() {
                   tint={APP_TINTS.confidence}
                   onPress={() => setRateTarget('confidence')}
                 />
-                <View style={[styles.featureIcon, { backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
-                  <Ionicons name="shirt" size={32} color={'#FFD700'} />
+                <View style={[styles.featureIcon, { backgroundColor: '#00FF8822', borderColor: '#00FF8888' }]}>
+                  <Ionicons name="shirt" size={32} color={'#00FF88'} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <View style={styles.featureKickerRow}>
-                    <Text style={[styles.featureKicker, { color: '#FFD700' }]}>NEW · 4 TRACKS</Text>
+                    <Text style={[styles.featureKicker, { color: '#00FF88' }]}>NEW · 4 TRACKS</Text>
                     <View style={styles.unlockedPill}>
                       <Ionicons name="checkmark" size={10} color={colors.green} />
                       <Text style={styles.unlockedText}>UNLOCKED</Text>
@@ -490,20 +490,20 @@ export default function Library() {
                     Daily speaking + posture challenges, gratitude prompts, and an AI Style Coach that reviews your outfit photos.
                   </Text>
                   <View style={styles.tagRow}>
-                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
-                      <Ionicons name="chatbubbles" size={10} color={'#FFD700'} />
-                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>Social</Text>
+                    <View style={[styles.featTag, { backgroundColor: '#00FF8815', borderColor: '#00FF8833' }]}>
+                      <Ionicons name="chatbubbles" size={10} color={'#00FF88'} />
+                      <Text style={[styles.featTagText, { color: '#00FF88' }]}>Social</Text>
                     </View>
-                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
-                      <Ionicons name="body" size={10} color={'#FFD700'} />
-                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>Posture</Text>
+                    <View style={[styles.featTag, { backgroundColor: '#00FF8815', borderColor: '#00FF8833' }]}>
+                      <Ionicons name="body" size={10} color={'#00FF88'} />
+                      <Text style={[styles.featTagText, { color: '#00FF88' }]}>Posture</Text>
                     </View>
-                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
-                      <Ionicons name="sparkles" size={10} color={'#FFD700'} />
-                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>AI Stylist</Text>
+                    <View style={[styles.featTag, { backgroundColor: '#00FF8815', borderColor: '#00FF8833' }]}>
+                      <Ionicons name="sparkles" size={10} color={'#00FF88'} />
+                      <Text style={[styles.featTagText, { color: '#00FF88' }]}>AI Stylist</Text>
                     </View>
                   </View>
-                  <View style={[styles.featureCta, { backgroundColor: '#FFD700' }]}>
+                  <View style={[styles.featureCta, { backgroundColor: '#00FF88' }]}>
                     <Text style={styles.featureCtaText}>Open mini-app</Text>
                     <Ionicons name="arrow-forward" size={14} color={colors.bg} />
                   </View>
@@ -523,11 +523,13 @@ export default function Library() {
               />
             </TouchableOpacity>
 
-            {/* ── 🏴‍☠️ Buried Treasure (v1.0.29 Phase 1, free for everyone) ── */}
+            {/* ── 🏴‍☠️ Buried Treasure (v1.0.29 Phase 1) — same price/duo
+                   tag pattern as the other mini-apps so the Creator can
+                   set a price + Duo discount from this card. ── */}
             <TouchableOpacity
               testID="library-card-treasure"
               activeOpacity={0.85}
-              onPress={() => router.push('/treasure' as any)}
+              onPress={() => handleCardTap('treasure', '/treasure')}
               style={[styles.featureCard, { borderColor: '#FFC85799' }]}
             >
               <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start' }}>
@@ -537,10 +539,12 @@ export default function Library() {
                 <View style={{ flex: 1 }}>
                   <View style={styles.featureKickerRow}>
                     <Text style={[styles.featureKicker, { color: '#FFC857' }]}>NEW · DAILY HUNT</Text>
-                    <View style={[styles.unlockedPill, { backgroundColor: '#33ff9522', borderColor: '#33ff95' }]}>
-                      <Ionicons name="checkmark" size={10} color="#33ff95" />
-                      <Text style={[styles.unlockedText, { color: '#33ff95' }]}>FREE</Text>
-                    </View>
+                    {pricing.treasure?.purchased ? (
+                      <View style={styles.unlockedPill}>
+                        <Ionicons name="checkmark" size={10} color={colors.green} />
+                        <Text style={styles.unlockedText}>UNLOCKED</Text>
+                      </View>
+                    ) : null}
                   </View>
                   <Text style={styles.featureTitle}>Buried Treasure</Text>
                   <Text style={styles.featureDesc}>
@@ -567,6 +571,20 @@ export default function Library() {
                   </View>
                 </View>
               </View>
+              {/* Bottom-LEFT: original AUD price (or "FREE" / "Set price"). */}
+              <View style={styles.pricingCorner} pointerEvents="box-none">
+                <PricingBadge
+                  pricing={pricing.treasure}
+                  isAdmin={isAdmin}
+                  onCreatorTap={() => handleCreatorBadgeTap('treasure')}
+                  testID="pricing-badge-treasure"
+                />
+              </View>
+              {/* Bottom-RIGHT: duo-with-friends discount (set by Creator). */}
+              <DuoBadge
+                offer={pricing.treasure?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('treasure') : setDuoJoinFor('treasure'))}
+              />
             </TouchableOpacity>
           </View>
         ) : (
@@ -627,10 +645,10 @@ export default function Library() {
               testID="library-mine-confidence"
               activeOpacity={0.85}
               onPress={() => router.push('/confidence' as any)}
-              style={[styles.mineCard, { borderColor: '#FFD70055' }]}
+              style={[styles.mineCard, { borderColor: '#00FF8855' }]}
             >
-              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
-                <Ionicons name="shirt" size={24} color={'#FFD700'} />
+              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: '#00FF8822', borderColor: '#00FF8888' }]}>
+                <Ionicons name="shirt" size={24} color={'#00FF88'} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.mineTitle}>Build Self-Confidence</Text>
