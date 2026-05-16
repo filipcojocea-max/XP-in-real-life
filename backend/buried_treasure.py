@@ -488,7 +488,7 @@ def attach_routes(app, get_user_or_legacy):
                 ).strip()
                 msg = {
                     "id": str(uuid.uuid4()),
-                    "thread_id": "_".join(sorted([user_id, aid])),
+                    "thread_id": ":".join(sorted([user_id, aid])),
                     "from_user_id": user_id,
                     "to_user_id": aid,
                     "text": dm_text,
