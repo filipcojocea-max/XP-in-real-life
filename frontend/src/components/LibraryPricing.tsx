@@ -369,7 +369,10 @@ export function SetPriceModal({
   kind?: PricingKind;
 }) {
   const [price, setPrice] = useState<string>('0');
-  const [currency, setCurrency] = useState<string>('USD');
+  // Default currency = AUD (Australian dollars). Creator can still pick
+  // any of the 10 supported currencies from the chips below — this is
+  // only the seed value for a brand-new mini-app row.
+  const [currency, setCurrency] = useState<string>('AUD');
   const [purchaseUrl, setPurchaseUrl] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -379,11 +382,11 @@ export function SetPriceModal({
     setErr(null);
     if (initial) {
       setPrice(String(initial.price.toFixed(2)));
-      setCurrency(initial.currency || 'USD');
+      setCurrency(initial.currency || 'AUD');
       setPurchaseUrl(initial.purchase_url || '');
     } else {
       setPrice('0');
-      setCurrency('USD');
+      setCurrency('AUD');
       setPurchaseUrl('');
     }
   }, [visible, initial]);

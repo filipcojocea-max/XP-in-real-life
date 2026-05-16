@@ -92,23 +92,24 @@ export function ChatSettingsSheet({ visible, prefs, friendName, onClose, onPatch
           </View>
 
           <ScrollView style={{ maxHeight: 520 }} contentContainerStyle={{ paddingBottom: spacing.xl }}>
-            {/* Live preview row */}
+            {/* Live preview row — matches the actual chat layout:
+                YOUR messages on the LEFT, THEIRS on the RIGHT. */}
             <View style={styles.previewBlock}>
               <View style={styles.previewRow}>
-                <View style={styles.previewSpacer} />
                 <View style={[styles.previewBubble, { backgroundColor: prefs.sent_bubble_color }]}>
                   <Text style={[styles.previewBubbleText, { color: prefs.sent_text_color }]}>
                     You: Hi there
                   </Text>
                 </View>
+                <View style={styles.previewSpacer} />
               </View>
               <View style={styles.previewRow}>
+                <View style={styles.previewSpacer} />
                 <View style={[styles.previewBubble, { backgroundColor: prefs.received_bubble_color, borderWidth: 1, borderColor: colors.border }]}>
                   <Text style={[styles.previewBubbleText, { color: prefs.received_text_color }]}>
                     Them: Hey 👋
                   </Text>
                 </View>
-                <View style={styles.previewSpacer} />
               </View>
             </View>
 

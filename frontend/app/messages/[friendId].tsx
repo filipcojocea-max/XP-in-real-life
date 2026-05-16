@@ -291,10 +291,14 @@ export default function MessageThread() {
               const mine = m.from_user_id === meId;
               const bubbleBg = mine ? prefs.sent_bubble_color : prefs.received_bubble_color;
               const textColor = mine ? prefs.sent_text_color : prefs.received_text_color;
+              // User preference: MY messages render on the LEFT, theirs on
+              // the RIGHT — opposite of the iMessage/WhatsApp default. The
+              // bubble's squared-off corner also flips so it always points
+              // toward the sender side.
               return (
                 <View
                   key={m.id}
-                  style={[styles.bubbleRow, mine ? { justifyContent: 'flex-end' } : null]}
+                  style={[styles.bubbleRow, !mine ? { justifyContent: 'flex-end' } : null]}
                 >
                   <View
                     style={[
@@ -435,8 +439,10 @@ const styles = StyleSheet.create({
   emptyChat: { color: colors.textMuted, fontSize: 13, textAlign: 'center', padding: 24 },
   bubbleRow: { flexDirection: 'row', marginBottom: 4 },
   bubble: { maxWidth: '78%', borderRadius: 14, padding: 10, gap: 6 },
-  bubbleMine: { borderBottomRightRadius: 4 },
-  bubbleTheirs: { borderBottomLeftRadius: 4 },
+  // My messages now render on the LEFT — squared-off corner is bottom-left
+  // so it points down towards me. Their bubbles mirror it on the right.
+  bubbleMine: { borderBottomLeftRadius: 4 },
+  bubbleTheirs: { borderBottomRightRadius: 4 },
   bubbleText: { fontSize: 14, lineHeight: 19 },
   bubbleImg: { width: 200, height: 200, borderRadius: 10 },
   refineCard: {

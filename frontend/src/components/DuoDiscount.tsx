@@ -94,7 +94,10 @@ export function SetDuoDiscountModal({
         appId,
         requiredPeople,
         dp,
-        pricing?.currency || 'USD',
+        // Default to AUD if the parent app has no explicit currency set
+        // yet. The Creator can re-save the parent's pricing in another
+        // currency from the "Change price" sheet to override.
+        pricing?.currency || 'AUD',
       );
       onSaved({ ...(pricing as LibraryAppPricing), duo_offer: r.duo_offer });
       onClose();
@@ -609,9 +612,12 @@ const styles = StyleSheet.create({
 
 const badgeStyles = StyleSheet.create({
   outer: {
+    // Bottom-RIGHT of the mini-app card — leaves bottom-left for the
+    // PricingBadge (original full price). This keeps the two prices
+    // visually separated so the duo discount reads as "the deal".
     position: 'absolute',
     bottom: 8,
-    left: 8,
+    right: 8,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,

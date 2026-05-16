@@ -8046,8 +8046,8 @@ async def library_ratings_post(
 # Effective price = price * (1 - discount_percent/100) if discount_active else price.
 # Discount considered active when now() ∈ [starts_at, ends_at].
 
-DEFAULT_PRICE_CURRENCY = "USD"
-SUPPORTED_PRICE_CURRENCIES = ["USD", "EUR", "GBP", "AUD", "CAD", "JPY", "INR", "RON", "CHF", "BRL"]
+DEFAULT_PRICE_CURRENCY = "AUD"
+SUPPORTED_PRICE_CURRENCIES = ["AUD", "USD", "EUR", "GBP", "CAD", "JPY", "INR", "RON", "CHF", "BRL"]
 
 # Boost IDs that the Creator can price in Points+ section (Progress tab).
 BOOST_IDS = ["triple_day", "double_week", "double_month"]
