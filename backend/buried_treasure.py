@@ -337,7 +337,7 @@ async def _push_to_user(user_id: str, title: str, body: str, data: dict | None =
     """Best-effort push to ALL of a user's registered Expo tokens.
     Never raises — push failures must never break a match transition.
     """
-    if not _send_push or not _db:
+    if _send_push is None or _db is None:
         return
     try:
         tokens = await _db.push_tokens.find({"user_id": user_id}).to_list(20)
@@ -356,7 +356,7 @@ async def _push_to_user(user_id: str, title: str, body: str, data: dict | None =
 
 async def _profile_summary(uid: str) -> dict:
     """Lightweight {id,name,avatar_base64} for the match opponent card."""
-    if not _db:
+    if _db is None:
         return {"id": uid, "name": "Player", "avatar_base64": None}
     p = await _db.profile.find_one(
         {"_id": uid}, {"full_name": 1, "name": 1, "avatar_base64": 1}
@@ -377,7 +377,7 @@ async def _are_friends(a: str, b: str) -> bool:
         except Exception:
             logger.exception("[bt-friends] fn failed; fallback to direct query")
     # Fallback: direct DB query
-    if not _db:
+    if _db is None:
         return False
     fr = await _db.friend_requests.find_one({
         "status": "accepted",
@@ -427,7 +427,7 @@ def _serialize_match(m: dict, viewer_id: str | None = None) -> dict:
 
 
 async def _award_xp(user_id: str, amount: int, *, reason: str):
-    if not _db or amount <= 0:
+    if _db is None or amount <= 0:
         return
     try:
         await _db.profile.update_one(
@@ -763,7 +763,11 @@ def attach_routes(app, get_user_or_legacy):
         await _db.bt_reports.insert_one(rec)
         return {"id": rid, "sent_to_admin_count": len(sent_ids)}
 
-    app.include_router(sub)
+    # NB: app.include_router(sub) is intentionally deferred until AFTER
+    # the Friends-Mode endpoints are registered below — FastAPI snapshots
+    # the router's routes at include_router time, so calling it early
+    # makes the new /bt/match/* routes return 404. See the bottom of
+    # this function for the actual include_router call.
 
     # ═════════════════ Friends-Mode (Relay Race) endpoints ═════════════════
     @sub.post("/bt/match/invite")
@@ -1192,4 +1196,8 @@ def attach_routes(app, get_user_or_legacy):
         )
         return {"like_count": len(likes), "liked_by_you": user_id in likes}
 
+    # Finally register the router AFTER all routes are decorated, so the
+    # Friends-Mode endpoints are included (see note higher up in this
+    # function for why the early include_router was wrong).
+    app.include_router(sub)
     return sub
