@@ -8509,6 +8509,15 @@ async def stripe_webhook(request: Request):
     etype = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
     obj = (event.get("data", {}).get("object") if isinstance(event, dict)
            else event["data"]["object"])
+    # When the Stripe SDK's `construct_event` is used (signed flow), `obj`
+    # comes back as a stripe.StripeObject. Its `.get(…)` resolves through
+    # __getattr__ → KeyError → AttributeError. Coerce to plain dict so the
+    # rest of this handler can use ordinary `obj.get(...)` lookups.
+    if obj is not None and not isinstance(obj, dict):
+        try:
+            obj = obj.to_dict_recursive() if hasattr(obj, "to_dict_recursive") else dict(obj)
+        except Exception:
+            obj = json.loads(str(obj))
     if etype == "checkout.session.completed":
         if obj.get("payment_status") == "paid" or obj.get("status") == "complete":
             md = obj.get("metadata") or {}
