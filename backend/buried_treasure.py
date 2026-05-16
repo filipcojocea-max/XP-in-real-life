@@ -491,7 +491,7 @@ def attach_routes(app, get_user_or_legacy):
                     "thread_id": ":".join(sorted([user_id, aid])),
                     "from_user_id": user_id,
                     "to_user_id": aid,
-                    "text": dm_text,
+                    "refined_text": dm_text,
                     "original_text": dm_text,
                     "image_base64": rec.get("photo_base64"),
                     "created_at": now,
