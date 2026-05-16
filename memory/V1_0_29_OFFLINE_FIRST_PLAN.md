@@ -1,4 +1,41 @@
-# v1.0.29 — Full Offline-First Mode (Plan, awaiting v1.0.28 Play Store confirmation)
+# v1.0.29 — Full Offline-First + Chat Customisation (Plan, awaiting v1.0.28 Play Store confirmation)
+
+## 🆕 ADD-ON SCOPE: Chat customisation (locked 2026-05-14)
+All five clarifications captured from the user — bundle with offline-first:
+
+| Decision | Answer |
+|---|---|
+| Q1 Layout | **🅰️ INVERTED** — sent messages on LEFT, received on RIGHT (non-standard, user-requested) |
+| Q2 Color picker | **🅒 Both** — curated palette tab + full HSL custom picker tab |
+| Q2 Granularity | **Separate** — 4 colors stored per friend: `sent_bubble`, `sent_text`, `received_bubble`, `received_text` |
+| Q3 Block semantics | **🅓 SOFT** — messages still arrive on server; blocker can read history, write replies; just no notification + no unread badge on their side |
+| Q4 Mute vs Block | **Distinct**: Mute = no push, red badge STAYS · Block = no push + no badge + lock icon, can still read/write |
+| Q5 Timing | **🟢 Bundle into v1.0.29** with offline-first |
+
+### Chat backend (new)
+- New collection: `chat_preferences` keyed by `(user_id, friend_id)` storing 4 colors + `muted:bool` + `blocked:bool`
+- `POST /api/chat/preferences/{friend_id}` — upsert one or more fields
+- `GET /api/chat/preferences/{friend_id}` — read current settings (defaults when missing)
+- `GET /api/chat/preferences` — bulk fetch all of caller's chat prefs (for friends list lock icons)
+- Push hook: when sending a DM, look up the **recipient's** `chat_preferences` for the sender; if `muted` OR `blocked` → skip push, skip unread counter increment
+
+### Chat frontend (modified)
+- `/app/frontend/app/messages/[friendId].tsx`:
+  - Bubble rendering flipped: `justifyContent` swap (`flex-end` ↔ `flex-start`) when `msg.from_self === true`
+  - Apply stored bubble/text colors from `chat_preferences` (fallback to defaults: cyan sent, surface received)
+  - ⚙️ gear icon top-right → opens `<ChatSettingsSheet>` bottom-sheet:
+    - Section 1: "MY MESSAGES" → swatch picker for bubble + swatch picker for text (separate)
+    - Section 2: "THEIR MESSAGES" → same two swatch pickers
+    - Section 3: Toggle row "🔕 Mute notifications" (red badge unaffected)
+    - Section 4: Toggle row "🔒 Block this player" (no notifs + no badges + lock icon)
+  - Palette: 12 preset colors (cyan, green, amber, red, purple, pink, blue, teal, gold, white, slate, black) + "Custom…" tab opening full HSL picker via `reanimated-color-picker`
+- `/app/frontend/app/friends/index.tsx`:
+  - Friends list: if `chat_preferences.blocked === true` for a friend → render lock icon overlay on the row's "Message" button; suppress the red unread dot/count
+  - Cached locally via the new TanStack Query layer (so blocked-state works offline too)
+- All chat preference mutations queued via the OfflineMutationQueue (Layer 2)
+
+
+## Status: PARKED — DO NOT START UNTIL USER CONFIRMS v1.0.28 IS LIVE ON PLAY STORE
 
 ## Status: PARKED — DO NOT START UNTIL USER CONFIRMS v1.0.28 IS LIVE ON PLAY STORE
 Build v1.0.28 / versionCode 1023 was kicked off 2026-05-13 21:36 UTC,
