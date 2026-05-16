@@ -540,7 +540,16 @@ export default function Library() {
               onPress={() => handleCardTap('treasure', '/treasure')}
               style={[styles.featureCard, { borderColor: '#FFC85799' }]}
             >
-              <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start' }}>
+              <View style={styles.featureRow}>
+                {/* Vertical 5-star strip — tappable; opens the global
+                    rating modal. Aggregate average + count are visible
+                    to every player (read from /api/library/ratings). */}
+                <MiniAppRatingStrip
+                  testID="rating-strip-treasure"
+                  stats={ratings.treasure}
+                  tint={APP_TINTS.treasure}
+                  onPress={() => setRateTarget('treasure')}
+                />
                 <View style={[styles.featureIcon, { backgroundColor: '#FFC85722', borderColor: '#FFC85788' }]}>
                   <Ionicons name="map" size={32} color="#FFC857" />
                 </View>

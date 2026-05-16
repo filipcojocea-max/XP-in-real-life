@@ -125,7 +125,7 @@ export function PricingBadge({
 }) {
   if (!pricing) {
     return (
-      <View style={[badgeStyles.pill, badgeStyles.free]}>
+      <View style={[badgeStyles.pill, badgeStyles.free]} testID={testID}>
         <Text style={badgeStyles.freeText}>FREE</Text>
       </View>
     );
