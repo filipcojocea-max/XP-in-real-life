@@ -1852,7 +1852,12 @@ def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
     auto-completed on the same day it was created.
     """
     unit = (goal.get("unit") or "").lower()
-    last_iso = goal.get("last_ticked_at")
+    # Lock based on when the goal was last COMPLETED, NOT the last tick.
+    # Otherwise a 3/5 → 4/5 forward step would trigger the daily cycle
+    # lockout even though the user hasn't yet hit the target. Fallback to
+    # last_ticked_at preserves the original behaviour for historical
+    # goals that don't have last_completed_at set yet.
+    last_iso = goal.get("last_completed_at") or goal.get("last_ticked_at")
     lock = GOAL_CYCLE_LOCKOUT.get(unit)
 
     # ── First-tick lock from creation date (weeks / months only) ──
@@ -2048,35 +2053,37 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
                     kind="goal_step",
                 )
             else:
-                # Un-tick: subtract this step XP from the chart so the
-                # bar/line graph shrinks to match the user's NEW
-                # total_xp. Walk newest→oldest rows scoped strictly to
-                # (user_id, goal_id, kind='goal_step') and delete until
-                # we've removed at least `refund_target` XP. Anything
-                # left over (rare — schema drift) is logged but doesn't
-                # block the un-tick.
-                refund_target = -step_xp_delta  # positive amount to remove
+                # Un-tick: insert a NEGATIVE goal_step adjustment row so
+                # the chart subtracts exactly |step_xp_delta| from the
+                # day's earned total. (We use a negative row instead of
+                # deleting existing rows because /progress writes ONE
+                # cumulative row per call — deleting it would over-
+                # subtract on a partial un-tick like 5→2 where the
+                # original row carried +150 but we only want -90.) The
+                # /stats/weekly + /stats/monthly aggregators sum
+                # goal_step rows without the max(0,…) clamp so this
+                # nets cleanly to the user's true total_xp.
                 try:
-                    cur = db.task_logs.find(
-                        {
-                            "user_id": user_id,
-                            "goal_id": goal_id,
-                            "kind": "goal_step",
-                        }
-                    ).sort("completed_at", -1)
-                    removed = 0
-                    async for row in cur:
-                        if removed >= refund_target:
-                            break
-                        await db.task_logs.delete_one({"_id": row["_id"]})
-                        removed += int(row.get("xp_awarded") or 0)
-                    if removed < refund_target:
-                        logger.warning(
-                            "[goal-step-refund] short by %d XP for user=%s goal=%s",
-                            refund_target - removed, user_id, goal_id,
-                        )
+                    await db.task_logs.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "user_id": user_id,
+                        "task_id": f"_xp:goal_step_refund:{uuid.uuid4()}",
+                        "task_title": "goal_step_refund",
+                        "date": today_str(),
+                        "focus_area": (
+                            goal.get("focus_area")
+                            if (goal.get("focus_area") in FOCUS_AREAS)
+                            else "mindset"
+                        ),
+                        "xp_awarded": int(step_xp_delta),  # negative
+                        "xp_multiplier": 1.0,
+                        "completed_at": now_iso(),
+                        "_source": "goal_step",
+                        "goal_id": goal_id,
+                        "kind": "goal_step",
+                    })
                 except Exception:
-                    logger.exception("[goal-step-refund] chart row cleanup failed")
+                    logger.exception("[goal-step-refund] negative row insert failed")
 
     awarded_xp = 0
     refunded_xp = 0
@@ -2247,15 +2254,22 @@ async def stats_weekly(user_id: str = Depends(get_user_or_legacy)):
         d = today_d - timedelta(days=i)
         d_str = d.isoformat()
         logs = await db.task_logs.find({"user_id": user_id, "date": d_str}, {"_id": 0}).to_list(1000)
-        # Sum only positive task XP for the chart's "earned" segment so
-        # the negative penalty mirror rows we insert into task_logs don't
-        # double-subtract from the displayed earned bar. Also EXCLUDE
-        # goal-complete rows since they're surfaced as the green segment.
-        xp = sum(
-            max(0, int(entry.get("xp_awarded") or 0))
-            for entry in logs
-            if entry.get("kind") != "goal_complete"
-        )
+        # Sum task XP for the chart's "earned" segment.
+        # • penalty / goal_complete rows are excluded (rendered as their
+        #   own segments).
+        # • For ALL other rows we clamp xp_awarded to ≥0 to defend against
+        #   accidental negative rows EXCEPT `kind=='goal_step'`, which is
+        #   the goal-tick path that LEGITIMATELY emits a negative row on
+        #   un-tick (so the bar/line graph shrinks). Those rows MUST be
+        #   summed verbatim so the displayed earned XP nets cleanly to
+        #   the user's true daily total.
+        xp = 0
+        for entry in logs:
+            k = entry.get("kind")
+            if k in ("goal_complete", "penalty"):
+                continue
+            raw = int(entry.get("xp_awarded") or 0)
+            xp += raw if k == "goal_step" else max(0, raw)
         gifted_xp = int(gifted_by_day.get(d_str, 0))
         penalty_xp = int(penalty_by_day.get(d_str, 0))
         goal_xp = int(goal_by_day.get(d_str, 0))
@@ -2323,11 +2337,19 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
         logs = await db.task_logs.find(
             {"user_id": user_id, "date": d_str}, {"_id": 0}
         ).to_list(1000)
-        xp = sum(
-            max(0, int(entry.get("xp_awarded") or 0))
-            for entry in logs
-            if entry.get("kind") != "goal_complete"
-        )
+        # Sum task XP for the chart's "earned" segment.
+        # • penalty / goal_complete rows are excluded (rendered as their
+        #   own segments).
+        # • For ALL other rows we clamp xp_awarded to ≥0 EXCEPT
+        #   `kind=='goal_step'`, which legitimately emits a negative row
+        #   on un-tick so the chart shrinks (see /goals/{id}/progress).
+        xp = 0
+        for entry in logs:
+            k = entry.get("kind")
+            if k in ("goal_complete", "penalty"):
+                continue
+            raw = int(entry.get("xp_awarded") or 0)
+            xp += raw if k == "goal_step" else max(0, raw)
         gifted_xp = int(gifted_by_day.get(d_str, 0))
         penalty_xp = int(penalty_by_day.get(d_str, 0))
         goal_xp = int(goal_by_day.get(d_str, 0))
