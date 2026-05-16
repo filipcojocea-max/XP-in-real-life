@@ -2034,17 +2034,49 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
                 {"_id": user_id},
                 {"$inc": {"total_xp": step_xp_delta}},
             )
-            # Tick a daily goal forward → log XP to charts so the bar /
-            # line graphs reflect the new XP that was just earned. We
-            # only log POSITIVE deltas — un-ticking refunds XP but
-            # shouldn't go on the chart as a negative bar (the chart
-            # shows earnings, not refunds).
             if step_xp_delta > 0:
+                # Tick a daily goal forward → log XP to charts so the bar
+                # / line graphs reflect the new XP that was just earned.
+                # Tag with goal_id + kind='goal_step' so the un-tick path
+                # below can find and delete these exact rows (mirrors the
+                # goal_complete refund logic).
                 await _log_xp_to_charts(
                     user_id, step_xp_delta,
                     source="goal_step",
                     focus_area=goal.get("focus_area") or "mindset",
+                    goal_id=goal_id,
+                    kind="goal_step",
                 )
+            else:
+                # Un-tick: subtract this step XP from the chart so the
+                # bar/line graph shrinks to match the user's NEW
+                # total_xp. Walk newest→oldest rows scoped strictly to
+                # (user_id, goal_id, kind='goal_step') and delete until
+                # we've removed at least `refund_target` XP. Anything
+                # left over (rare — schema drift) is logged but doesn't
+                # block the un-tick.
+                refund_target = -step_xp_delta  # positive amount to remove
+                try:
+                    cur = db.task_logs.find(
+                        {
+                            "user_id": user_id,
+                            "goal_id": goal_id,
+                            "kind": "goal_step",
+                        }
+                    ).sort("completed_at", -1)
+                    removed = 0
+                    async for row in cur:
+                        if removed >= refund_target:
+                            break
+                        await db.task_logs.delete_one({"_id": row["_id"]})
+                        removed += int(row.get("xp_awarded") or 0)
+                    if removed < refund_target:
+                        logger.warning(
+                            "[goal-step-refund] short by %d XP for user=%s goal=%s",
+                            refund_target - removed, user_id, goal_id,
+                        )
+                except Exception:
+                    logger.exception("[goal-step-refund] chart row cleanup failed")
 
     awarded_xp = 0
     refunded_xp = 0
