@@ -522,6 +522,52 @@ export default function Library() {
                 onPress={() => (isAdmin ? handleCreatorBadgeTap('confidence') : setDuoJoinFor('confidence'))}
               />
             </TouchableOpacity>
+
+            {/* ── 🏴‍☠️ Buried Treasure (v1.0.29 Phase 1, free for everyone) ── */}
+            <TouchableOpacity
+              testID="library-card-treasure"
+              activeOpacity={0.85}
+              onPress={() => router.push('/treasure' as any)}
+              style={[styles.featureCard, { borderColor: '#FFC85799' }]}
+            >
+              <View style={{ flexDirection: 'row', gap: 14, alignItems: 'flex-start' }}>
+                <View style={[styles.featureIcon, { backgroundColor: '#FFC85722', borderColor: '#FFC85788' }]}>
+                  <Ionicons name="map" size={32} color="#FFC857" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.featureKickerRow}>
+                    <Text style={[styles.featureKicker, { color: '#FFC857' }]}>NEW · DAILY HUNT</Text>
+                    <View style={[styles.unlockedPill, { backgroundColor: '#33ff9522', borderColor: '#33ff95' }]}>
+                      <Ionicons name="checkmark" size={10} color="#33ff95" />
+                      <Text style={[styles.unlockedText, { color: '#33ff95' }]}>FREE</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.featureTitle}>Buried Treasure</Text>
+                  <Text style={styles.featureDesc}>
+                    A new chest spawns daily on real parks &amp; ovals near you. Compass +
+                    distance lead you to the spot — snap a photo to claim +50 XP.
+                  </Text>
+                  <View style={styles.tagRow}>
+                    <View style={[styles.featTag, { borderColor: '#FFC85788', backgroundColor: '#FFC85722' }]}>
+                      <Ionicons name="compass" size={10} color="#FFC857" />
+                      <Text style={[styles.featTagText, { color: '#FFC857' }]}>2D-AR compass</Text>
+                    </View>
+                    <View style={[styles.featTag, { borderColor: '#FFC85788', backgroundColor: '#FFC85722' }]}>
+                      <Ionicons name="leaf" size={10} color="#FFC857" />
+                      <Text style={[styles.featTagText, { color: '#FFC857' }]}>OSM parks</Text>
+                    </View>
+                    <View style={[styles.featTag, { borderColor: '#FFC85788', backgroundColor: '#FFC85722' }]}>
+                      <Ionicons name="sunny" size={10} color="#FFC857" />
+                      <Text style={[styles.featTagText, { color: '#FFC857' }]}>Day-only toggle</Text>
+                    </View>
+                  </View>
+                  <View style={[styles.featureCta, { backgroundColor: '#FFC857' }]}>
+                    <Text style={styles.featureCtaText}>Open mini-app</Text>
+                    <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+                  </View>
+                </View>
+              </View>
+            </TouchableOpacity>
           </View>
         ) : (
           <View style={{ gap: spacing.sm }}>

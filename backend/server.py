@@ -9489,3 +9489,20 @@ try:
 except Exception:
     logger.exception("[admin_player_tools] failed to attach routes")
     _admin_price_override_for = None  # type: ignore
+
+# ═══════════════ Buried Treasure (daily solo hunt mini-app) ═══════════════
+try:
+    from buried_treasure import (
+        init_buried_treasure as _init_bt,
+        attach_routes as _attach_bt_routes,
+    )
+    _init_bt(
+        db=db,
+        is_admin_user=_is_admin_user,
+        now_iso=now_iso,
+        admin_emails=list(ADMIN_EMAILS),
+    )
+    _attach_bt_routes(app, get_user_or_legacy)
+    logger.info("[buried_treasure] routes attached")
+except Exception:
+    logger.exception("[buried_treasure] failed to attach routes")

@@ -807,6 +807,44 @@ export const api = {
     req<{ bucket: string; threshold_days: number; count: number; players: InactivePlayerRow[] }>(
       `/admin/players/inactive?bucket=${bucket}`,
     ),
+
+  // ─── Buried Treasure mini-app (Phase 1 — daily solo hunt) ──────
+  btLocationGet: () => req<{ location: BTLocation | null }>('/bt/location'),
+  btLocationSet: (lat: number, lng: number, radius_m: number, label?: string, tz_offset_minutes?: number) =>
+    req<{ saved: boolean }>('/bt/location', {
+      method: 'POST',
+      body: JSON.stringify({ lat, lng, radius_m, label, tz_offset_minutes }),
+    }),
+  btChestToday: () => req<{ chest: BTChest }>('/bt/chest/today'),
+  btChestFind: (lat: number, lng: number, photoBase64?: string) =>
+    req<{ chest: BTChest; xp_awarded?: number; already_found?: boolean }>('/bt/chest/find', {
+      method: 'POST',
+      body: JSON.stringify({ lat, lng, photo_base64: photoBase64 }),
+    }),
+  btFindsHistory: () => req<{ finds: BTFind[] }>('/bt/finds'),
+  btSettingsGet: () => req<{ settings: { daylight_only: boolean } }>('/bt/settings'),
+  btSettingsSet: (daylight_only: boolean) =>
+    req<{ saved: boolean }>('/bt/settings', {
+      method: 'POST',
+      body: JSON.stringify({ daylight_only }),
+    }),
+  btZonesList: () => req<{ zones: BTNoGoZone[] }>('/bt/no-go-zones'),
+  btZoneCreate: (name: string, polygon: { lat: number; lng: number }[]) =>
+    req<{ id: string; created: boolean }>('/bt/no-go-zones', {
+      method: 'POST',
+      body: JSON.stringify({ name, polygon }),
+    }),
+  btZoneDelete: (zoneId: string) =>
+    req<{ deleted: number }>(`/bt/no-go-zones/${zoneId}`, { method: 'DELETE' }),
+  btReport: (
+    kind: 'location' | 'object',
+    message: string,
+    extra?: { lat?: number; lng?: number; photo_base64?: string },
+  ) =>
+    req<{ id: string; sent_to_admin_count: number }>('/bt/report', {
+      method: 'POST',
+      body: JSON.stringify({ kind, message, ...(extra || {}) }),
+    }),
   // Health Connect debug reporter — used by the Sleep / "Connect Samsung
   // Health" flow to ship native crashes + error messages to the server
   // so we can audit why the system permission dialog never appears.
@@ -1813,6 +1851,49 @@ export type InactivePlayerRow = {
   total_xp: number;
   last_active_at: string;
   days_inactive: number;
+};
+
+// ─── Buried Treasure (Phase 1 — daily solo hunt) ────────────────
+export type BTLocation = {
+  lat: number;
+  lng: number;
+  radius_m: number;
+  label?: string | null;
+  tz_offset_minutes?: number;
+  updated_at?: string;
+};
+
+export type BTChest = {
+  id: string;
+  date: string;
+  lat: number;
+  lng: number;
+  hint: string;
+  spawn_source: 'osm_park' | 'fallback_random';
+  osm_feature_name?: string | null;
+  status: 'hidden' | 'found' | 'expired';
+  found_at: string | null;
+  spawned_at: string;
+  expires_at: string;
+  daylight_only: boolean;
+  has_photo: boolean;
+};
+
+export type BTFind = {
+  id: string;
+  chest_id: string;
+  lat: number;
+  lng: number;
+  found_at: string;
+  has_photo: boolean;
+  photo_base64?: string | null;
+};
+
+export type BTNoGoZone = {
+  id: string;
+  name: string;
+  polygon: { lat: number; lng: number }[];
+  created_at: string;
 };
 
 export type ChatPreferencesPatch = {
