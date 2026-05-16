@@ -1067,11 +1067,11 @@ agent_communication:
 
   - task: "v1.0.29 Admin Player Tools (per-player price overrides + delete account + inactive list)"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/admin_player_tools.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
