@@ -124,6 +124,30 @@ export function PricingBadge({
   testID?: string;
 }) {
   if (!pricing) {
+    // Pricing row not loaded yet (or backend hasn't seeded this app).
+    // For the Creator we STILL want this pill to be tappable so they
+    // can set the price for the first time — otherwise the menu is
+    // unreachable from cards whose backend row was just inserted (e.g.
+    // a freshly-added mini-app like Buried Treasure right after we
+    // bump LIBRARY_APP_IDS). For non-admins we keep it a plain pill so
+    // the parent card's TouchableOpacity catches the tap.
+    if (isAdmin && onCreatorTap) {
+      return (
+        <TouchableOpacity
+          testID={testID}
+          activeOpacity={0.7}
+          hitSlop={8}
+          onPress={() => {
+            Haptics.selectionAsync().catch(() => {});
+            onCreatorTap();
+          }}
+          style={[badgeStyles.pill, badgeStyles.free, badgeStyles.adminFree]}
+        >
+          <Text style={badgeStyles.freeText}>FREE</Text>
+          <Ionicons name="create-outline" size={11} color={colors.green} />
+        </TouchableOpacity>
+      );
+    }
     return (
       <View style={[badgeStyles.pill, badgeStyles.free]} testID={testID}>
         <Text style={badgeStyles.freeText}>FREE</Text>
@@ -203,6 +227,10 @@ const badgeStyles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   free: { backgroundColor: colors.green + '22', borderColor: colors.green + '88' },
+  // Same green pill but with a slightly stronger border + the pencil
+  // icon, so the Creator can spot that the FREE pill is editable even
+  // before the backend pricing row has loaded.
+  adminFree: { borderColor: colors.green, borderWidth: 1.5 },
   freeText: { color: colors.green, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
   priced: { backgroundColor: colors.bg, borderColor: '#FFD70066' },
   priceText: { color: colors.text, fontSize: 11, fontWeight: '900' },

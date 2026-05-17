@@ -96,11 +96,17 @@ export default function Library() {
   const loadPricing = useCallback(async () => {
     try {
       const r = await api.libraryPricing();
+      // Every MiniAppId key MUST be set here; missing keys make
+      // <PricingBadge> fall into the !pricing branch which renders a
+      // non-tappable View — so the Creator can't open the price /
+      // discount / duo-discount menu. See also: loadRatings for the
+      // sibling bug we fixed last turn.
       setPricing({
         sleep: r.pricing.sleep,
         challenges: r.pricing.challenges,
         spot: r.pricing.spot,
         confidence: r.pricing.confidence,
+        treasure: r.pricing.treasure ?? null,
       });
       if (Array.isArray(r.currencies) && r.currencies.length) setCurrencies(r.currencies);
     } catch (e) {
