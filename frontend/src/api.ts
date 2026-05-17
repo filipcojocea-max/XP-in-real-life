@@ -1,5 +1,6 @@
 import type { FocusArea, TimeSlot } from './theme';
 import { getAuthToken, getAnonymousId, fireUnauthorized, fireAccountSuspended } from './AuthContext';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /**
  * API base URL resolution order:
@@ -22,7 +23,155 @@ const BASE =
   (process.env.EXPO_PUBLIC_API_URL && process.env.EXPO_PUBLIC_API_URL.trim()) ||
   process.env.EXPO_PUBLIC_BACKEND_URL;
 
+// ── Offline-first replay hook ───────────────────────────────────────
+// `OfflineProvider` injects a runner that replays a `QueuedMutation`
+// by re-issuing the same HTTP call we'd have made online. We register
+// our internal `req` for that purpose. Import here is lazy via
+// `setOfflineRunner` so the module load order doesn't matter.
+import { setOfflineRunner, isOnlineNow } from './Offline';
+setOfflineRunner(async (m) => {
+  // Re-issue the request. We deliberately don't return a value — the
+  // caller already optimistically updated the UI, and the eventual
+  // server response is reconciled by the next GET refresh.
+  await req(m.path, {
+    method: m.method,
+    body: m.body === undefined ? undefined : JSON.stringify(m.body),
+  });
+});
+
+// Re-exported so call-site wrappers can decide between queue-and-toast
+// vs hard-block-with-toast without importing Offline directly.
+export { isOnlineNow };
+
+// ── Offline-write classification tables ─────────────────────────────
+// Used by the offline guard inside `req()` below.
+//
+// HARD_BLOCK = paths that must NEVER be queued (real money, Stripe).
+// QUEUEABLE  = paths whose writes are safe to defer and replay later.
+// Anything not listed throws a generic "you're offline" error so call
+// sites can surface their own toast / fallback.
+const HARD_BLOCK_OFFLINE: RegExp[] = [
+  /^\/library\/checkout/,
+  /^\/library\/pricing\/[^/]+\/(buy|purchase)/,
+  /^\/boost\/checkout/,
+  /^\/payments\//,
+  /^\/stripe\//,
+];
+
+const QUEUEABLE_OFFLINE: { pattern: RegExp; label: string }[] = [
+  // Goals — create / update / complete / un-tick
+  { pattern: /^\/goals(\/|$)/, label: 'Goal' },
+  // Tasks — create / complete / delete
+  { pattern: /^\/tasks(\/|$)/, label: 'Task' },
+  // DMs (message send + image attach)
+  { pattern: /^\/messages\/[^/]+\/send/, label: 'Message' },
+  { pattern: /^\/messages\/[^/]+\/read/, label: 'Read receipt' },
+  // Spot — feed posts, likes, comments
+  { pattern: /^\/spot\/(post|complete|like|comment|edit)/, label: 'Feed action' },
+  // Buried Treasure — match invite/accept/reject/find/bury, feed likes
+  { pattern: /^\/bt\/match\//, label: 'Treasure match' },
+  { pattern: /^\/bt\/feed\//, label: 'Treasure feed' },
+  { pattern: /^\/bt\/report/, label: 'Report' },
+  // Friends — send/accept/decline requests
+  { pattern: /^\/friends\/(request|accept|decline|block|unblock)/, label: 'Friend request' },
+  // Chat preferences
+  { pattern: /^\/chat\/preferences/, label: 'Chat setting' },
+];
+
+// Lazy import from Offline.tsx to avoid a circular load order on boot.
+// Resolved on first call.
+let _offlineEnqueue:
+  | null
+  | ((m: { path: string; method: any; body?: any; kind: string; label: string }) => Promise<string>) = null;
+
+export function _setOfflineEnqueue(
+  fn: (m: { path: string; method: any; body?: any; kind: string; label: string }) => Promise<string>,
+) {
+  _offlineEnqueue = fn;
+}
+
+async function _enqueueFromApi(m: { path: string; method: any; body?: any; kind: string; label: string }) {
+  if (!_offlineEnqueue) {
+    // Shouldn't happen — provider mounts first — but guard anyway.
+    return null;
+  }
+  return _offlineEnqueue(m);
+}
+
 async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
+  const method = ((opts.method || 'GET') as string).toUpperCase();
+  const isMutation = method !== 'GET' && method !== 'HEAD';
+
+  // ── Offline guard ───────────────────────────────────────────────
+  // For mutating requests fired while offline we either:
+  //   • HARD-BLOCK (payments, Stripe sessions, library/boost checkout)
+  //     — can't queue real money. Throw a clear error.
+  //   • QUEUE silently if the path matches a known queue-able pattern
+  //     (goals, tasks, messages, spot/bt feed actions). The queue is
+  //     drained automatically on reconnect by `Offline.tsx`. We return
+  //     a `{ __queued: true }` shaped payload so call sites can choose
+  //     to render an optimistic "pending" affordance.
+  //   • Throw a generic "you're offline" error otherwise so the call
+  //     site can surface its own toast.
+  if (isMutation && !isOnlineNow()) {
+    if (HARD_BLOCK_OFFLINE.some((rx) => rx.test(path))) {
+      throw new Error("You need internet to make a purchase.");
+    }
+    const q = QUEUEABLE_OFFLINE.find((p) => p.pattern.test(path));
+    if (q) {
+      let parsed: any = undefined;
+      const raw = (opts as any).body;
+      if (typeof raw === 'string') {
+        try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+      } else if (raw !== undefined) {
+        parsed = raw;
+      }
+      await _enqueueFromApi({
+        path,
+        method: method as any,
+        body: parsed,
+        kind: q.label,
+        label: q.label,
+      });
+      return { __queued: true } as any;
+    }
+    throw new Error("You're offline — this action will sync when you reconnect.");
+  }
+
+  // ── GET-cache (offline view) ────────────────────────────────────
+  // For non-mutation requests, when we're offline we serve a snapshot
+  // of the last successful response from AsyncStorage so the user can
+  // still browse the app (tasks, goals, profile, feed, etc.).
+  // Cache TTL is informational only — we always serve the cached row
+  // when there's no network.
+  const CACHEABLE_GET = (
+    !isMutation && (
+      path === '/profile' ||
+      path === '/tasks' ||
+      path === '/goals' ||
+      path === '/stats/daily' ||
+      path === '/levels' ||
+      path === '/library/pricing' ||
+      path === '/library/ratings' ||
+      path === '/spot/feed' ||
+      path === '/bt/chest/today' ||
+      path === '/bt/finds' ||
+      path === '/friends' ||
+      path === '/friends/requests' ||
+      path.startsWith('/messages/')
+    )
+  );
+  const cacheKey = CACHEABLE_GET ? `@xp.api_cache:${path}` : null;
+  if (cacheKey && !isOnlineNow()) {
+    try {
+      const raw = await AsyncStorage.getItem(cacheKey);
+      if (raw) return JSON.parse(raw) as T;
+    } catch {
+      /* fall through and throw "offline" below */
+    }
+    throw new Error("You're offline and this page hasn't been viewed yet.");
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...((opts.headers as Record<string, string>) || {}),
@@ -81,7 +230,19 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
     err.detail = detail;
     throw err;
   }
-  return res.json() as Promise<T>;
+  const data = (await res.json()) as T;
+  // Persist successful GET responses we whitelisted above so that the
+  // next offline call can serve a snapshot. We `await` but swallow
+  // failures — caching is a best-effort optimisation, never block the
+  // user on it.
+  if (cacheKey) {
+    try {
+      await AsyncStorage.setItem(cacheKey, JSON.stringify(data));
+    } catch {
+      /* ignore */
+    }
+  }
+  return data;
 }
 
 export type Profile = {
