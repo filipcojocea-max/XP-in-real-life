@@ -151,11 +151,17 @@ export default function Library() {
   const loadRatings = useCallback(async () => {
     try {
       const r = await api.libraryRatings();
+      // NB: every key on `MiniAppId` MUST be present here — the rating
+      // modal does `ratings[rateTarget].user_rating` without a defensive
+      // optional chain, so if we forget a new mini-app the app crashes
+      // with `Cannot read properties of undefined (reading 'user_rating')`
+      // the moment the user taps that app's RATE button.
       setRatings({
         sleep: r.ratings.sleep ?? EMPTY_STATS,
         challenges: r.ratings.challenges ?? EMPTY_STATS,
         spot: r.ratings.spot ?? EMPTY_STATS,
         confidence: r.ratings.confidence ?? EMPTY_STATS,
+        treasure: r.ratings.treasure ?? EMPTY_STATS,
       });
     } catch (e) {
       // Silent — strip just shows "No reviews" on failure.
@@ -684,7 +690,7 @@ export default function Library() {
         visible={rateTarget !== null}
         appLabel={rateTarget ? APP_LABELS[rateTarget] : ''}
         tint={rateTarget ? APP_TINTS[rateTarget] : colors.amber}
-        initialStars={rateTarget ? ratings[rateTarget].user_rating : null}
+        initialStars={rateTarget ? (ratings[rateTarget]?.user_rating ?? null) : null}
         submitting={submittingRating}
         onCancel={() => setRateTarget(null)}
         onSubmit={submitRating}
