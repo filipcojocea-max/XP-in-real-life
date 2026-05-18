@@ -9597,12 +9597,38 @@ except Exception:
     logger.exception("[guest_migration] failed to attach routes")
 
 # ── Spot the Object — Permanent Groups (v1.0.29 Phase 1) ────────────
+async def _spot_push_to_user(user_id: str, title: str, body: str, data: dict | None = None):
+    """Phase 4 helper for spot_groups — fetch the user's push tokens
+    and fire `_send_expo_push` to each. Best-effort; failures logged.
+    Returns the number of pushes attempted (not necessarily delivered)."""
+    sent = 0
+    try:
+        tokens = await db.push_tokens.find({"user_id": user_id}).to_list(10)
+    except Exception as e:
+        logger.warning("[spot-push.tokens] %s: %s", user_id, e)
+        return 0
+    for tdoc in tokens:
+        tok = tdoc.get("token")
+        if not tok:
+            continue
+        try:
+            await _send_expo_push(tok, title, body, data or {})
+            sent += 1
+        except Exception as e:
+            logger.warning("[spot-push.send] %s: %s", user_id, e)
+    return sent
+
+
 try:
     from spot_groups import (
         init_spot_groups as _init_sg,
         attach_routes as _attach_sg_routes,
     )
-    _init_sg(db=db, now_iso=now_iso, friend_ids_fn=_friend_ids, availability_fn=_spot_groups_availability)
+    _init_sg(
+        db=db, now_iso=now_iso, friend_ids_fn=_friend_ids,
+        availability_fn=_spot_groups_availability,
+        push_to_user_fn=_spot_push_to_user,
+    )
     _attach_sg_routes(app, get_user_or_legacy)
     logger.info("[spot_groups] routes attached")
 except Exception:

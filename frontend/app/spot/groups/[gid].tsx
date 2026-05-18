@@ -28,6 +28,7 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '../../../src/api';
+import { useAuth } from '../../../src/AuthContext';
 import { showAlert, showConfirm } from '../../../src/uiAlert';
 import { colors, radii, spacing } from '../../../src/theme';
 
@@ -93,6 +94,8 @@ function StatusBadge({ status, left_at }: { status: GroupMember['status']; left_
 export default function SpotGroupDetail() {
   const { gid } = useLocalSearchParams<{ gid: string }>();
   const router = useRouter();
+  const { user } = useAuth();
+  const viewerId = user?.id || '';
   const [group, setGroup] = useState<Group | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -100,15 +103,36 @@ export default function SpotGroupDetail() {
   const [addOpen, setAddOpen] = useState(false);
   const [friends, setFriends] = useState<{ user_id: string; name?: string; avatar_base64?: string | null }[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  // Phase 2 — Auto-challenge history. Empty list when auto_challenge_on
-  // has been off / no anchor has fired yet today.
+  // Phase 2 — Auto-challenge history. Phase 3 adds responses[] (member
+  // photos posted in reply) + new skipped buckets. We use a flexible
+  // shape so future additions don't require touching this annotation.
   const [challenges, setChallenges] = useState<Array<{
     id: string;
     target_object: string;
     fired_at_utc: string;
     recipients_count: number;
     you_received: boolean;
+    skipped_sleeping_count?: number;
+    skipped_work_count?: number;
+    skipped_night_count?: number;
+    responses?: Array<{
+      id: string;
+      user_id: string;
+      photo_base64: string | null;
+      taken_at: string;
+      remaining_seconds?: number;
+    }>;
+    response_count?: number;
+    you_responded?: boolean;
   }>>([]);
+  // Phase 3 — full-screen photo viewer (Option 6B: simple Modal +
+  // resizeMode='contain', no zoom). The viewer overlays the entire
+  // screen and dismisses on tap anywhere.
+  const [viewerPhoto, setViewerPhoto] = useState<string | null>(null);
+  // Phase 3 — auto-minimise. Challenges older than 6h are collapsed
+  // behind a single "Earlier today (N)" disclosure tile. Users can
+  // expand it manually.
+  const [showOld, setShowOld] = useState(false);
 
   const load = useCallback(async () => {
     if (!gid) return;
@@ -287,9 +311,11 @@ export default function SpotGroupDetail() {
           </View>
         ))}
 
-        {/* Phase 2 — Auto-challenge history. Surfaces every recent
-            anchor that fired to the group, the target object, and
-            whether the viewer received the push (daylight check). */}
+        {/* Phase 2/3 — Auto-challenge feed. Each challenge shows the
+            target object, who got the push (status pill on the right),
+            and any photo responses members posted while the window was
+            open. Challenges older than 6h collapse behind a "Earlier"
+            disclosure tile (Phase 3 / Option 5A). */}
         <Text style={[styles.sectionLabel, { marginTop: spacing.lg, marginBottom: spacing.sm }]}>
           RECENT CHALLENGES
         </Text>
@@ -300,30 +326,116 @@ export default function SpotGroupDetail() {
               : "Turn on auto-challenges above to get 3 surprise hunts per day."}
           </Text>
         ) : (
-          challenges.slice(0, 5).map((c) => (
-            <View key={c.id} style={styles.challengeRow}>
-              <View style={[styles.chIcon, { backgroundColor: c.you_received ? colors.green + '22' : '#94a3b822' }]}>
-                <Ionicons
-                  name={c.you_received ? 'checkmark-circle' : 'moon-outline'}
-                  size={16}
-                  color={c.you_received ? colors.green : '#94a3b8'}
-                />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.challengeTitle} numberOfLines={1}>
-                  Find a {c.target_object}
-                </Text>
-                <Text style={styles.challengeMeta} numberOfLines={1}>
-                  {new Date(c.fired_at_utc).toLocaleString(undefined, {
-                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-                  })}
-                  {' · '}
-                  {c.recipients_count}/{group.max_members} got it
-                  {c.you_received ? '' : ' · slept through'}
-                </Text>
-              </View>
-            </View>
-          ))
+          (() => {
+            // Partition challenges into "fresh" (< 6h) and "old" (≥ 6h).
+            const NOW = Date.now();
+            const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+            const fresh: typeof challenges = [];
+            const old: typeof challenges = [];
+            challenges.forEach((c) => {
+              const t = c.fired_at_utc ? new Date(c.fired_at_utc).getTime() : 0;
+              if (NOW - t < SIX_HOURS_MS) fresh.push(c);
+              else old.push(c);
+            });
+            const renderChallenge = (c: typeof challenges[number], minimised: boolean) => {
+              const dot = c.you_received
+                ? { name: 'checkmark-circle' as const, color: colors.green, bg: colors.green + '22' }
+                : { name: 'moon-outline' as const, color: '#94a3b8', bg: '#94a3b822' };
+              return (
+                <View key={c.id} style={[styles.chCard, minimised && styles.chCardMin]}>
+                  <View style={styles.chHeader}>
+                    <View style={[styles.chIcon, { backgroundColor: dot.bg }]}>
+                      <Ionicons name={dot.name} size={16} color={dot.color} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.challengeTitle} numberOfLines={1}>
+                        Find a {c.target_object}
+                      </Text>
+                      <Text style={styles.challengeMeta} numberOfLines={1}>
+                        {c.fired_at_utc
+                          ? new Date(c.fired_at_utc).toLocaleString(undefined, {
+                              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                            })
+                          : '—'}
+                        {' · '}
+                        {c.recipients_count}/{group.max_members} got it
+                        {c.you_received ? '' : ' · slept through'}
+                      </Text>
+                    </View>
+                    {(c.response_count || 0) > 0 ? (
+                      <View style={styles.chBadge}>
+                        <Ionicons name="images-outline" size={12} color={colors.amber} />
+                        <Text style={styles.chBadgeText}>{c.response_count}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  {/* Response thumbnails strip (Phase 3 group feed —
+                      Option 4C). Hidden when the challenge is in the
+                      "minimised" bucket. */}
+                  {!minimised && (c.responses?.length || 0) > 0 ? (
+                    <View style={styles.chThumbsRow}>
+                      {c.responses!.slice(0, 6).map((r) => {
+                        const responder = group.members.find((mm) => mm.user_id === r.user_id);
+                        const isYou = r.user_id === viewerId;
+                        return (
+                          <TouchableOpacity
+                            key={r.id}
+                            onPress={() => r.photo_base64 && setViewerPhoto(r.photo_base64)}
+                            disabled={!r.photo_base64}
+                            activeOpacity={0.8}
+                            style={styles.chThumbWrap}
+                            testID={`spot-group-challenge-thumb-${r.id}`}
+                          >
+                            {r.photo_base64 ? (
+                              <Image
+                                source={{ uri: `data:image/jpeg;base64,${r.photo_base64}` }}
+                                style={styles.chThumb}
+                              />
+                            ) : (
+                              <View style={[styles.chThumb, styles.chThumbPlaceholder]}>
+                                <Ionicons name="image-outline" size={18} color={colors.textMuted} />
+                              </View>
+                            )}
+                            <Text style={styles.chThumbName} numberOfLines={1}>
+                              {isYou ? 'You' : (responder?.name || '?').split(' ')[0]}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  ) : null}
+                  {!minimised && (c.response_count || 0) === 0 && c.you_received ? (
+                    <Text style={styles.chHint}>
+                      Tap the camera in the Spot tab to post your photo of a {c.target_object}.
+                    </Text>
+                  ) : null}
+                </View>
+              );
+            };
+            return (
+              <>
+                {fresh.slice(0, 5).map((c) => renderChallenge(c, false))}
+                {old.length > 0 ? (
+                  <TouchableOpacity
+                    onPress={() => setShowOld((v) => !v)}
+                    activeOpacity={0.8}
+                    style={styles.oldToggle}
+                    testID="spot-group-old-toggle"
+                  >
+                    <Ionicons
+                      name={showOld ? 'chevron-down' : 'chevron-forward'}
+                      size={14}
+                      color={colors.textMuted}
+                    />
+                    <Text style={styles.oldToggleText}>
+                      Earlier today ({old.length})
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+                {showOld ? old.map((c) => renderChallenge(c, true)) : null}
+              </>
+            );
+          })()
         )}
 
         <TouchableOpacity onPress={onLeave} style={styles.leaveBtn} activeOpacity={0.85} testID="spot-group-leave">
@@ -384,6 +496,35 @@ export default function SpotGroupDetail() {
             </View>
           </View>
         </View>
+      </Modal>
+
+      {/* Phase 3 — Photo viewer (Option 6B). Plain Modal with the
+          image centered & resizeMode='contain'; tap anywhere to
+          dismiss. No pinch-zoom for v1 — kept lightweight to avoid a
+          new RN dependency. */}
+      <Modal
+        visible={viewerPhoto !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setViewerPhoto(null)}
+      >
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={() => setViewerPhoto(null)}
+          style={styles.viewerBackdrop}
+          testID="spot-group-photo-viewer-backdrop"
+        >
+          {viewerPhoto ? (
+            <Image
+              source={{ uri: `data:image/jpeg;base64,${viewerPhoto}` }}
+              style={styles.viewerImage}
+              resizeMode="contain"
+            />
+          ) : null}
+          <View style={styles.viewerCloseHint}>
+            <Ionicons name="close-circle" size={28} color="#fff" />
+          </View>
+        </TouchableOpacity>
       </Modal>
     </SafeAreaView>
   );
@@ -457,6 +598,40 @@ const styles = StyleSheet.create({
     marginTop: spacing.xl,
   },
   leaveBtnText: { color: colors.red, fontWeight: '900', fontSize: 13, letterSpacing: 0.3 },
+  // Phase 3 challenge cards (replaces the old single-row layout).
+  chCard: {
+    backgroundColor: colors.surface, borderRadius: radii.md,
+    borderWidth: 1, borderColor: colors.border,
+    padding: 10, marginBottom: 8,
+  },
+  chCardMin: { opacity: 0.55, padding: 8 },
+  chHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  chBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: colors.amber + '18',
+    borderRadius: radii.pill,
+    paddingHorizontal: 8, paddingVertical: 4,
+    borderWidth: 1, borderColor: colors.amber + '44',
+  },
+  chBadgeText: { color: colors.amber, fontWeight: '900', fontSize: 11 },
+  chThumbsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  chThumbWrap: { width: 60, alignItems: 'center' },
+  chThumb: { width: 60, height: 60, borderRadius: 10, backgroundColor: colors.bg },
+  chThumbPlaceholder: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
+  chThumbName: { color: colors.textMuted, fontSize: 10, marginTop: 3, maxWidth: 60 },
+  chHint: { color: colors.textMuted, fontSize: 11, marginTop: 8, fontStyle: 'italic' },
+  oldToggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingVertical: 8, paddingHorizontal: 4,
+    marginTop: 4,
+  },
+  oldToggleText: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
+  viewerBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.95)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  viewerImage: { width: '100%', height: '100%' },
+  viewerCloseHint: { position: 'absolute', top: 50, right: 20, opacity: 0.85 },
   challengeRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingVertical: 8, paddingHorizontal: 10,

@@ -87,6 +87,17 @@ SPOT_GROUPS_MIN_GAP_MIN = 90  # 1.5h between anchors
 SPOT_GROUPS_DEFER_HOURS = 1
 SPOT_GROUPS_MAX_DEFERS = 3
 
+# Phase 4 round-resolution config.
+# After the anchor fires, ON+accepted+daylight members have 2 minutes
+# to POST /spot/complete with a matching photo. After the window
+# closes, the scheduler attributes:
+#   * each successful poster ("winner") +5 XP × #losers
+#   * each missed poster ("loser")     −1 XP × #winners
+# Skipped (sleeping/at_work/night) and toggle-OFF members are excluded.
+SPOT_GROUPS_ROUND_SECONDS = 120
+SPOT_GROUPS_WIN_XP_PER_LOSER = 5
+SPOT_GROUPS_LOSS_XP_PER_WINNER = 1
+
 
 def init_spot_groups_scheduler(
     *,
@@ -236,17 +247,16 @@ async def _dispatch_anchor_to_group(
     anchor_at_utc: datetime,
     target_object: str,
 ) -> dict:
-    """Fire one anchor to one group. Walk all ACTIVE members, push to
-    those currently in daylight AND not sleeping AND not at work, write
-    a spot_group_challenges row. Phase 3 — if NO members are eligible,
-    defer this group's copy of the anchor by 1h (up to 3 retries)."""
+    """Fire one anchor to one group. Walk all ACCEPTED members with
+    notifications_on=True, push to those currently in daylight AND not
+    sleeping AND not at work, write a spot_group_challenges row. Phase
+    3 — if NO members are eligible, defer this group's copy of the
+    anchor by 1h (up to 3 retries). Phase 4 — pending invitees and
+    members with the toggle OFF are excluded entirely."""
     gid = group["_id"]
     now_utc = datetime.now(timezone.utc)
     anchor_date = anchor_at_utc.date().isoformat()
 
-    # Phase 3 — early-out if this group already dropped or is still in a
-    # cooldown waiting for the next retry. The tick layer (`_fire_anchor_if_due`)
-    # will revisit when next_try_at has elapsed.
     defer = await _get_defer_state(gid, anchor_date, anchor_idx)
     if defer["dropped"]:
         return {"recipients": [], "skipped_night": [], "deferred": True, "dropped": True}
@@ -258,16 +268,27 @@ async def _dispatch_anchor_to_group(
         except Exception:
             pass
 
-    # Fetch active members.
-    members_cur = _db.spot_group_members.find({"group_id": gid, "left_at": None})
+    # Fetch ACCEPTED + notifications_on members only (Phase 4 gate).
+    members_cur = _db.spot_group_members.find({
+        "group_id": gid,
+        "left_at": None,
+        "$or": [
+            {"status": "accepted"},
+            {"status": {"$exists": False}},  # legacy rows = treated as accepted
+        ],
+        "$and": [
+            {"$or": [
+                {"notifications_on": True},
+                {"notifications_on": {"$exists": False}},
+            ]},
+        ],
+    })
     member_ids: list[str] = []
     async for m in members_cur:
         member_ids.append(m["user_id"])
     if not member_ids:
         return {"recipients": [], "skipped_night": []}
 
-    # Hydrate profiles (need shift_schedule + timezone for the
-    # availability resolver AND for daylight).
     profs_cur = _db.profile.find(
         {"_id": {"$in": member_ids}},
         {
@@ -285,8 +306,6 @@ async def _dispatch_anchor_to_group(
     skipped_work: list[str] = []
     for uid in member_ids:
         prof = profs.get(uid) or {"_id": uid}
-        # Phase 3 — availability gate. Sleeping/at_work members are NOT
-        # eligible (silent skip) regardless of daylight.
         if _availability_fn is not None:
             try:
                 avail = _availability_fn(prof)
@@ -313,12 +332,13 @@ async def _dispatch_anchor_to_group(
                     await _send_push(
                         token,
                         "🔍 Spot the Object!",
-                        f"Find a {target_object} and post a photo to {group.get('name') or 'your group'}",
+                        f"You have 2 minutes — find a {target_object} for {group.get('name') or 'your group'}",
                         {
                             "kind": "spot_group_auto_challenge",
                             "group_id": gid,
                             "target_object": target_object,
                             "anchor_idx": anchor_idx,
+                            "round_seconds": SPOT_GROUPS_ROUND_SECONDS,
                         },
                     )
                 except Exception as e:
@@ -326,29 +346,17 @@ async def _dispatch_anchor_to_group(
         except Exception as e:
             logger.warning("[spot-auto.tokens] %s: %s", uid, e)
 
-    # Phase 3 defer rule: if NO members are eligible (everyone is
-    # sleeping/at_work/night), DEFER instead of firing an empty
-    # challenge.
     if not recipients:
-        attempts = len(defer["attempts"]) + 1  # this attempt
+        attempts = len(defer["attempts"]) + 1
         if attempts >= SPOT_GROUPS_MAX_DEFERS:
             await _record_defer(
                 group_id=gid, anchor_date=anchor_date, anchor_idx=anchor_idx,
                 now_utc=now_utc, drop=True,
             )
-            logger.info(
-                "[spot-auto.defer] %s anchor#%s DROPPED after %s attempts (all unavailable)",
-                gid, anchor_idx, attempts,
-            )
         else:
             await _record_defer(
                 group_id=gid, anchor_date=anchor_date, anchor_idx=anchor_idx,
                 now_utc=now_utc, drop=False,
-            )
-            logger.info(
-                "[spot-auto.defer] %s anchor#%s deferred attempt %s/%s (sleeping=%s work=%s night=%s)",
-                gid, anchor_idx, attempts, SPOT_GROUPS_MAX_DEFERS,
-                len(skipped_sleeping), len(skipped_work), len(skipped_night),
             )
         return {
             "recipients": [], "skipped_night": skipped_night,
@@ -357,7 +365,7 @@ async def _dispatch_anchor_to_group(
             "dropped": attempts >= SPOT_GROUPS_MAX_DEFERS,
         }
 
-    # Persist the challenge row.
+    # Persist the challenge row + Phase 4 round_members + resolved=false.
     challenge_id = str(uuid.uuid4())
     await _db.spot_group_challenges.insert_one({
         "_id": challenge_id,
@@ -367,14 +375,19 @@ async def _dispatch_anchor_to_group(
         "target_object": target_object,
         "scheduled_at_utc": anchor_at_utc.isoformat(),
         "fired_at_utc": now_utc.isoformat(),
+        "round_ends_at_utc": (now_utc + timedelta(seconds=SPOT_GROUPS_ROUND_SECONDS)).isoformat(),
+        "round_seconds": SPOT_GROUPS_ROUND_SECONDS,
         "recipients": recipients,
         "skipped_night": skipped_night,
         "skipped_sleeping": skipped_sleeping,
         "skipped_work": skipped_work,
+        "resolved": False,
+        "winners": [],
+        "losers": [],
+        "xp_per_winner": 0,
+        "xp_per_loser": 0,
     })
 
-    # Bump the group's last_challenge_at so the UI can show "fired N
-    # minutes ago".
     await _db.spot_groups.update_one(
         {"_id": gid},
         {"$set": {"last_challenge_at": now_utc.isoformat()}},
@@ -400,7 +413,15 @@ async def _fire_anchor_if_due(anchor_idx: int, anchor: dict, anchor_date: str) -
     target_object = anchor["target_object"]
 
     fired = 0
-    groups_cur = _db.spot_groups.find({"auto_challenge_on": True})
+    # Phase 4 — only fire to groups that have been STARTED. The legacy
+    # `auto_challenge_on` flag is mirrored by `started` for backwards
+    # compatibility, so either match works for existing groups.
+    groups_cur = _db.spot_groups.find({
+        "$or": [
+            {"started": True},
+            {"auto_challenge_on": True},
+        ],
+    })
     async for g in groups_cur:
         gid = g["_id"]
         if gid in already:
@@ -447,9 +468,113 @@ async def _fire_anchor_if_due(anchor_idx: int, anchor: dict, anchor_date: str) -
     return fired
 
 
+async def _resolve_round(challenge: dict) -> dict:
+    """Phase 4 — close the 2-minute window on one challenge: compute
+    winners/losers from spot_completions, apply XP, mark resolved.
+    Idempotent (skips already-resolved rows)."""
+    if challenge.get("resolved"):
+        return {"already": True}
+    gid = challenge["group_id"]
+    cid = challenge["_id"]
+    target = challenge.get("target_object")
+    fired_at = challenge.get("fired_at_utc")
+    ends_at = challenge.get("round_ends_at_utc")
+    if not (target and fired_at and ends_at):
+        return {"skipped": "missing-fields"}
+    recipients = list(challenge.get("recipients") or [])
+    if not recipients:
+        await _db.spot_group_challenges.update_one(
+            {"_id": cid},
+            {"$set": {"resolved": True, "resolved_at_utc": datetime.now(timezone.utc).isoformat()}},
+        )
+        return {"empty_round": True}
+
+    # Find members who posted a SUCCESSFUL photo of `target` within the
+    # round window. We use the SAME boundary logic as the group feed
+    # (taken_at >= fired_at AND taken_at < ends_at), success=true.
+    posted_cur = _db.spot_completions.find({
+        "user_id": {"$in": recipients},
+        "target_object": target,
+        "success": True,
+        "taken_at": {"$gte": fired_at, "$lt": ends_at},
+    }, {"_id": 0, "user_id": 1, "taken_at": 1})
+    winners_set: set[str] = set()
+    async for r in posted_cur:
+        winners_set.add(r["user_id"])
+
+    winners = sorted(winners_set)
+    losers = sorted([u for u in recipients if u not in winners_set])
+
+    n_w = len(winners)
+    n_l = len(losers)
+    xp_per_winner = SPOT_GROUPS_WIN_XP_PER_LOSER * n_l   # +5 × #losers
+    xp_per_loser = -SPOT_GROUPS_LOSS_XP_PER_WINNER * n_w  # −1 × #winners
+
+    # Apply XP delta to each player. We use $inc directly on
+    # profile.total_xp (same convention used elsewhere in server.py for
+    # XP gains/penalties). Floor at 0 to match the existing audit-fix
+    # behaviour ("if total_xp < 0 then 0").
+    if winners and xp_per_winner > 0:
+        await _db.profile.update_many(
+            {"_id": {"$in": winners}},
+            {"$inc": {"total_xp": xp_per_winner}},
+        )
+    if losers and xp_per_loser < 0:
+        await _db.profile.update_many(
+            {"_id": {"$in": losers}},
+            {"$inc": {"total_xp": xp_per_loser}},
+        )
+        # Floor at 0 — same as the audit job.
+        await _db.profile.update_many(
+            {"_id": {"$in": losers}, "total_xp": {"$lt": 0}},
+            {"$set": {"total_xp": 0}},
+        )
+
+    await _db.spot_group_challenges.update_one(
+        {"_id": cid},
+        {"$set": {
+            "resolved": True,
+            "resolved_at_utc": datetime.now(timezone.utc).isoformat(),
+            "winners": winners,
+            "losers": losers,
+            "xp_per_winner": xp_per_winner,
+            "xp_per_loser": xp_per_loser,
+        }},
+    )
+    logger.info(
+        "[spot-auto.resolve] group=%s challenge=%s winners=%s losers=%s xp(+%s/%s)",
+        gid, cid, n_w, n_l, xp_per_winner, xp_per_loser,
+    )
+    return {
+        "winners": winners, "losers": losers,
+        "xp_per_winner": xp_per_winner, "xp_per_loser": xp_per_loser,
+    }
+
+
+async def _resolve_due_rounds() -> int:
+    """Find every UNRESOLVED challenge whose round_ends_at_utc <= now
+    and resolve it. Returns the number of rounds resolved this tick."""
+    if _db is None:
+        return 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cur = _db.spot_group_challenges.find({
+        "resolved": {"$ne": True},
+        "round_ends_at_utc": {"$lte": now_iso},
+    })
+    n = 0
+    async for c in cur:
+        try:
+            await _resolve_round(c)
+            n += 1
+        except Exception:
+            logger.exception("[spot-auto.resolve] failed %s", c.get("_id"))
+    return n
+
+
 async def spot_groups_auto_tick():
     """The minute-by-minute scheduler tick. Idempotent (fired_group_ids
-    + per-anchor index guards prevent double-dispatch)."""
+    + per-anchor index guards prevent double-dispatch; resolved flag
+    prevents double-XP)."""
     if _db is None:
         return
     try:
@@ -457,6 +582,8 @@ async def spot_groups_auto_tick():
         times = anchors_doc.get("times") or []
         for idx, anchor in enumerate(times):
             await _fire_anchor_if_due(idx, anchor, anchors_doc["_id"])
+        # Phase 4 — close any expired 2-minute rounds.
+        await _resolve_due_rounds()
     except Exception:
         logger.exception("[spot-auto.tick] failed")
 
@@ -533,6 +660,8 @@ def attach_routes(app, get_user_or_legacy, get_current_user):
                 "target_object": target_object,
                 "scheduled_at_utc": c.get("scheduled_at_utc"),
                 "fired_at_utc": fired_at,
+                "round_ends_at_utc": c.get("round_ends_at_utc"),
+                "round_seconds": c.get("round_seconds", SPOT_GROUPS_ROUND_SECONDS),
                 "recipients_count": len(c.get("recipients") or []),
                 "skipped_sleeping_count": len(c.get("skipped_sleeping") or []),
                 "skipped_work_count": len(c.get("skipped_work") or []),
@@ -541,6 +670,15 @@ def attach_routes(app, get_user_or_legacy, get_current_user):
                 "responses": responses,
                 "response_count": len(responses),
                 "you_responded": any(r.get("user_id") == user_id for r in responses),
+                # Phase 4 round-result fields:
+                "resolved": bool(c.get("resolved")),
+                "resolved_at_utc": c.get("resolved_at_utc"),
+                "winners": c.get("winners") or [],
+                "losers": c.get("losers") or [],
+                "xp_per_winner": c.get("xp_per_winner", 0),
+                "xp_per_loser": c.get("xp_per_loser", 0),
+                "you_won": user_id in (c.get("winners") or []),
+                "you_lost": user_id in (c.get("losers") or []),
             })
         return {"challenges": out}
 
@@ -569,9 +707,6 @@ def attach_routes(app, get_user_or_legacy, get_current_user):
         if _db is None:
             raise HTTPException(503, "DB not ready.")
         anchors_doc = await _get_or_create_today_anchors()
-        # Append a new "forced" anchor at now()+5s so the tick picks it
-        # up next minute. To make this synchronous for tests, we ALSO
-        # fire it immediately.
         now_utc = datetime.now(timezone.utc)
         forced_idx = len(anchors_doc.get("times") or [])
         forced_anchor = {
@@ -584,7 +719,6 @@ def attach_routes(app, get_user_or_legacy, get_current_user):
             {"_id": anchors_doc["_id"]},
             {"$push": {"times": forced_anchor}},
         )
-        # Fire immediately.
         fired_groups = await _fire_anchor_if_due(forced_idx, forced_anchor, anchors_doc["_id"])
         return {
             "date": anchors_doc["_id"],
@@ -592,6 +726,29 @@ def attach_routes(app, get_user_or_legacy, get_current_user):
             "fired_to_groups": fired_groups,
             "target_object": forced_anchor["target_object"],
         }
+
+    @sub.post("/admin/spot/scheduler/resolve-now")
+    async def _admin_resolve_now(user_id: str = Depends(get_current_user)):
+        """Phase 4 — admin endpoint to FORCE-RESOLVE every unresolved
+        challenge regardless of round_ends_at_utc. Used by tests to
+        bypass the 120s window. Returns counts + per-challenge result."""
+        if _is_admin is None or not await _is_admin(user_id):
+            raise HTTPException(403, "Creator only.")
+        if _db is None:
+            raise HTTPException(503, "DB not ready.")
+        cur = _db.spot_group_challenges.find({"resolved": {"$ne": True}})
+        results = []
+        async for c in cur:
+            try:
+                r = await _resolve_round(c)
+                results.append({
+                    "challenge_id": c["_id"],
+                    "group_id": c["group_id"],
+                    **r,
+                })
+            except Exception as e:
+                results.append({"challenge_id": c["_id"], "error": str(e)})
+        return {"resolved": len(results), "results": results}
 
     app.include_router(sub)
     return sub

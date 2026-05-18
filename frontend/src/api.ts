@@ -478,7 +478,21 @@ export const api = {
       scheduled_at_utc: string;
       fired_at_utc: string;
       recipients_count: number;
+      // Phase 3 — extra skip-bucket counters.
+      skipped_sleeping_count?: number;
+      skipped_work_count?: number;
+      skipped_night_count?: number;
       you_received: boolean;
+      // Phase 3 — group feed responses (members' posted photos).
+      responses?: Array<{
+        id: string;
+        user_id: string;
+        photo_base64: string | null;
+        taken_at: string;
+        remaining_seconds?: number;
+      }>;
+      response_count?: number;
+      you_responded?: boolean;
     }> }>(`/spot/groups/${gid}/challenges`),
 
   authResend: (email: string) =>
