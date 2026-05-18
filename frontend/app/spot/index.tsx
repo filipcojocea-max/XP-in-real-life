@@ -27,12 +27,21 @@ export default function SpotHub() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [openEntry, setOpenEntry] = useState<SpotEntry | null>(null);
+  // v1.0.29 Phase 1 — permanent groups list. Fetched alongside the
+  // solo feed; renders as a "MY GROUPS" section. Empty for first-time
+  // users and silently hidden in that case.
+  const [groups, setGroups] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [p, f] = await Promise.all([api.getProfile(), api.spotFeed(50)]);
+      const [p, f, g] = await Promise.all([
+        api.getProfile(),
+        api.spotFeed(50),
+        api.spotGroupsList().catch(() => ({ groups: [] })),
+      ]);
       setProfile(p);
       setFeed(f.entries || []);
+      setGroups(g.groups || []);
     } catch (e: any) {
       console.log('spot load', e?.message);
     } finally {
@@ -209,8 +218,49 @@ export default function SpotHub() {
           </View>
         </View>
 
-        {/* Feed */}
-        <Text style={styles.sectionLabel}>RECENT SPOTS</Text>
+        {/* ── v1.0.29 Phase 1: Permanent Groups ────────────────── */}
+        <View style={styles.groupsHeader}>
+          <Text style={styles.sectionLabel}>MY GROUPS</Text>
+          <TouchableOpacity
+            onPress={() => router.push('/spot/multiplayer/new' as any)}
+            style={styles.newGroupBtn}
+            activeOpacity={0.8}
+            testID="spot-new-group"
+          >
+            <Ionicons name="add" size={14} color={colors.amber} />
+            <Text style={styles.newGroupText}>NEW</Text>
+          </TouchableOpacity>
+        </View>
+        {groups.length === 0 ? (
+          <Text style={styles.groupsEmpty}>
+            No permanent groups yet. Tap NEW to start one with up to 8 friends.
+          </Text>
+        ) : (
+          groups.map((g) => (
+            <TouchableOpacity
+              key={g.id}
+              onPress={() => router.push(`/spot/groups/${g.id}` as any)}
+              activeOpacity={0.8}
+              style={styles.groupRow}
+              testID={`spot-group-row-${g.id}`}
+            >
+              <View style={[styles.groupIcon, { backgroundColor: colors.amber + '22' }]}>
+                <Ionicons name="people" size={20} color={colors.amber} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.groupName} numberOfLines={1}>{g.name}</Text>
+                <Text style={styles.groupMeta} numberOfLines={1}>
+                  {g.member_count} of {g.max_members} active
+                  {g.auto_challenge_on ? ' · auto-challenges ON' : ''}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          ))
+        )}
+
+        {/* Solo feed — now rendered as COMPACT TABS per spec. */}
+        <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>RECENT SPOTS</Text>
         {feed.length === 0 ? (
           <View style={styles.emptyFeed}>
             <Ionicons name="camera-outline" size={32} color={colors.textMuted} />
@@ -219,13 +269,45 @@ export default function SpotHub() {
           </View>
         ) : (
           feed.map((e) => (
-            <FeedCard key={e.id} entry={e} onTap={() => setOpenEntry(e)} />
+            <CompactFeedTab key={e.id} entry={e} onTap={() => setOpenEntry(e)} />
           ))
         )}
       </ScrollView>
 
       <SpotEntryModal entry={openEntry} onClose={() => setOpenEntry(null)} onChange={load} />
     </SafeAreaView>
+  );
+}
+
+
+// ────────────────────────────────────────────────────────────────────
+// CompactFeedTab — v1.0.29 Phase 1 collapsed presentation for the
+// Solo Recent Spots list. Shows player name + object + a coloured
+// status dot. Tapping opens the existing SpotEntryModal (the same
+// photo + details viewer the previous big card used).
+// ────────────────────────────────────────────────────────────────────
+function CompactFeedTab({ entry, onTap }: { entry: SpotEntry; onTap: () => void }) {
+  const success = entry.success;
+  const color = success ? colors.green : colors.red;
+  const icon = success ? 'checkmark' : 'close';
+  return (
+    <TouchableOpacity
+      onPress={onTap}
+      activeOpacity={0.85}
+      style={styles.compactTab}
+      testID={`spot-compact-${entry.id}`}
+    >
+      <View style={[styles.compactStatus, { backgroundColor: color + '22', borderWidth: 1, borderColor: color + '88' }]}>
+        <Ionicons name={icon as any} size={14} color={color} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.compactPlayer} numberOfLines={1}>{entry.player_name || 'Player'}</Text>
+        <Text style={styles.compactObject} numberOfLines={1}>
+          {entry.object_name || 'Object'} · {success ? 'Found' : 'Missed'}
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+    </TouchableOpacity>
   );
 }
 
@@ -649,6 +731,95 @@ const styles = StyleSheet.create({
 
   sectionLabel: { color: colors.textMuted, fontSize: 11, fontWeight: '900', letterSpacing: 1.5, marginBottom: 8, marginTop: 4 },
   emptyFeed: { alignItems: 'center', paddingVertical: spacing.xl, gap: 6 },
+  // ── v1.0.29 Phase 1 — permanent groups ───────────────────────────
+  groupsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+  newGroupBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: radii.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: colors.amber + '22',
+    borderWidth: 1,
+    borderColor: colors.amber + '88',
+  },
+  newGroupText: {
+    color: colors.amber,
+    fontWeight: '900',
+    fontSize: 10,
+    letterSpacing: 1,
+  },
+  groupsEmpty: {
+    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: 18,
+    paddingVertical: spacing.sm,
+  },
+  groupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    padding: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  groupIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupName: {
+    color: colors.text,
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  groupMeta: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  // ── Compact recent-spots tab ─────────────────────────────────────
+  compactTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  compactStatus: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  compactPlayer: {
+    color: colors.text,
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  compactObject: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 2,
+  },
   emptyTitle: { color: colors.text, fontWeight: '900', fontSize: 14, marginTop: 6 },
   emptyDesc: { color: colors.textMuted, fontSize: 12, textAlign: 'center' },
 

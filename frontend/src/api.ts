@@ -445,6 +445,29 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),
+  // ── Spot the Object — Permanent Groups (v1.0.29 Phase 1) ─────────
+  spotGroupsList: () =>
+    req<{ groups: any[] }>('/spot/groups'),
+  spotGroupGet: (gid: string) =>
+    req<{ group: any }>(`/spot/groups/${gid}`),
+  spotGroupCreate: (params: { name?: string; member_ids: string[] }) =>
+    req<{ group: any }>('/spot/groups', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+  spotGroupAddMembers: (gid: string, member_ids: string[]) =>
+    req<{ group: any; added: string[]; reactivated: string[] }>(
+      `/spot/groups/${gid}/members`,
+      { method: 'POST', body: JSON.stringify({ member_ids }) },
+    ),
+  spotGroupLeave: (gid: string) =>
+    req<{ left_at: string }>(`/spot/groups/${gid}/leave`, { method: 'POST' }),
+  spotGroupPatch: (gid: string, patch: { name?: string; auto_challenge_on?: boolean }) =>
+    req<{ group: any }>(`/spot/groups/${gid}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
   authResend: (email: string) =>
     req<{ message: string; dev_code?: string }>('/auth/resend', {
       method: 'POST',

@@ -9520,3 +9520,15 @@ try:
     logger.info("[guest_migration] routes attached")
 except Exception:
     logger.exception("[guest_migration] failed to attach routes")
+
+# ── Spot the Object — Permanent Groups (v1.0.29 Phase 1) ────────────
+try:
+    from spot_groups import (
+        init_spot_groups as _init_sg,
+        attach_routes as _attach_sg_routes,
+    )
+    _init_sg(db=db, now_iso=now_iso, friend_ids_fn=_friend_ids)
+    _attach_sg_routes(app, get_user_or_legacy)
+    logger.info("[spot_groups] routes attached")
+except Exception:
+    logger.exception("[spot_groups] failed to attach routes")
