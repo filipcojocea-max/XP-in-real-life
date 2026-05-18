@@ -269,14 +269,34 @@ def attach_routes(app, get_user_or_legacy):
         existing_ids = set()
         async for m in existing_cur:
             existing_ids.add(m["user_id"])
-        truly_new = [m for m in to_add if m not in existing_ids]
 
-        # Reactivate anyone who LEFT earlier (clear left_at).
+        # Identify previously-LEFT members in the to_add set BEFORE the
+        # reactivation. These will become active again WITHOUT a new
+        # spot_group_members row, so they must NOT be counted in
+        # `truly_new` (which is reserved for brand-new memberships).
+        left_cur = _db.spot_group_members.find({
+            "group_id": gid,
+            "user_id": {"$in": to_add},
+            "left_at": {"$ne": None},
+        })
+        left_ids = set()
+        async for m in left_cur:
+            left_ids.add(m["user_id"])
+
+        # Brand-new = not currently active AND has no prior (left) row.
+        truly_new = [m for m in to_add if m not in existing_ids and m not in left_ids]
+
+        # Reactivate anyone who LEFT earlier (clear left_at). After this
+        # call _active_member_count() includes everyone we just bumped
+        # back to active.
         await _db.spot_group_members.update_many(
             {"group_id": gid, "user_id": {"$in": to_add}, "left_at": {"$ne": None}},
             {"$set": {"left_at": None, "rejoined_at": _now_iso()}},
         )
 
+        # `_active_member_count` is now the actual count AFTER reactivation
+        # (so it already counts the reactivated members). We only need to
+        # add `truly_new` (brand-new rows about to be inserted below) once.
         active_after = await _active_member_count(gid) + len(truly_new)
         if active_after > MAX_GROUP_SIZE:
             raise HTTPException(
@@ -301,7 +321,7 @@ def attach_routes(app, get_user_or_legacy):
         return {
             "group": await _serialize_group(g, user_id),
             "added": truly_new,
-            "reactivated": [m for m in to_add if m not in truly_new],
+            "reactivated": sorted(left_ids),
         }
 
     @sub.post("/spot/groups/{gid}/leave")
