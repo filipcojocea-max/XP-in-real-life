@@ -226,13 +226,33 @@ export default function SpotGroupDetail() {
               1.5h between challenges. Any member can toggle this.
             </Text>
           </View>
-          <Switch
-            value={group.auto_challenge_on}
-            onValueChange={onToggleAuto}
+          {/* On web, react-native-web's Switch uses an absolutely
+              positioned <input role='switch'> that sits UNDER the
+              container View overlay, so Playwright clicks never reach
+              it. We wrap the Switch in a TouchableOpacity that taps the
+              toggle handler directly. On native this just acts as a
+              slightly larger hit-area; on web it's the ONLY way for an
+              automated test (or even a careful tap) to flip the toggle. */}
+          <TouchableOpacity
+            onPress={() => !saving && onToggleAuto(!group.auto_challenge_on)}
             disabled={saving}
-            thumbColor={group.auto_challenge_on ? colors.amber : '#94a3b8'}
-            trackColor={{ false: '#555', true: colors.amber + '88' }}
-          />
+            activeOpacity={0.7}
+            testID="spot-group-auto-toggle"
+            accessibilityRole="switch"
+            accessibilityState={{ checked: group.auto_challenge_on, disabled: saving }}
+          >
+            <Switch
+              value={group.auto_challenge_on}
+              onValueChange={onToggleAuto}
+              disabled={saving}
+              thumbColor={group.auto_challenge_on ? colors.amber : '#94a3b8'}
+              trackColor={{ false: '#555', true: colors.amber + '88' }}
+              // pointerEvents='none' lets the TouchableOpacity own the
+              // tap on both platforms — avoids the double-fire bug
+              // where both the Switch AND the wrapper would trigger.
+              pointerEvents="none"
+            />
+          </TouchableOpacity>
         </View>
 
         <View style={styles.sectionRow}>
