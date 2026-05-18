@@ -571,6 +571,61 @@ def _is_in_silence_window(prof: Optional[dict], local_now: datetime) -> bool:
     return sleep <= cur < start
 
 
+def _is_at_work(prof: Optional[dict], local_now: datetime) -> bool:
+    """Phase 3 — at-work detection for Spot Groups availability badges.
+    Returns True ONLY when the user has BOTH a shift schedule enabled
+    AND that shift defines a `work_end_time` (HH:MM). The window is
+    [start_time .. work_end_time) in local time. If `work_end_time` is
+    not set on the user's shift, the function returns False (we can't
+    tell whether they're working or just awake — fall back to 'active')."""
+    if not prof or not (prof.get("shift_schedule") or {}).get("enabled"):
+        return False
+    today_iso = local_now.date().isoformat()
+    shift = _shift_for_date(prof, today_iso)
+    if shift is None:
+        return False
+    shifts = (prof.get("shift_schedule") or {}).get("shifts") or {}
+    s_def = shifts.get(shift) or DEFAULT_SHIFTS.get(shift) or {}
+    work_end_raw = s_def.get("work_end_time")
+    if not work_end_raw:
+        return False
+    start_hh, start_mm = _parse_hhmm(s_def.get("start_time"), default=(7, 0))
+    end_hh, end_mm = _parse_hhmm(work_end_raw, default=(17, 0))
+    start = (start_hh, start_mm)
+    end = (end_hh, end_mm)
+    cur = (local_now.hour, local_now.minute)
+    # Same wrap-around handling as silence: end < start (e.g. night
+    # shift start 22, end 06) → window is start..24 OR 0..end.
+    if end < start:
+        return cur >= start or cur < end
+    return start <= cur < end
+
+
+def _spot_groups_availability(prof: Optional[dict]) -> str:
+    """Phase 3 availability resolver wired into spot_groups. Returns one
+    of 'sleeping' | 'at_work' | 'active'. Computes the user's CURRENT
+    local time from prof.timezone (falls back to UTC), then layers:
+       1) silence window → 'sleeping'
+       2) at_work window → 'at_work'
+       3) else → 'active'
+    """
+    try:
+        tz_name = (prof or {}).get("timezone") or "UTC"
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        local_now = datetime.now(tz)
+    except Exception:
+        local_now = datetime.now(timezone.utc)
+    if _is_in_silence_window(prof, local_now):
+        return "sleeping"
+    if _is_at_work(prof, local_now):
+        return "at_work"
+    return "active"
+
+
 async def user_today_str_for(user_id: str) -> str:
     # NOTE: include shift_schedule so _effective_day_start_for can pick
     # the rotating shift's wake-up time when the user's Adaptive Work-Life
@@ -9547,7 +9602,7 @@ try:
         init_spot_groups as _init_sg,
         attach_routes as _attach_sg_routes,
     )
-    _init_sg(db=db, now_iso=now_iso, friend_ids_fn=_friend_ids)
+    _init_sg(db=db, now_iso=now_iso, friend_ids_fn=_friend_ids, availability_fn=_spot_groups_availability)
     _attach_sg_routes(app, get_user_or_legacy)
     logger.info("[spot_groups] routes attached")
 except Exception:
@@ -9571,6 +9626,7 @@ try:
         is_admin=_is_admin_user,
         user_daylight_today=_ns_user_daylight_today,
         spot_objects=SPOT_OBJECTS,
+        availability_fn=_spot_groups_availability,
     )
     _attach_sg_sched_routes(app, get_user_or_legacy, get_current_user)
     logger.info("[spot_groups_scheduler] routes attached")

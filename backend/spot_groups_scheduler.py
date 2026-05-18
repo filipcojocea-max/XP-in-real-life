@@ -69,6 +69,7 @@ _db = None
 _send_push: Optional[Callable[..., Awaitable[bool]]] = None
 _is_admin: Optional[Callable[[str], Awaitable[bool]]] = None
 _user_daylight_today = None  # callable(prof) -> (sunrise_utc, sunset_utc)
+_availability_fn = None      # callable(prof_dict) -> 'sleeping'|'at_work'|'active'
 _spot_objects: list[str] = []
 
 # Global daylight band for the 3 anchor times (UTC). 06:00 UTC covers
@@ -79,6 +80,13 @@ SPOT_GROUPS_ANCHOR_UTC_MAX_HOUR = 21
 SPOT_GROUPS_DAILY_ANCHOR_COUNT = 3
 SPOT_GROUPS_MIN_GAP_MIN = 90  # 1.5h between anchors
 
+# Phase 3 defer rules: when ALL active members are unavailable
+# (sleeping / at_work / outside daylight), defer this group's copy of
+# the anchor by N hours, up to MAX_DEFERS times. After that, drop the
+# anchor for this group (no challenge fires today).
+SPOT_GROUPS_DEFER_HOURS = 1
+SPOT_GROUPS_MAX_DEFERS = 3
+
 
 def init_spot_groups_scheduler(
     *,
@@ -87,15 +95,17 @@ def init_spot_groups_scheduler(
     is_admin,
     user_daylight_today,
     spot_objects: list[str],
+    availability_fn=None,
 ):
     """Hook server.py dependencies. `user_daylight_today(prof)` is the
     helper from notif_scheduler.py that returns today's sunrise/sunset
     in UTC for a given profile."""
-    global _db, _send_push, _is_admin, _user_daylight_today, _spot_objects
+    global _db, _send_push, _is_admin, _user_daylight_today, _spot_objects, _availability_fn
     _db = db
     _send_push = send_push
     _is_admin = is_admin
     _user_daylight_today = user_daylight_today
+    _availability_fn = availability_fn
     _spot_objects = list(spot_objects) if spot_objects else ["cup", "book", "pen"]
 
 
@@ -175,6 +185,50 @@ async def _is_in_daylight_for_profile(prof: dict, now_utc: datetime) -> bool:
         return True
 
 
+def _defer_doc_id(group_id: str, anchor_date: str, anchor_idx: int) -> str:
+    return f"{anchor_date}:{anchor_idx}:{group_id}"
+
+
+async def _get_defer_state(group_id: str, anchor_date: str, anchor_idx: int) -> dict:
+    if _db is None:
+        return {"attempts": [], "dropped": False, "next_try_at": None}
+    doc = await _db.spot_anchor_deferrals.find_one(
+        {"_id": _defer_doc_id(group_id, anchor_date, anchor_idx)}
+    ) or {}
+    return {
+        "attempts": doc.get("attempts") or [],
+        "dropped": bool(doc.get("dropped")),
+        "next_try_at": doc.get("next_try_at"),
+    }
+
+
+async def _record_defer(
+    *, group_id: str, anchor_date: str, anchor_idx: int,
+    now_utc: datetime, drop: bool = False,
+) -> None:
+    """Append an attempt to the deferral row; optionally mark `dropped`
+    after exhausting MAX_DEFERS retries."""
+    if _db is None:
+        return
+    next_try_iso = (now_utc + timedelta(hours=SPOT_GROUPS_DEFER_HOURS)).isoformat()
+    update = {
+        "$push": {"attempts": now_utc.isoformat()},
+        "$set": {
+            "group_id": group_id,
+            "anchor_date": anchor_date,
+            "anchor_idx": anchor_idx,
+            "next_try_at": None if drop else next_try_iso,
+            "dropped": bool(drop),
+            "updated_at": now_utc.isoformat(),
+        },
+    }
+    await _db.spot_anchor_deferrals.update_one(
+        {"_id": _defer_doc_id(group_id, anchor_date, anchor_idx)},
+        update,
+        upsert=True,
+    )
+
+
 async def _dispatch_anchor_to_group(
     *,
     group: dict,
@@ -183,9 +237,26 @@ async def _dispatch_anchor_to_group(
     target_object: str,
 ) -> dict:
     """Fire one anchor to one group. Walk all ACTIVE members, push to
-    those currently in daylight, write a spot_group_challenges row."""
+    those currently in daylight AND not sleeping AND not at work, write
+    a spot_group_challenges row. Phase 3 — if NO members are eligible,
+    defer this group's copy of the anchor by 1h (up to 3 retries)."""
     gid = group["_id"]
     now_utc = datetime.now(timezone.utc)
+    anchor_date = anchor_at_utc.date().isoformat()
+
+    # Phase 3 — early-out if this group already dropped or is still in a
+    # cooldown waiting for the next retry. The tick layer (`_fire_anchor_if_due`)
+    # will revisit when next_try_at has elapsed.
+    defer = await _get_defer_state(gid, anchor_date, anchor_idx)
+    if defer["dropped"]:
+        return {"recipients": [], "skipped_night": [], "deferred": True, "dropped": True}
+    if defer["next_try_at"]:
+        try:
+            next_at = datetime.fromisoformat(defer["next_try_at"])
+            if next_at > now_utc:
+                return {"recipients": [], "skipped_night": [], "deferred": True, "wait_until": defer["next_try_at"]}
+        except Exception:
+            pass
 
     # Fetch active members.
     members_cur = _db.spot_group_members.find({"group_id": gid, "left_at": None})
@@ -195,11 +266,14 @@ async def _dispatch_anchor_to_group(
     if not member_ids:
         return {"recipients": [], "skipped_night": []}
 
-    # Hydrate profiles in one round-trip (timezone + push tokens are
-    # fetched separately by _push_to_user).
+    # Hydrate profiles (need shift_schedule + timezone for the
+    # availability resolver AND for daylight).
     profs_cur = _db.profile.find(
         {"_id": {"$in": member_ids}},
-        {"_id": 1, "timezone": 1, "full_name": 1, "name": 1},
+        {
+            "_id": 1, "timezone": 1, "full_name": 1, "name": 1,
+            "shift_schedule": 1, "day_start_time": 1, "wake_time": 1,
+        },
     )
     profs: dict[str, dict] = {}
     async for p in profs_cur:
@@ -207,8 +281,23 @@ async def _dispatch_anchor_to_group(
 
     recipients: list[str] = []
     skipped_night: list[str] = []
+    skipped_sleeping: list[str] = []
+    skipped_work: list[str] = []
     for uid in member_ids:
         prof = profs.get(uid) or {"_id": uid}
+        # Phase 3 — availability gate. Sleeping/at_work members are NOT
+        # eligible (silent skip) regardless of daylight.
+        if _availability_fn is not None:
+            try:
+                avail = _availability_fn(prof)
+            except Exception:
+                avail = "active"
+            if avail == "sleeping":
+                skipped_sleeping.append(uid)
+                continue
+            if avail == "at_work":
+                skipped_work.append(uid)
+                continue
         in_day = await _is_in_daylight_for_profile(prof, now_utc)
         if not in_day:
             skipped_night.append(uid)
@@ -237,18 +326,51 @@ async def _dispatch_anchor_to_group(
         except Exception as e:
             logger.warning("[spot-auto.tokens] %s: %s", uid, e)
 
+    # Phase 3 defer rule: if NO members are eligible (everyone is
+    # sleeping/at_work/night), DEFER instead of firing an empty
+    # challenge.
+    if not recipients:
+        attempts = len(defer["attempts"]) + 1  # this attempt
+        if attempts >= SPOT_GROUPS_MAX_DEFERS:
+            await _record_defer(
+                group_id=gid, anchor_date=anchor_date, anchor_idx=anchor_idx,
+                now_utc=now_utc, drop=True,
+            )
+            logger.info(
+                "[spot-auto.defer] %s anchor#%s DROPPED after %s attempts (all unavailable)",
+                gid, anchor_idx, attempts,
+            )
+        else:
+            await _record_defer(
+                group_id=gid, anchor_date=anchor_date, anchor_idx=anchor_idx,
+                now_utc=now_utc, drop=False,
+            )
+            logger.info(
+                "[spot-auto.defer] %s anchor#%s deferred attempt %s/%s (sleeping=%s work=%s night=%s)",
+                gid, anchor_idx, attempts, SPOT_GROUPS_MAX_DEFERS,
+                len(skipped_sleeping), len(skipped_work), len(skipped_night),
+            )
+        return {
+            "recipients": [], "skipped_night": skipped_night,
+            "skipped_sleeping": skipped_sleeping, "skipped_work": skipped_work,
+            "deferred": True, "attempt": attempts,
+            "dropped": attempts >= SPOT_GROUPS_MAX_DEFERS,
+        }
+
     # Persist the challenge row.
     challenge_id = str(uuid.uuid4())
     await _db.spot_group_challenges.insert_one({
         "_id": challenge_id,
         "group_id": gid,
-        "anchor_date": anchor_at_utc.date().isoformat(),
+        "anchor_date": anchor_date,
         "anchor_idx": anchor_idx,
         "target_object": target_object,
         "scheduled_at_utc": anchor_at_utc.isoformat(),
         "fired_at_utc": now_utc.isoformat(),
         "recipients": recipients,
         "skipped_night": skipped_night,
+        "skipped_sleeping": skipped_sleeping,
+        "skipped_work": skipped_work,
     })
 
     # Bump the group's last_challenge_at so the UI can show "fired N
@@ -258,13 +380,19 @@ async def _dispatch_anchor_to_group(
         {"$set": {"last_challenge_at": now_utc.isoformat()}},
     )
 
-    return {"recipients": recipients, "skipped_night": skipped_night, "challenge_id": challenge_id}
+    return {
+        "recipients": recipients,
+        "skipped_night": skipped_night,
+        "skipped_sleeping": skipped_sleeping,
+        "skipped_work": skipped_work,
+        "challenge_id": challenge_id,
+    }
 
 
 async def _fire_anchor_if_due(anchor_idx: int, anchor: dict, anchor_date: str) -> int:
     """If the given anchor is in the past, fire it to every auto-on
     group that hasn't already received it. Returns the number of groups
-    dispatched."""
+    actually dispatched (deferred / dropped attempts don't count)."""
     at_utc = datetime.fromisoformat(anchor["at_utc"])
     if at_utc > datetime.now(timezone.utc):
         return 0
@@ -284,16 +412,35 @@ async def _fire_anchor_if_due(anchor_idx: int, anchor: dict, anchor_date: str) -
                 anchor_at_utc=at_utc,
                 target_object=target_object,
             )
-            # Mark group as fired for this anchor (idempotent).
+            if res.get("deferred"):
+                # Don't mark fired_group_ids on a soft defer — the next
+                # minute-tick (after the 1h cooldown) will retry. BUT
+                # when MAX_DEFERS is exhausted and dispatch returned
+                # `dropped:true`, mark fired_group_ids so we stop
+                # retrying for the rest of the day.
+                if res.get("dropped"):
+                    await _db.spot_auto_anchors.update_one(
+                        {"_id": anchor_date},
+                        {"$addToSet": {f"times.{anchor_idx}.fired_group_ids": gid}},
+                    )
+                    logger.info(
+                        "[spot-auto] anchor#%s %s DROPPED for group=%s (max defers)",
+                        anchor_idx, target_object, gid,
+                    )
+                continue
+            # Real dispatch — mark fired & bump counter.
             await _db.spot_auto_anchors.update_one(
                 {"_id": anchor_date},
                 {"$addToSet": {f"times.{anchor_idx}.fired_group_ids": gid}},
             )
             fired += 1
             logger.info(
-                "[spot-auto] anchor#%s %s → group=%s recipients=%s skipped=%s",
+                "[spot-auto] anchor#%s %s → group=%s recipients=%s skipped(night=%s,sleep=%s,work=%s)",
                 anchor_idx, target_object, gid,
-                len(res.get("recipients", [])), len(res.get("skipped_night", [])),
+                len(res.get("recipients", [])),
+                len(res.get("skipped_night", [])),
+                len(res.get("skipped_sleeping", [])),
+                len(res.get("skipped_work", [])),
             )
         except Exception:
             logger.exception("[spot-auto.dispatch] group=%s", gid)
@@ -328,19 +475,72 @@ def attach_routes(app, get_user_or_legacy, get_current_user):
         )
         if not mem:
             raise HTTPException(403, "Not your group.")
+        # Active member-id set so we can attribute responses correctly.
+        members_cur = _db.spot_group_members.find({"group_id": gid, "left_at": None})
+        member_ids: set[str] = set()
+        async for mm in members_cur:
+            member_ids.add(mm["user_id"])
+
         cur = _db.spot_group_challenges.find({"group_id": gid}).sort("fired_at_utc", -1).limit(20)
-        out = []
+        challenges = []
         async for c in cur:
+            challenges.append(c)
+
+        # Phase 3 — for each challenge, attach the photos members posted
+        # for that target_object since the anchor fired (response window
+        # closes at the NEXT challenge's fired_at_utc, or now if it's the
+        # latest one).
+        out = []
+        for i, c in enumerate(challenges):
+            fired_at = c.get("fired_at_utc")
+            # next-challenge boundary (challenges are sorted DESC, so the
+            # PREVIOUS index = the next-newer one, which closes this
+            # challenge's response window).
+            next_boundary_iso = None
+            if i > 0:
+                next_boundary_iso = challenges[i - 1].get("fired_at_utc")
+            target_object = c.get("target_object")
+            responses = []
+            if fired_at and target_object:
+                q = {
+                    "user_id": {"$in": list(member_ids)},
+                    "target_object": target_object,
+                    "taken_at": {"$gte": fired_at},
+                    "success": True,
+                }
+                if next_boundary_iso:
+                    q["taken_at"]["$lt"] = next_boundary_iso
+                resp_cur = _db.spot_completions.find(
+                    q,
+                    {
+                        "_id": 0, "id": 1, "user_id": 1, "photo_base64": 1,
+                        "taken_at": 1, "remaining_seconds": 1,
+                    },
+                ).sort("taken_at", 1).limit(50)
+                async for r in resp_cur:
+                    responses.append({
+                        "id": r.get("id"),
+                        "user_id": r.get("user_id"),
+                        "photo_base64": r.get("photo_base64"),
+                        "taken_at": r.get("taken_at"),
+                        "remaining_seconds": r.get("remaining_seconds"),
+                    })
             out.append({
                 "id": c["_id"],
                 "group_id": c["group_id"],
                 "anchor_date": c.get("anchor_date"),
                 "anchor_idx": c.get("anchor_idx"),
-                "target_object": c.get("target_object"),
+                "target_object": target_object,
                 "scheduled_at_utc": c.get("scheduled_at_utc"),
-                "fired_at_utc": c.get("fired_at_utc"),
+                "fired_at_utc": fired_at,
                 "recipients_count": len(c.get("recipients") or []),
+                "skipped_sleeping_count": len(c.get("skipped_sleeping") or []),
+                "skipped_work_count": len(c.get("skipped_work") or []),
+                "skipped_night_count": len(c.get("skipped_night") or []),
                 "you_received": user_id in (c.get("recipients") or []),
+                "responses": responses,
+                "response_count": len(responses),
+                "you_responded": any(r.get("user_id") == user_id for r in responses),
             })
         return {"challenges": out}
 

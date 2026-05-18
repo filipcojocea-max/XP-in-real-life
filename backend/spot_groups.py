@@ -45,15 +45,23 @@ logger = logging.getLogger(__name__)
 _db = None
 _now_iso = None
 _friend_ids_fn = None
+# Phase 3 — Availability resolver. Returns one of:
+#   'sleeping'  (in their Adaptive Work-Life Scheduler silence window)
+#   'at_work'   (between shift start_time and work_end_time, when set)
+#   'active'    (awake, not at work)
+# Signature: `availability_fn(prof_dict) -> str`. May be None when not
+# wired (e.g. unit-test shim); the serializer falls back to 'active'.
+_availability_fn = None
 
 MAX_GROUP_SIZE = 8
 
 
-def init_spot_groups(*, db, now_iso, friend_ids_fn):
-    global _db, _now_iso, _friend_ids_fn
+def init_spot_groups(*, db, now_iso, friend_ids_fn, availability_fn=None):
+    global _db, _now_iso, _friend_ids_fn, _availability_fn
     _db = db
     _now_iso = now_iso
     _friend_ids_fn = friend_ids_fn
+    _availability_fn = availability_fn
 
 
 # ───────────────────────── helpers ─────────────────────────
@@ -96,17 +104,54 @@ async def _is_active_member(group_id: str, user_id: str) -> bool:
 async def _serialize_group(g: dict, viewer_id: str) -> dict:
     """Returns the group meta + member list with statuses.
 
-    For Phase 1 statuses are: 'active' | 'left'.
-    Phase 2 will derive 'sleeping' / 'at_work' from each member's
-    profile.work_schedule + sleep_schedule + timezone.
+    Phase 3 — member.status is now one of:
+      'left'      — soft-left the group (left_at != null)
+      'sleeping'  — in their Adaptive Work-Life Scheduler sleep window
+      'at_work'   — between shift start_time and work_end_time
+      'active'    — awake, off-work (the only state that receives a
+                    challenge push if also in daylight)
+    The 'sleeping' and 'at_work' resolution is owned by the wired
+    `_availability_fn(prof_dict)` callback set in init_spot_groups().
     """
     members_cur = _db.spot_group_members.find(
         {"group_id": g["_id"]}
     ).sort([("joined_at", 1)])
     members = []
+    # Hydrate every member's PROFILE in one shot so we can pass the
+    # full shift_schedule + timezone payload to the availability helper.
+    member_ids_pending: list[str] = []
+    raw_rows: list[dict] = []
     async for m in members_cur:
+        raw_rows.append(m)
+        if not m.get("left_at"):
+            member_ids_pending.append(m["user_id"])
+    profs_full: dict[str, dict] = {}
+    if member_ids_pending:
+        profs_cur = _db.profile.find(
+            {"_id": {"$in": member_ids_pending}},
+            {
+                "full_name": 1, "name": 1, "avatar_base64": 1,
+                "timezone": 1, "shift_schedule": 1,
+                "day_start_time": 1, "wake_time": 1,
+            },
+        )
+        async for pf in profs_cur:
+            profs_full[pf["_id"]] = pf
+
+    for m in raw_rows:
         prof = await _profile_summary(m["user_id"])
-        status = "left" if m.get("left_at") else "active"
+        if m.get("left_at"):
+            status = "left"
+        else:
+            status = "active"
+            if _availability_fn is not None:
+                try:
+                    pf = profs_full.get(m["user_id"]) or {}
+                    s = _availability_fn(pf)
+                    if s in ("sleeping", "at_work", "active"):
+                        status = s
+                except Exception as e:
+                    logger.warning("[spot_groups.avail] %s: %s", m["user_id"], e)
         members.append({
             "user_id": m["user_id"],
             "name": prof["name"],
@@ -117,7 +162,9 @@ async def _serialize_group(g: dict, viewer_id: str) -> dict:
             "joined_at": m.get("joined_at"),
             "left_at": m.get("left_at"),
         })
-    active_count = sum(1 for m in members if m["status"] == "active")
+    # active_count must remain ANY non-left member (includes
+    # sleeping/at_work) — they still count toward the 8-player cap.
+    active_count = sum(1 for m in members if m["status"] != "left")
     return {
         "id": g["_id"],
         "name": g.get("name") or "Spot Group",
@@ -128,7 +175,7 @@ async def _serialize_group(g: dict, viewer_id: str) -> dict:
         "member_count": active_count,
         "max_members": MAX_GROUP_SIZE,
         "viewer_is_member": any(
-            m["user_id"] == viewer_id and m["status"] == "active" for m in members
+            m["user_id"] == viewer_id and m["status"] != "left" for m in members
         ),
         "members": members,
     }
