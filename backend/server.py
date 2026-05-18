@@ -5199,15 +5199,11 @@ async def spot_comment(entry_id: str, body: SpotCommentPayload, user_id: str = D
     return {"comments": (e2 or {}).get("comments", [])}
 
 
-@api_router.get("/spot/{entry_id}")
-async def spot_entry_detail(entry_id: str, user_id: str = Depends(get_user_or_legacy)):
-    # Reserved subpaths shadow this catch-all. Defer to whichever sub-router
-    # owns them (e.g. spot_groups). Without this guard FastAPI matches this
-    # route FIRST in registration order and the new permanent-group list
-    # endpoint (GET /spot/groups) becomes unreachable, returning 404
-    # "Photo not found" instead of the real group list.
-    if entry_id in {"groups", "match", "object", "check", "edit", "complete", "feed", "random-toggle"}:
-        raise HTTPException(404, "Not found")
+@api_router.get("/spot/photo/{entry_id}")
+async def spot_entry_detail(
+    entry_id: str,
+    user_id: str = Depends(get_user_or_legacy),
+):
     e = await db.spot_completions.find_one({"id": entry_id}, {"_id": 0})
     if not e:
         raise HTTPException(404, "Photo not found")

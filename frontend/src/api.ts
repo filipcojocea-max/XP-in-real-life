@@ -765,7 +765,7 @@ export const api = {
     ),
   spotFeed: (limit = 50) =>
     req<{ entries: SpotEntry[]; count: number }>(`/spot/feed?limit=${limit}`),
-  spotEntry: (id: string) => req<SpotEntry>(`/spot/${id}`),
+  spotEntry: (id: string) => req<SpotEntry>(`/spot/photo/${id}`),
   spotLike: (id: string) =>
     req<{ like_count: number; liked_by_you: boolean }>(`/spot/${id}/like`, {
       method: 'POST',
