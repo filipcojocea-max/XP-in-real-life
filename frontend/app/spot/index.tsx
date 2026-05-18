@@ -163,11 +163,28 @@ export default function SpotHub() {
           />
         </View>
 
-        {/* Mode 3 — REMOVED in Phase 4. The legacy "Spot with Friends"
-            entry pointed to the one-off /spot/multiplayer match flow.
-            Permanent Groups (created via the "MY GROUPS" section below
-            with the "NEW" button → /spot/groups/new) is now the ONLY
-            multiplayer entry point per the user spec (Option 5A). */}
+        {/* Mode 3 — "Spot with Friends" entrance. Tapping opens the
+            dedicated screen at /spot/friends which hosts the MY GROUPS
+            list + "NEW" button (Phase 4). The legacy one-off match
+            flow is gone — every multiplayer interaction now goes
+            through Permanent Groups. */}
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onPress={() => router.push('/spot/friends' as any)}
+          testID="spot-mode-friends"
+          style={styles.modeCard}
+        >
+          <View style={[styles.modeIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '88' }]}>
+            <Ionicons name="people" size={26} color={colors.cyan} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.modeTitle}>Spot with Friends</Text>
+            <Text style={styles.modeDesc}>
+              Invite friends to a 2-min lobby. Whoever spots the object the most wins +5 SP. Losers −1 SP.
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={colors.cyan} />
+        </TouchableOpacity>
 
         {/* Mode 4: Admin/Creator-only — Test & Train AI. Hidden for
             everyone else. Tapping launches the dedicated training
@@ -205,50 +222,11 @@ export default function SpotHub() {
           </View>
         </View>
 
-        {/* ── v1.0.29 Phase 1: Permanent Groups ────────────────── */}
-        <View style={styles.groupsHeader}>
-          <Text style={styles.sectionLabel}>MY GROUPS</Text>
-          <TouchableOpacity
-            onPress={() => router.push('/spot/groups/new' as any)}
-            style={styles.newGroupBtn}
-            activeOpacity={0.8}
-            testID="spot-new-group"
-          >
-            <Ionicons name="add" size={14} color={colors.amber} />
-            <Text style={styles.newGroupText}>NEW</Text>
-          </TouchableOpacity>
-        </View>
-        {groups.length === 0 ? (
-          <Text style={styles.groupsEmpty}>
-            No permanent groups yet. Tap NEW to start one with up to 8 friends.
-          </Text>
-        ) : (
-          groups.map((g) => (
-            <TouchableOpacity
-              key={g.id}
-              onPress={() => router.push(`/spot/groups/${g.id}` as any)}
-              activeOpacity={0.8}
-              style={styles.groupRow}
-              testID={`spot-group-row-${g.id}`}
-            >
-              <View style={[styles.groupIcon, { backgroundColor: colors.amber + '22' }]}>
-                <Ionicons name="people" size={20} color={colors.amber} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.groupName} numberOfLines={1}>{g.name}</Text>
-                <Text style={styles.groupMeta} numberOfLines={1}>
-                  {g.member_count} of {g.max_members} player{g.member_count === 1 ? '' : 's'}
-                  {(g as any).pending_count > 0
-                    ? ` · ${(g as any).pending_count} pending`
-                    : ((g as any).started || g.auto_challenge_on)
-                      ? ' · game on'
-                      : ' · lobby'}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </TouchableOpacity>
-          ))
-        )}
+        {/* MY GROUPS section has been moved into the dedicated
+            /spot/friends screen (tap the "Spot with Friends" card
+            above to reach it). Keeping the parent Spot screen focused
+            on the 3 main play modes — matches the design spec the user
+            confirmed via mockup screenshot. */}
 
         {/* Solo feed — now rendered as COMPACT TABS per spec. */}
         <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>RECENT SPOTS</Text>
