@@ -36,8 +36,11 @@ type GroupMember = {
   user_id: string;
   name: string;
   avatar_base64?: string | null;
-  status: 'active' | 'left' | 'sleeping' | 'at_work';
+  // Phase 4 — full status enum.
+  status: 'active' | 'left' | 'sleeping' | 'at_work' | 'pending' | 'off';
   role: 'owner' | 'member';
+  notifications_on?: boolean;
+  accepted_at?: string | null;
   joined_at?: string | null;
   left_at?: string | null;
 };
@@ -47,9 +50,16 @@ type Group = {
   name: string;
   owner_id: string;
   auto_challenge_on: boolean;
+  // Phase 4 — lobby/game lifecycle.
+  started: boolean;
+  started_at?: string | null;
   member_count: number;
+  pending_count: number;
+  accepted_count: number;
+  all_accepted: boolean;
   max_members: number;
   viewer_is_member: boolean;
+  viewer_status: GroupMember['status'] | 'none';
   members: GroupMember[];
 };
 
@@ -64,6 +74,22 @@ function StatusBadge({ status, left_at }: { status: GroupMember['status']; left_
         <Text style={[styles.badgeText, { color: '#94a3b8' }]} numberOfLines={1}>
           Left{when ? ` ${when}` : ''}
         </Text>
+      </View>
+    );
+  }
+  if (status === 'pending') {
+    return (
+      <View style={[styles.badge, { borderColor: '#f59e0b', backgroundColor: '#f59e0b22' }]}>
+        <Ionicons name="time-outline" size={10} color="#f59e0b" />
+        <Text style={[styles.badgeText, { color: '#f59e0b' }]}>Pending invite</Text>
+      </View>
+    );
+  }
+  if (status === 'off') {
+    return (
+      <View style={[styles.badge, { borderColor: '#94a3b8', backgroundColor: '#94a3b822' }]}>
+        <Ionicons name="notifications-off-outline" size={10} color="#94a3b8" />
+        <Text style={[styles.badgeText, { color: '#94a3b8' }]}>Turned off from the group</Text>
       </View>
     );
   }
@@ -124,6 +150,15 @@ export default function SpotGroupDetail() {
     }>;
     response_count?: number;
     you_responded?: boolean;
+    // Phase 4 — round window + XP result.
+    round_ends_at_utc?: string;
+    resolved?: boolean;
+    winners?: string[];
+    losers?: string[];
+    xp_per_winner?: number;
+    xp_per_loser?: number;
+    you_won?: boolean;
+    you_lost?: boolean;
   }>>([]);
   // Phase 3 — full-screen photo viewer (Option 6B: simple Modal +
   // resizeMode='contain', no zoom). The viewer overlays the entire
@@ -156,11 +191,53 @@ export default function SpotGroupDetail() {
 
   useEffect(() => { load(); }, [load]);
 
-  const onToggleAuto = async (next: boolean) => {
+  const onAccept = async () => {
     if (!group) return;
     setSaving(true);
     try {
-      const r = await api.spotGroupPatch(group.id, { auto_challenge_on: next });
+      const r = await api.spotGroupAccept(group.id);
+      setGroup(r.group as Group);
+    } catch (e: any) {
+      showAlert("Couldn't accept", String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onDecline = async () => {
+    if (!group) return;
+    const ok = await showConfirm(
+      'Decline this invite?',
+      `You won't join "${group.name}". The other members won't be notified.`,
+      { confirmText: 'Decline', cancelText: 'Cancel', destructive: true },
+    );
+    if (!ok) return;
+    try {
+      await api.spotGroupDecline(group.id);
+      router.back();
+    } catch (e: any) {
+      showAlert("Couldn't decline", String(e?.message || e));
+    }
+  };
+
+  const onStartGame = async () => {
+    if (!group) return;
+    setSaving(true);
+    try {
+      const r = await api.spotGroupStart(group.id);
+      setGroup(r.group as Group);
+    } catch (e: any) {
+      showAlert("Couldn't start the game", String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onToggleSelf = async (next: boolean) => {
+    if (!group) return;
+    setSaving(true);
+    try {
+      const r = await api.spotGroupNotifications(group.id, next);
       setGroup(r.group as Group);
     } catch (e: any) {
       showAlert("Couldn't save", String(e?.message || e));
@@ -240,44 +317,86 @@ export default function SpotGroupDetail() {
           <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.amber} />
         }
       >
-        {/* Auto-challenge toggle */}
-        <View style={styles.toggleCard}>
-          <View style={{ flex: 1, paddingRight: 8 }}>
-            <Text style={styles.toggleTitle}>Spot random objects at random times</Text>
-            <Text style={styles.toggleBody}>
-              When on, the app sends 3 surprise challenges per day to everyone in this group at the
-              exact same moment — daylight-only in each player&apos;s timezone, with a minimum of
-              1.5h between challenges. Any member can toggle this.
+        {/* Phase 4 lifecycle — top card varies by state:
+              (a) viewer is pending → Accept + Decline
+              (b) accepted but game not started → Start new game CTA +
+                  pending-count hint (disabled until all_accepted)
+              (c) game started → Rules panel (3/day, 2-min rounds, XP) */}
+        {group.viewer_status === 'pending' ? (
+          <View style={styles.lifeCard}>
+            <Text style={styles.lifeTitle}>You&apos;ve been invited to this group</Text>
+            <Text style={styles.lifeBody}>
+              Accept to join the lobby. Once everyone accepts, any member can tap
+              <Text style={{ fontWeight: '900' }}> Start new game</Text> to begin
+              the daily 3-challenge rotation.
             </Text>
+            <View style={styles.lifeBtnRow}>
+              <TouchableOpacity
+                onPress={onAccept}
+                disabled={saving}
+                style={[styles.lifeCta, styles.lifeCtaPrimary, saving && { opacity: 0.5 }]}
+                activeOpacity={0.85}
+                testID="spot-group-accept"
+              >
+                <Ionicons name="checkmark" size={16} color={colors.bg} />
+                <Text style={[styles.lifeCtaText, { color: colors.bg }]}>Accept invite</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={onDecline}
+                disabled={saving}
+                style={[styles.lifeCta, styles.lifeCtaGhost, saving && { opacity: 0.5 }]}
+                activeOpacity={0.85}
+                testID="spot-group-decline"
+              >
+                <Text style={[styles.lifeCtaText, { color: colors.red }]}>Decline</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-          {/* On web, react-native-web's Switch uses an absolutely
-              positioned <input role='switch'> that sits UNDER the
-              container View overlay, so Playwright clicks never reach
-              it. We wrap the Switch in a TouchableOpacity that taps the
-              toggle handler directly. On native this just acts as a
-              slightly larger hit-area; on web it's the ONLY way for an
-              automated test (or even a careful tap) to flip the toggle. */}
-          <TouchableOpacity
-            onPress={() => !saving && onToggleAuto(!group.auto_challenge_on)}
-            disabled={saving}
-            activeOpacity={0.7}
-            testID="spot-group-auto-toggle"
-            accessibilityRole="switch"
-            accessibilityState={{ checked: group.auto_challenge_on, disabled: saving }}
-          >
-            <Switch
-              value={group.auto_challenge_on}
-              onValueChange={onToggleAuto}
-              disabled={saving}
-              thumbColor={group.auto_challenge_on ? colors.amber : '#94a3b8'}
-              trackColor={{ false: '#555', true: colors.amber + '88' }}
-              // pointerEvents='none' lets the TouchableOpacity own the
-              // tap on both platforms — avoids the double-fire bug
-              // where both the Switch AND the wrapper would trigger.
-              pointerEvents="none"
-            />
-          </TouchableOpacity>
-        </View>
+        ) : !group.started ? (
+          <View style={styles.lifeCard}>
+            <Text style={styles.lifeTitle}>Lobby — waiting on players</Text>
+            <Text style={styles.lifeBody}>
+              {group.pending_count > 0
+                ? `${group.pending_count} ${group.pending_count === 1 ? 'invite' : 'invites'} still pending. The Start button unlocks once everyone accepts.`
+                : "Everyone's in! Tap below to start the daily 3-challenge rotation."}
+            </Text>
+            <TouchableOpacity
+              onPress={onStartGame}
+              disabled={saving || !group.all_accepted || group.accepted_count < 2}
+              style={[
+                styles.lifeCta,
+                styles.lifeCtaPrimary,
+                (saving || !group.all_accepted || group.accepted_count < 2) && { opacity: 0.45 },
+                { marginTop: 12 },
+              ]}
+              activeOpacity={0.85}
+              testID="spot-group-start"
+            >
+              <Ionicons name="play" size={16} color={colors.bg} />
+              <Text style={[styles.lifeCtaText, { color: colors.bg }]}>
+                {group.all_accepted ? 'Start new game' : `Waiting for ${group.pending_count}…`}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={styles.lifeCard}>
+            <Text style={styles.lifeTitle}>🎯 Game on — Rules</Text>
+            <View style={{ marginTop: 6 }}>
+              <Text style={styles.rule}>
+                <Text style={styles.ruleNum}>1.</Text> 3 random times per day to find a new object
+              </Text>
+              <Text style={styles.rule}>
+                <Text style={styles.ruleNum}>2.</Text> 2-minute rounds — be quick!
+              </Text>
+              <Text style={styles.rule}>
+                <Text style={styles.ruleNum}>3.</Text> Winner: <Text style={{ color: colors.green, fontWeight: '900' }}>+5 XP per loser</Text>
+              </Text>
+              <Text style={styles.rule}>
+                <Text style={styles.ruleNum}>4.</Text> Loser: <Text style={{ color: colors.red, fontWeight: '900' }}>−1 XP per successful player</Text>
+              </Text>
+            </View>
+          </View>
+        )}
 
         <View style={styles.sectionRow}>
           <Text style={styles.sectionLabel}>MEMBERS · {activeCount}/{group.max_members}</Text>
@@ -293,23 +412,50 @@ export default function SpotGroupDetail() {
           </TouchableOpacity>
         </View>
 
-        {group.members.map((m) => (
-          <View key={m.user_id} style={styles.memberRow}>
-            {m.avatar_base64 ? (
-              <Image source={{ uri: `data:image/jpeg;base64,${m.avatar_base64}` }} style={styles.avatar} />
-            ) : (
-              <View style={[styles.avatar, { backgroundColor: colors.amber + '22', alignItems: 'center', justifyContent: 'center' }]}>
-                <Ionicons name="person" size={18} color={colors.amber} />
+        {group.members.map((m) => {
+          // Phase 4 — per-member toggle. Shown ONLY for the viewer's
+          // own row, ONLY when the game has started, AND only if the
+          // viewer is an accepted member (not pending).
+          const isSelf = m.user_id === viewerId;
+          const showSelfToggle = isSelf && group.started && m.status !== 'left' && m.status !== 'pending';
+          return (
+            <View key={m.user_id} style={styles.memberRow}>
+              {m.avatar_base64 ? (
+                <Image source={{ uri: `data:image/jpeg;base64,${m.avatar_base64}` }} style={styles.avatar} />
+              ) : (
+                <View style={[styles.avatar, { backgroundColor: colors.amber + '22', alignItems: 'center', justifyContent: 'center' }]}>
+                  <Ionicons name="person" size={18} color={colors.amber} />
+                </View>
+              )}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.memberName} numberOfLines={1}>
+                  {m.name}{m.role === 'owner' ? ' · Owner' : ''}{isSelf ? ' · You' : ''}
+                </Text>
+                <StatusBadge status={m.status} left_at={m.left_at} />
               </View>
-            )}
-            <View style={{ flex: 1 }}>
-              <Text style={styles.memberName} numberOfLines={1}>
-                {m.name}{m.role === 'owner' ? ' · Owner' : ''}
-              </Text>
-              <StatusBadge status={m.status} left_at={m.left_at} />
+              {showSelfToggle ? (
+                <TouchableOpacity
+                  onPress={() => !saving && onToggleSelf(!(m.notifications_on ?? true))}
+                  disabled={saving}
+                  activeOpacity={0.7}
+                  testID="spot-group-self-toggle"
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: !!m.notifications_on, disabled: saving }}
+                  style={{ marginLeft: 8 }}
+                >
+                  <Switch
+                    value={!!m.notifications_on}
+                    onValueChange={onToggleSelf}
+                    disabled={saving}
+                    thumbColor={m.notifications_on ? colors.amber : '#94a3b8'}
+                    trackColor={{ false: '#555', true: colors.amber + '88' }}
+                    pointerEvents="none"
+                  />
+                </TouchableOpacity>
+              ) : null}
             </View>
-          </View>
-        ))}
+          );
+        })}
 
         {/* Phase 2/3 — Auto-challenge feed. Each challenge shows the
             target object, who got the push (status pill on the right),
@@ -321,9 +467,9 @@ export default function SpotGroupDetail() {
         </Text>
         {challenges.length === 0 ? (
           <Text style={styles.toggleBody}>
-            {group.auto_challenge_on
+            {group.started
               ? "No challenges have fired yet today. The next one will arrive at one of today's 3 random global moments."
-              : "Turn on auto-challenges above to get 3 surprise hunts per day."}
+              : "Once the game starts, challenges will appear here. Wait for all invitees to accept, then tap Start new game above."}
           </Text>
         ) : (
           (() => {
@@ -366,6 +512,19 @@ export default function SpotGroupDetail() {
                       <View style={styles.chBadge}>
                         <Ionicons name="images-outline" size={12} color={colors.amber} />
                         <Text style={styles.chBadgeText}>{c.response_count}</Text>
+                      </View>
+                    ) : null}
+                    {/* Phase 4 — won/lost XP chip on resolved rounds */}
+                    {c.resolved && c.you_won ? (
+                      <View style={[styles.resultChip, { borderColor: colors.green, backgroundColor: colors.green + '22' }]}>
+                        <Ionicons name="trophy" size={11} color={colors.green} />
+                        <Text style={[styles.resultChipText, { color: colors.green }]}>+{c.xp_per_winner} XP</Text>
+                      </View>
+                    ) : null}
+                    {c.resolved && c.you_lost ? (
+                      <View style={[styles.resultChip, { borderColor: colors.red, backgroundColor: colors.red + '22' }]}>
+                        <Ionicons name="remove-circle" size={11} color={colors.red} />
+                        <Text style={[styles.resultChipText, { color: colors.red }]}>{c.xp_per_loser} XP</Text>
                       </View>
                     ) : null}
                   </View>
@@ -632,6 +791,32 @@ const styles = StyleSheet.create({
   },
   viewerImage: { width: '100%', height: '100%' },
   viewerCloseHint: { position: 'absolute', top: 50, right: 20, opacity: 0.85 },
+  // Phase 4 lifecycle card (replaces auto-toggle).
+  lifeCard: {
+    backgroundColor: colors.surface, borderRadius: radii.md,
+    borderWidth: 1, borderColor: colors.amber + '55',
+    padding: spacing.md, marginBottom: spacing.md,
+  },
+  lifeTitle: { color: colors.text, fontSize: 15, fontWeight: '900', marginBottom: 6 },
+  lifeBody: { color: colors.textMuted, fontSize: 12, lineHeight: 18 },
+  lifeBtnRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  lifeCta: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 12, paddingHorizontal: 16, borderRadius: radii.md,
+    minHeight: 44, flex: 1,
+  },
+  lifeCtaPrimary: { backgroundColor: colors.amber },
+  lifeCtaGhost: { borderWidth: 1, borderColor: colors.red, backgroundColor: 'transparent' },
+  lifeCtaText: { fontSize: 14, fontWeight: '900' },
+  rule: { color: colors.text, fontSize: 13, marginVertical: 4, lineHeight: 18 },
+  ruleNum: { color: colors.amber, fontWeight: '900' },
+  // Phase 4 win/loss XP chip for resolved challenges.
+  resultChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 4,
+    borderRadius: radii.pill, borderWidth: 1,
+  },
+  resultChipText: { fontSize: 11, fontWeight: '900' },
   challengeRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingVertical: 8, paddingHorizontal: 10,

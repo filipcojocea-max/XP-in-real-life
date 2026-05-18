@@ -462,12 +462,30 @@ export const api = {
     ),
   spotGroupLeave: (gid: string) =>
     req<{ left_at: string }>(`/spot/groups/${gid}/leave`, { method: 'POST' }),
-  spotGroupPatch: (gid: string, patch: { name?: string; auto_challenge_on?: boolean }) =>
+  spotGroupPatch: (gid: string, patch: { name?: string }) =>
     req<{ group: any }>(`/spot/groups/${gid}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
-  // Phase 2 — Auto-Challenge Scheduler
+  // Phase 4 — invite lifecycle + per-member toggle + start.
+  spotGroupAccept: (gid: string) =>
+    req<{ group: any; accepted_at?: string; no_op?: boolean }>(
+      `/spot/groups/${gid}/accept`, { method: 'POST' },
+    ),
+  spotGroupDecline: (gid: string) =>
+    req<{ left_at: string; declined: boolean }>(
+      `/spot/groups/${gid}/decline`, { method: 'POST' },
+    ),
+  spotGroupStart: (gid: string) =>
+    req<{ group: any; started_at?: string; no_op?: boolean }>(
+      `/spot/groups/${gid}/start`, { method: 'POST' },
+    ),
+  spotGroupNotifications: (gid: string, on: boolean) =>
+    req<{ group: any; notifications_on: boolean }>(
+      `/spot/groups/${gid}/notifications`,
+      { method: 'POST', body: JSON.stringify({ on }) },
+    ),
+  // Phase 2/4 — Auto-Challenge Scheduler feed
   spotGroupChallenges: (gid: string) =>
     req<{ challenges: Array<{
       id: string;
@@ -477,6 +495,17 @@ export const api = {
       target_object: string;
       scheduled_at_utc: string;
       fired_at_utc: string;
+      // Phase 4 — round window + result.
+      round_ends_at_utc?: string;
+      round_seconds?: number;
+      resolved?: boolean;
+      resolved_at_utc?: string | null;
+      winners?: string[];
+      losers?: string[];
+      xp_per_winner?: number;
+      xp_per_loser?: number;
+      you_won?: boolean;
+      you_lost?: boolean;
       recipients_count: number;
       // Phase 3 — extra skip-bucket counters.
       skipped_sleeping_count?: number;

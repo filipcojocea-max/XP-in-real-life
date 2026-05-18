@@ -163,24 +163,11 @@ export default function SpotHub() {
           />
         </View>
 
-        {/* Mode 3: Spot the Object — Friends Multiplayer (Phase 2) */}
-        <TouchableOpacity
-          activeOpacity={0.85}
-          onPress={() => router.push('/spot/multiplayer')}
-          testID="spot-mode-multiplayer"
-          style={styles.modeCard}
-        >
-          <View style={[styles.modeIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '88' }]}>
-            <Ionicons name="people" size={26} color={colors.cyan} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.modeTitle}>Spot with Friends</Text>
-            <Text style={styles.modeDesc}>
-              Invite friends to a 2-min lobby. Whoever spots the object the most wins +5 SP. Losers −1 SP.
-            </Text>
-          </View>
-          <Ionicons name="chevron-forward" size={20} color={colors.cyan} />
-        </TouchableOpacity>
+        {/* Mode 3 — REMOVED in Phase 4. The legacy "Spot with Friends"
+            entry pointed to the one-off /spot/multiplayer match flow.
+            Permanent Groups (created via the "MY GROUPS" section below
+            with the "NEW" button → /spot/groups/new) is now the ONLY
+            multiplayer entry point per the user spec (Option 5A). */}
 
         {/* Mode 4: Admin/Creator-only — Test & Train AI. Hidden for
             everyone else. Tapping launches the dedicated training
@@ -250,8 +237,12 @@ export default function SpotHub() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.groupName} numberOfLines={1}>{g.name}</Text>
                 <Text style={styles.groupMeta} numberOfLines={1}>
-                  {g.member_count} of {g.max_members} active
-                  {g.auto_challenge_on ? ' · auto-challenges ON' : ''}
+                  {g.member_count} of {g.max_members} player{g.member_count === 1 ? '' : 's'}
+                  {(g as any).pending_count > 0
+                    ? ` · ${(g as any).pending_count} pending`
+                    : ((g as any).started || g.auto_challenge_on)
+                      ? ' · game on'
+                      : ' · lobby'}
                 </Text>
               </View>
               <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />

@@ -178,7 +178,7 @@ export default function NewSpotGroup() {
           {creating ? (
             <ActivityIndicator color={colors.bg} />
           ) : (
-            <Text style={styles.ctaText}>Create group ({selected.size + 1})</Text>
+            <Text style={styles.ctaText}>Create lobby ({selected.size + 1})</Text>
           )}
         </TouchableOpacity>
       </View>
