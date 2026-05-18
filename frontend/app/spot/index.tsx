@@ -222,7 +222,7 @@ export default function SpotHub() {
         <View style={styles.groupsHeader}>
           <Text style={styles.sectionLabel}>MY GROUPS</Text>
           <TouchableOpacity
-            onPress={() => router.push('/spot/multiplayer/new' as any)}
+            onPress={() => router.push('/spot/groups/new' as any)}
             style={styles.newGroupBtn}
             activeOpacity={0.8}
             testID="spot-new-group"

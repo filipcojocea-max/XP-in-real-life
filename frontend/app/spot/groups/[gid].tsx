@@ -21,7 +21,6 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -29,7 +28,7 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '../../../src/api';
-import { showAlert } from '../../../src/uiAlert';
+import { showAlert, showConfirm } from '../../../src/uiAlert';
 import { colors, radii, spacing } from '../../../src/theme';
 
 type GroupMember = {
@@ -99,7 +98,7 @@ export default function SpotGroupDetail() {
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [friends, setFriends] = useState<{ user_id: string; full_name?: string; name?: string }[]>([]);
+  const [friends, setFriends] = useState<{ user_id: string; name?: string; avatar_base64?: string | null }[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
@@ -132,31 +131,24 @@ export default function SpotGroupDetail() {
 
   const onLeave = async () => {
     if (!group) return;
-    showAlert(
+    const ok = await showConfirm(
       'Leave this group?',
       `You'll stop receiving challenges for "${group.name}". The other members won't be notified.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Leave',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await api.spotGroupLeave(group.id);
-              router.back();
-            } catch (e: any) {
-              showAlert("Couldn't leave", String(e?.message || e));
-            }
-          },
-        },
-      ],
+      { confirmText: 'Leave', cancelText: 'Cancel', destructive: true },
     );
+    if (!ok) return;
+    try {
+      await api.spotGroupLeave(group.id);
+      router.back();
+    } catch (e: any) {
+      showAlert("Couldn't leave", String(e?.message || e));
+    }
   };
 
   const openAdd = async () => {
     setAddOpen(true);
     try {
-      const fs = await api.friends();
+      const fs = await api.listFriends();
       const memberIds = new Set(group?.members.filter((m) => m.status !== 'left').map((m) => m.user_id) || []);
       setFriends((fs.friends || []).filter((f: any) => !memberIds.has(f.user_id)));
     } catch (e: any) {
@@ -292,7 +284,7 @@ export default function SpotGroupDetail() {
                       color={checked ? colors.amber : colors.textMuted}
                     />
                     <Text style={[styles.memberName, { flex: 1 }]} numberOfLines={1}>
-                      {f.full_name || f.name || 'Player'}
+                      {f.name || 'Player'}
                     </Text>
                   </TouchableOpacity>
                 );
