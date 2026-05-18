@@ -9163,7 +9163,7 @@ async def _start_notification_scheduler():
     if _init_notif_scheduler is None:
         return
     try:
-        _init_notif_scheduler(
+        sched = _init_notif_scheduler(
             db=db,
             send_push=_push_send_bool_wrapper,
             pick_motivation=_server_pick_motivation,
@@ -9171,6 +9171,23 @@ async def _start_notification_scheduler():
             # so the spot-surprise tick can skip pushes during sleep.
             is_in_silence=_is_in_silence_window,
         )
+        # Hook the Phase 2 Spot Groups auto-challenge tick into the same
+        # scheduler so we don't spin up a second one.
+        try:
+            from spot_groups_scheduler import spot_groups_auto_tick as _sg_tick
+            if sched is not None:
+                sched.add_job(
+                    _sg_tick,
+                    "interval",
+                    minutes=1,
+                    id="spot_groups_auto_tick",
+                    max_instances=1,
+                    coalesce=True,
+                    replace_existing=True,
+                )
+                logger.info("[spot_groups_scheduler] tick registered (1m)")
+        except Exception:
+            logger.exception("[spot_groups_scheduler] tick registration failed")
     except Exception as e:
         logger.warning("[scheduler] start failed: %s", e)
 
@@ -9535,3 +9552,27 @@ try:
     logger.info("[spot_groups] routes attached")
 except Exception:
     logger.exception("[spot_groups] failed to attach routes")
+
+# ── Spot the Object — Phase 2: Auto-Challenge Scheduler ─────────────
+# Fires 3 random daily anchors to every auto_challenge_on group. The
+# tick is hooked into the same APScheduler that runs the motivation /
+# spot-surprise / streak-warning ticks (see notif_scheduler.py).
+try:
+    from spot_groups_scheduler import (
+        init_spot_groups_scheduler as _init_sg_sched,
+        attach_routes as _attach_sg_sched_routes,
+    )
+    # Pull the daylight helper from notif_scheduler (already configured
+    # with astral + the user's profile.timezone).
+    from notif_scheduler import _user_daylight_today as _ns_user_daylight_today
+    _init_sg_sched(
+        db=db,
+        send_push=_push_send_bool_wrapper,
+        is_admin=_is_admin_user,
+        user_daylight_today=_ns_user_daylight_today,
+        spot_objects=SPOT_OBJECTS,
+    )
+    _attach_sg_sched_routes(app, get_user_or_legacy, get_current_user)
+    logger.info("[spot_groups_scheduler] routes attached")
+except Exception:
+    logger.exception("[spot_groups_scheduler] failed to attach routes")

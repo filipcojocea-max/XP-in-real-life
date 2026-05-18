@@ -467,6 +467,19 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+  // Phase 2 — Auto-Challenge Scheduler
+  spotGroupChallenges: (gid: string) =>
+    req<{ challenges: Array<{
+      id: string;
+      group_id: string;
+      anchor_date: string;
+      anchor_idx: number;
+      target_object: string;
+      scheduled_at_utc: string;
+      fired_at_utc: string;
+      recipients_count: number;
+      you_received: boolean;
+    }> }>(`/spot/groups/${gid}/challenges`),
 
   authResend: (email: string) =>
     req<{ message: string; dev_code?: string }>('/auth/resend', {

@@ -100,12 +100,28 @@ export default function SpotGroupDetail() {
   const [addOpen, setAddOpen] = useState(false);
   const [friends, setFriends] = useState<{ user_id: string; name?: string; avatar_base64?: string | null }[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  // Phase 2 — Auto-challenge history. Empty list when auto_challenge_on
+  // has been off / no anchor has fired yet today.
+  const [challenges, setChallenges] = useState<Array<{
+    id: string;
+    target_object: string;
+    fired_at_utc: string;
+    recipients_count: number;
+    you_received: boolean;
+  }>>([]);
 
   const load = useCallback(async () => {
     if (!gid) return;
     try {
       const r = await api.spotGroupGet(String(gid));
       setGroup(r.group as Group);
+      // Best-effort — don't block detail load if challenges list fails.
+      try {
+        const c = await api.spotGroupChallenges(String(gid));
+        setChallenges(c.challenges || []);
+      } catch {
+        setChallenges([]);
+      }
     } catch (e: any) {
       showAlert("Couldn't load group", String(e?.message || e));
     } finally {
@@ -251,6 +267,45 @@ export default function SpotGroupDetail() {
           </View>
         ))}
 
+        {/* Phase 2 — Auto-challenge history. Surfaces every recent
+            anchor that fired to the group, the target object, and
+            whether the viewer received the push (daylight check). */}
+        <Text style={[styles.sectionLabel, { marginTop: spacing.lg, marginBottom: spacing.sm }]}>
+          RECENT CHALLENGES
+        </Text>
+        {challenges.length === 0 ? (
+          <Text style={styles.toggleBody}>
+            {group.auto_challenge_on
+              ? "No challenges have fired yet today. The next one will arrive at one of today's 3 random global moments."
+              : "Turn on auto-challenges above to get 3 surprise hunts per day."}
+          </Text>
+        ) : (
+          challenges.slice(0, 5).map((c) => (
+            <View key={c.id} style={styles.challengeRow}>
+              <View style={[styles.chIcon, { backgroundColor: c.you_received ? colors.green + '22' : '#94a3b822' }]}>
+                <Ionicons
+                  name={c.you_received ? 'checkmark-circle' : 'moon-outline'}
+                  size={16}
+                  color={c.you_received ? colors.green : '#94a3b8'}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.challengeTitle} numberOfLines={1}>
+                  Find a {c.target_object}
+                </Text>
+                <Text style={styles.challengeMeta} numberOfLines={1}>
+                  {new Date(c.fired_at_utc).toLocaleString(undefined, {
+                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                  })}
+                  {' · '}
+                  {c.recipients_count}/{group.max_members} got it
+                  {c.you_received ? '' : ' · slept through'}
+                </Text>
+              </View>
+            </View>
+          ))
+        )}
+
         <TouchableOpacity onPress={onLeave} style={styles.leaveBtn} activeOpacity={0.85} testID="spot-group-leave">
           <Ionicons name="exit" size={16} color={colors.red} />
           <Text style={styles.leaveBtnText}>Leave this Spot the Object group</Text>
@@ -382,6 +437,15 @@ const styles = StyleSheet.create({
     marginTop: spacing.xl,
   },
   leaveBtnText: { color: colors.red, fontWeight: '900', fontSize: 13, letterSpacing: 0.3 },
+  challengeRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 8, paddingHorizontal: 10,
+    backgroundColor: colors.surface, borderRadius: radii.md,
+    borderWidth: 1, borderColor: colors.border, marginBottom: 6,
+  },
+  chIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  challengeTitle: { color: colors.text, fontWeight: '800', fontSize: 13 },
+  challengeMeta: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.78)', justifyContent: 'center', padding: spacing.lg },
   modalCard: { backgroundColor: colors.surface, borderRadius: radii.lg, padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
   modalTitle: { color: colors.text, fontSize: 18, fontWeight: '900', marginBottom: 4 },
