@@ -406,6 +406,15 @@ def _serialize_match(m: dict, viewer_id: str | None = None) -> dict:
         "expires_at": m.get("expires_at"),
         "found_at": m.get("found_at"),
         "winner": m.get("winner"),
+        # Rule-6 — FFA result fields. winner_user_id surfaces the
+        # ACTUAL finder (matters for FFA where it may differ from the
+        # originally-invited seeker_id). ffa_won_by is non-null only
+        # when this match was finished via Free-For-All.
+        "winner_user_id": m.get("winner_user_id"),
+        "free_for_all": bool(m.get("free_for_all", False)),
+        "free_for_all_started_at": m.get("free_for_all_started_at"),
+        "free_for_all_started_by_reject_of": m.get("free_for_all_started_by_reject_of"),
+        "ffa_won_by": m.get("ffa_won_by"),
         "xp_seeker": int(m.get("xp_seeker", 0)),
         "xp_hider": int(m.get("xp_hider", 0)),
         "hint": m.get("hint"),
