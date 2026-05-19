@@ -4399,6 +4399,12 @@ async def friends_leaderboard(
         prof = await db.profile.find_one({"_id": uid})
         if not prof:
             continue
+        # Rule-1: hide brand-new accounts (total_xp == 0, i.e. "under
+        # Level 1") from the public Leaderboard. The VIEWER themselves
+        # is always shown even if they're at 0 XP — otherwise the
+        # screen would render empty for first-timers and feel broken.
+        if int(prof.get("total_xp", 0) or 0) <= 0 and uid != user_id:
+            continue
         # Use each player's OWN tz so their Mon-Sat window is relative to them
         their_tz = int(prof.get("tz_offset_minutes", tz) or tz)
         weekly_xp = await _sum_week_xp(uid, their_tz, anchor)
@@ -4682,8 +4688,27 @@ class SpotRandomTogglePayload(BaseModel):
 
 @api_router.get("/spot/object")
 async def spot_get_object(user_id: str = Depends(get_user_or_legacy)):
-    """Return a fresh random object for the user to find."""
-    obj = random.choice(SPOT_OBJECTS)
+    """Return the user's next Spot the Object target.
+
+    Uses the global non-repeat queue (challenge_queue.next_item): the
+    same object will never repeat until the entire SPOT_OBJECTS pool
+    has been shown to this player. After every object has been used,
+    the queue auto-reshuffles for the next cycle. Per-user queue stored
+    in `challenge_queues` keyed by 'user:{uid}:spot_solo'."""
+    try:
+        from challenge_queue import next_item as _cq_next
+        picks = await _cq_next(
+            db,
+            scope="user",
+            key=user_id,
+            pool_id="spot_solo",
+            full_pool=SPOT_OBJECTS,
+            count=1,
+        )
+        obj = picks[0] if picks else random.choice(SPOT_OBJECTS)
+    except Exception:
+        logger.exception("[spot_get_object] queue failed, falling back to random")
+        obj = random.choice(SPOT_OBJECTS)
     return {"object": obj, "challenge_id": str(uuid.uuid4())}
 
 
@@ -6772,12 +6797,44 @@ def _today_index(n: int, offset: int = 0) -> int:
 @api_router.get("/confidence/daily")
 async def confidence_daily(user_id: str = Depends(get_user_or_legacy)):
     """Return today's challenge for each non-AI track + the user's
-    completion status for today. The frontend uses this to paint the
-    landing page of the mini-app."""
-    social = CONFIDENCE_SOCIAL_CHALLENGES[_today_index(len(CONFIDENCE_SOCIAL_CHALLENGES))]
-    physical = CONFIDENCE_PHYSICAL_CHALLENGES[_today_index(len(CONFIDENCE_PHYSICAL_CHALLENGES), 3)]
-    gratitude = CONFIDENCE_GRATITUDE_PROMPTS[_today_index(len(CONFIDENCE_GRATITUDE_PROMPTS), 7)]
+    completion status for today.
+
+    Rule-4 — challenges are randomised PER USER ACCOUNT via
+    `challenge_queue.next_item`. Each track has its own queue. The pick
+    is memoised for the UTC day so the same user keeps seeing the same
+    challenge for that day; on the next UTC day the queue advances."""
     today = datetime.utcnow().date().isoformat()
+
+    # Per-user, per-day, per-track memoisation. The queue itself only
+    # advances when we mint a NEW pick — so refreshing the page within
+    # the same day is idempotent.
+    async def _pick(track: str, pool: list[dict]) -> dict:
+        pool_ids = [str(i) for i in range(len(pool))]
+        memo_id = f"{user_id}:{today}:{track}"
+        memo = await db.confidence_today_picks.find_one({"_id": memo_id})
+        if memo:
+            idx = int(memo.get("idx", 0))
+            return pool[idx % len(pool)]
+        try:
+            from challenge_queue import next_item as _cq_next
+            picks = await _cq_next(
+                db, scope="user", key=user_id,
+                pool_id=f"confidence_{track}", full_pool=pool_ids, count=1,
+            )
+            idx = int(picks[0]) if picks else 0
+        except Exception:
+            logger.exception("[confidence.daily] queue failed, falling back to legacy")
+            idx = _today_index(len(pool))
+        await db.confidence_today_picks.update_one(
+            {"_id": memo_id},
+            {"$set": {"user_id": user_id, "date": today, "track": track, "idx": idx}},
+            upsert=True,
+        )
+        return pool[idx % len(pool)]
+
+    social = await _pick("social", CONFIDENCE_SOCIAL_CHALLENGES)
+    physical = await _pick("physical", CONFIDENCE_PHYSICAL_CHALLENGES)
+    gratitude = await _pick("gratitude", CONFIDENCE_GRATITUDE_PROMPTS)
     done = await db.confidence_completions.find(
         {"user_id": user_id, "date": today},
         {"_id": 0, "track": 1},

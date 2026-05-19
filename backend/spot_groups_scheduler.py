@@ -249,13 +249,33 @@ async def _dispatch_anchor_to_group(
 ) -> dict:
     """Fire one anchor to one group. Walk all ACCEPTED members with
     notifications_on=True, push to those currently in daylight AND not
-    sleeping AND not at work, write a spot_group_challenges row. Phase
-    3 — if NO members are eligible, defer this group's copy of the
-    anchor by 1h (up to 3 retries). Phase 4 — pending invitees and
-    members with the toggle OFF are excluded entirely."""
+    sleeping AND not at work, write a spot_group_challenges row.
+
+    Phase 4 / Rule-3 — Each GROUP draws its target object from its OWN
+    non-repeat queue (per-group, scope='group'). The global anchor's
+    `target_object` is therefore only used as a fallback if the queue
+    fetch fails. This reverses the earlier "same object for all groups
+    at one anchor" design (Option 3A) per the user's latest spec:
+    DIFFERENT groups should NEVER have the same object at the same
+    time."""
     gid = group["_id"]
     now_utc = datetime.now(timezone.utc)
     anchor_date = anchor_at_utc.date().isoformat()
+
+    # Per-group queue pick — Rule-3 (each group's own queue).
+    group_target = target_object
+    try:
+        from challenge_queue import next_item as _cq_next
+        picks = await _cq_next(
+            _db,
+            scope="group", key=gid, pool_id="spot_group",
+            full_pool=_spot_objects, count=1,
+        )
+        if picks:
+            group_target = picks[0]
+    except Exception:
+        logger.exception("[spot-auto.dispatch] per-group queue failed, using anchor target")
+    target_object = group_target
 
     defer = await _get_defer_state(gid, anchor_date, anchor_idx)
     if defer["dropped"]:

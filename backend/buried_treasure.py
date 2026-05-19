@@ -888,25 +888,69 @@ def attach_routes(app, get_user_or_legacy):
         if m["state"] != "pending_accept":
             raise HTTPException(400, f"Can't reject — state is {m['state']}.")
         now = _now_iso()
+        # Rule-6: instead of dead-ending the match, switch it to
+        # Free-For-All — any friend of the hider who's not the rejecter
+        # can claim the treasure on a first-come basis. The match stays
+        # in `pending_accept` state but with a `free_for_all=true` flag
+        # so the find endpoint can let any FFA participant win.
         upd = await _db.bt_matches.find_one_and_update(
             {"_id": mid, "state": "pending_accept"},
-            {"$set": {"state": "rejected", "rejected_at": now}},
+            {"$set": {
+                "free_for_all": True,
+                "free_for_all_started_at": now,
+                "free_for_all_started_by_reject_of": user_id,
+            }},
             return_document=True,
         )
         if not upd:
             raise HTTPException(409, "Match state changed — refresh.")
+        # Broadcast push to every friend of the hider (excluding the
+        # rejecter + hider themselves). Best-effort; failures logged.
         try:
             seeker = await _profile_summary(user_id)
-            await _push_to_user(
-                m["hider_id"],
-                "Maybe next time",
-                f"{seeker['name']} declined your challenge.",
-                {"kind": "bt_match_rejected", "match_id": mid,
-                 "channelId": PUSH_CH_BT_INVITE},
+            hider = await _profile_summary(m["hider_id"])
+            recipients: list[str] = []
+            try:
+                fids = await _friend_ids_fn(m["hider_id"]) if callable(_friend_ids_fn) else []
+                recipients = [f for f in fids if f and f != user_id and f != m["hider_id"]]
+            except Exception:
+                recipients = []
+            ffa_msg = (
+                f"⚡ FREE-FOR-ALL! {seeker['name']} declined the hunt. "
+                f"First friend to find {hider['name']}'s treasure wins the XP!"
             )
+            for rid in recipients:
+                try:
+                    await _push_to_user(
+                        rid,
+                        "Free-For-All Treasure!",
+                        ffa_msg,
+                        {
+                            "kind": "bt_match_ffa",
+                            "match_id": mid,
+                            "channelId": PUSH_CH_BT_INVITE,
+                            "sticky": True,
+                        },
+                    )
+                except Exception:
+                    logger.exception("[bt-reject.ffa] push failed to %s", rid)
+            # Also notify the hider so they see what happened.
+            try:
+                await _push_to_user(
+                    m["hider_id"],
+                    "Hunt re-released",
+                    f"{seeker['name']} declined — your treasure is now Free-For-All for {len(recipients)} friend(s).",
+                    {"kind": "bt_match_ffa_hider", "match_id": mid,
+                     "channelId": PUSH_CH_BT_INVITE},
+                )
+            except Exception:
+                logger.exception("[bt-reject.ffa-hider] push failed")
         except Exception:
-            logger.exception("[bt-reject] push failed")
-        return {"match": _serialize_match(upd, user_id)}
+            logger.exception("[bt-reject] FFA broadcast failed")
+        return {
+            "match": _serialize_match(upd, user_id),
+            "free_for_all": True,
+        }
 
     @sub.post("/bt/match/{mid}/cancel")
     async def _match_cancel(mid: str, user_id: str = Depends(get_user_or_legacy)):
@@ -1003,10 +1047,30 @@ def attach_routes(app, get_user_or_legacy):
         user_id: str = Depends(get_user_or_legacy),
     ):
         m = await _load_match_or_404(mid, user_id)
-        if user_id != m["seeker_id"]:
-            raise HTTPException(403, "Only the seeker can claim a find.")
-        if m["state"] != "in_progress":
-            raise HTTPException(400, f"Can't find — state is {m['state']}.")
+        is_ffa = bool(m.get("free_for_all"))
+        # Rule-6 — in Free-For-All mode any friend of the hider can claim
+        # the chest (except the rejecter and the hider themselves). The
+        # match stays in 'pending_accept' state in this branch, so we
+        # widen the allowed states accordingly. In normal mode only the
+        # invited seeker can claim, and the state must be 'in_progress'.
+        if is_ffa:
+            if user_id == m["hider_id"]:
+                raise HTTPException(403, "The hider can't find their own treasure.")
+            if user_id == m.get("free_for_all_started_by_reject_of"):
+                raise HTTPException(403, "You already declined this hunt.")
+            try:
+                fids = await _friend_ids_fn(m["hider_id"]) if callable(_friend_ids_fn) else []
+            except Exception:
+                fids = []
+            if user_id not in set(fids):
+                raise HTTPException(403, "Free-For-All is open to the hider's friends only.")
+            if m["state"] not in ("pending_accept", "in_progress"):
+                raise HTTPException(400, f"Can't find — state is {m['state']}.")
+        else:
+            if user_id != m["seeker_id"]:
+                raise HTTPException(403, "Only the seeker can claim a find.")
+            if m["state"] != "in_progress":
+                raise HTTPException(400, f"Can't find — state is {m['state']}.")
         try:
             lat = float(body.get("lat"))
             lng = float(body.get("lng"))
@@ -1022,11 +1086,16 @@ def attach_routes(app, get_user_or_legacy):
             )
         photo_b64 = (body.get("photo_b64") or body.get("photo_base64") or "")[:500_000] or None
         now = _now_iso()
+        # In FFA the state may be 'pending_accept' — we still flip it to
+        # 'found' atomically. Add `winner_user_id` so the UI can show the
+        # actual finder (not the originally-invited seeker).
+        state_filter = ["pending_accept", "in_progress"] if is_ffa else ["in_progress"]
         upd = await _db.bt_matches.find_one_and_update(
-            {"_id": mid, "state": "in_progress"},
+            {"_id": mid, "state": {"$in": state_filter}},
             {"$set": {
                 "state": "found",
                 "winner": "seeker",
+                "winner_user_id": user_id,
                 "found_at": now,
                 "found_lat": lat,
                 "found_lng": lng,
@@ -1034,6 +1103,7 @@ def attach_routes(app, get_user_or_legacy):
                 "resolved_at": now,
                 "xp_seeker": XP_FIND_SEEKER,
                 "xp_hider": XP_FIND_HIDER,
+                "ffa_won_by": user_id if is_ffa else None,
             }},
             return_document=True,
         )
