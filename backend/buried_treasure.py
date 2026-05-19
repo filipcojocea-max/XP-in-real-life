@@ -848,7 +848,11 @@ def attach_routes(app, get_user_or_legacy):
         m = await _db.bt_matches.find_one({"_id": mid})
         if not m:
             raise HTTPException(404, "Match not found.")
-        if user_id not in (m.get("hider_id"), m.get("seeker_id")):
+        # Rule-6 — in Free-For-All mode, any friend of the hider is
+        # allowed to claim, so we let non-participants through here and
+        # defer the friendship check to /find. Other endpoints (e.g.
+        # /accept, /reject) re-verify the caller's role explicitly.
+        if not m.get("free_for_all") and user_id not in (m.get("hider_id"), m.get("seeker_id")):
             raise HTTPException(403, "Not your match.")
         return m
 
