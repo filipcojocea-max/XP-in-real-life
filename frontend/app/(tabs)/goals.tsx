@@ -89,6 +89,8 @@ export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  // When set to a Goal object, opens the editor in EDIT mode for that goal.
+  const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   // Maps goal_id → toast message currently visible. Auto-clears after 5s.
   const [lockToast, setLockToast] = useState<Record<string, string>>({});
@@ -246,6 +248,12 @@ export default function Goals() {
               <Pressable
                 key={g.id}
                 testID={`goal-row-${g.id}`}
+                onPress={() => {
+                  // Tap-anywhere-on-card → open edit modal. The +/− buttons
+                  // are TouchableOpacity children with their own onPress, so
+                  // taps on them are consumed before reaching this Pressable.
+                  if (!g.completed) setEditingGoal(g);
+                }}
                 onLongPress={() => remove(g)}
                 style={{ marginBottom: spacing.md }}
               >
@@ -330,22 +338,31 @@ export default function Goals() {
         <Text style={styles.hint}>Tip: long-press to delete.</Text>
       </ScrollView>
 
-      <AddGoalModal visible={showAdd} isAdmin={isAdmin} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); load(); }} />
+      <GoalEditorModal
+        visible={showAdd || !!editingGoal}
+        editingGoal={editingGoal}
+        isAdmin={isAdmin}
+        onClose={() => { setShowAdd(false); setEditingGoal(null); }}
+        onSaved={() => { setShowAdd(false); setEditingGoal(null); load(); }}
+      />
     </SafeAreaView>
   );
 }
 
-function AddGoalModal({
+function GoalEditorModal({
   visible,
+  editingGoal,
   onClose,
-  onAdded,
+  onSaved,
   isAdmin,
 }: {
   visible: boolean;
+  editingGoal: Goal | null;
   onClose: () => void;
-  onAdded: () => void;
+  onSaved: () => void;
   isAdmin?: boolean;
 }) {
+  const isEdit = !!editingGoal;
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [area, setArea] = useState<FocusArea>('fitness');
@@ -353,6 +370,9 @@ function AddGoalModal({
   const [unit, setUnit] = useState<DurationUnit>('days');
   const [xp, setXp] = useState<string>('15');
   const [saving, setSaving] = useState(false);
+  // Captures the original unit when EDIT modal opens so we can detect a
+  // timeframe change and surface the reset-warning banner.
+  const [originalUnit, setOriginalUnit] = useState<DurationUnit>('days');
 
   // Sensible default XP per unit (half of cap, rounded to a nice round number)
   const defaultXpFor = useCallback((u: DurationUnit): number => {
@@ -362,15 +382,28 @@ function AddGoalModal({
   }, []);
 
   useEffect(() => {
-    if (visible) {
+    if (!visible) return;
+    if (editingGoal) {
+      // EDIT mode — pre-fill from the goal we're editing.
+      const u = ((editingGoal.unit as DurationUnit) || 'days') as DurationUnit;
+      setTitle(editingGoal.title || '');
+      setDesc(editingGoal.description || '');
+      setArea((editingGoal.focus_area as FocusArea) || 'fitness');
+      setTarget(String(editingGoal.target_value ?? 30));
+      setUnit(u);
+      setOriginalUnit(u);
+      setXp(String(editingGoal.xp_reward ?? defaultXpFor(u)));
+    } else {
+      // CREATE mode — fresh defaults.
       setTitle('');
       setDesc('');
       setArea('fitness');
       setTarget('30');
       setUnit('days');
+      setOriginalUnit('days');
       setXp(String(defaultXpFor('days')));
     }
-  }, [visible, defaultXpFor]);
+  }, [visible, editingGoal, defaultXpFor]);
 
   // Creator/Admin: bypass per-unit XP caps and allow up to 100,000 XP per goal.
   const ADMIN_CAP = 100000;
@@ -414,17 +447,28 @@ function AddGoalModal({
     const xpRequested = Math.max(1, Math.min(cap, parseInt(xp, 10) || defaultXpFor(unit)));
     setSaving(true);
     try {
-      await api.createGoal({
-        title: title.trim(),
-        description: desc.trim(),
-        focus_area: area,
-        target_value: targetN,
-        unit,
-        xp_reward: xpRequested,
-      });
-      onAdded();
+      if (isEdit && editingGoal) {
+        await api.updateGoal(editingGoal.id, {
+          title: title.trim(),
+          description: desc.trim(),
+          focus_area: area,
+          target_value: targetN,
+          unit,
+          xp_reward: xpRequested,
+        });
+      } else {
+        await api.createGoal({
+          title: title.trim(),
+          description: desc.trim(),
+          focus_area: area,
+          target_value: targetN,
+          unit,
+          xp_reward: xpRequested,
+        });
+      }
+      onSaved();
     } catch (e: any) {
-      showAlert('Failed', String(e.message || e));
+      showAlert('Failed', String(e?.detail?.message || e.message || e));
     } finally {
       setSaving(false);
     }
@@ -442,7 +486,16 @@ function AddGoalModal({
           testID="add-goal-modal"
         >
           <View style={styles.handle} />
-          <Text style={styles.sheetTitle}>New Goal</Text>
+          <Text style={styles.sheetTitle}>{isEdit ? 'Edit Goal' : 'New Goal'}</Text>
+
+          {isEdit && unit !== originalUnit ? (
+            <View style={styles.timeframeBanner} testID="goal-timeframe-banner">
+              <Ionicons name="refresh" size={14} color={colors.amber} />
+              <Text style={styles.timeframeBannerText}>
+                Changing duration will reset the countdown.
+              </Text>
+            </View>
+          ) : null}
 
           <Text style={styles.inputLabel}>Title</Text>
           <TextInput
@@ -565,7 +618,7 @@ function AddGoalModal({
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity testID="goal-save-btn" style={[styles.actionBtn, styles.saveBtn]} onPress={save} disabled={saving}>
-              {saving ? <ActivityIndicator color={colors.bg} /> : <Text style={styles.saveText}>Create Goal</Text>}
+              {saving ? <ActivityIndicator color={colors.bg} /> : <Text style={styles.saveText}>{isEdit ? 'Save Changes' : 'Create Goal'}</Text>}
             </TouchableOpacity>
           </View>
         </ScrollView>
@@ -733,6 +786,28 @@ const styles = StyleSheet.create({
   cancelText: { color: colors.textSecondary, fontWeight: '700' },
   saveBtn: { backgroundColor: colors.green },
   saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
+
+  // ── Edit-mode banner when user picks a different duration ─────────
+  timeframeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: radii.md,
+    backgroundColor: colors.amber + '15',
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+    marginTop: spacing.sm,
+    marginBottom: 4,
+  },
+  timeframeBannerText: {
+    color: colors.amber,
+    fontSize: 12,
+    fontWeight: '800',
+    flex: 1,
+    lineHeight: 17,
+  },
 
   xpBadge: {
     flexDirection: 'row',

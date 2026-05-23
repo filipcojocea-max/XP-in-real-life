@@ -1208,6 +1208,18 @@ export const api = {
   }) => req<Goal>('/goals', { method: 'POST', body: JSON.stringify(body) }),
   updateGoalProgress: (id: string, current_value: number) =>
     req<Goal>(`/goals/${id}/progress`, { method: 'POST', body: JSON.stringify({ current_value }) }),
+  updateGoal: (
+    id: string,
+    body: {
+      title?: string;
+      description?: string;
+      current_value?: number;
+      target_value?: number;
+      unit?: string;
+      focus_area?: FocusArea;
+      xp_reward?: number;
+    },
+  ) => req<Goal>(`/goals/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteGoal: (id: string) =>
     req<{ deleted: boolean }>(`/goals/${id}`, { method: 'DELETE' }),
 

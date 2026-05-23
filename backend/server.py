@@ -995,6 +995,9 @@ class GoalUpdate(BaseModel):
     description: Optional[str] = None
     current_value: Optional[int] = None
     target_value: Optional[int] = None
+    unit: Optional[str] = None
+    focus_area: Optional[Literal["social", "fitness", "appearance", "mindset"]] = None
+    xp_reward: Optional[int] = None
 
 
 class GoalProgress(BaseModel):
@@ -2064,6 +2067,62 @@ async def update_goal(goal_id: str, body: GoalUpdate, user_id: str = Depends(get
     update = {k: v for k, v in body.dict().items() if v is not None}
     if not update:
         raise HTTPException(400, "No fields to update")
+
+    # Load the existing goal so we can decide whether the time-frame is
+    # being changed AND validate user-facing caps.
+    existing = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Goal not found")
+    is_admin = await _is_admin_user(user_id)
+
+    # ── Unit normalisation + timeframe-change side-effects ─────────────
+    if "unit" in update:
+        new_unit = (update["unit"] or "days").lower()
+        update["unit"] = new_unit
+        old_unit = (existing.get("unit") or "days").lower()
+
+        # Enforce MAX_ACTIVE_MONTHLY_GOALS=2 cap when switching INTO months
+        # (admins exempt). Don't count the goal being edited itself.
+        if new_unit == "months" and not is_admin and old_unit != "months":
+            monthly_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "months",
+                "id": {"$ne": goal_id},
+            })
+            if monthly_active >= 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "monthly_goal_limit_reached",
+                        "message": (
+                            "You can have up to 2 Monthly goals at once. "
+                            "Finish or delete one before switching this goal "
+                            "to Monthly."
+                        ),
+                        "limit": 2,
+                        "unit": "months",
+                    },
+                )
+
+        # Per user-spec (2026-05-23) — if the time-frame is actually CHANGING,
+        # reset the cycle countdown so the new frame starts "now". Title /
+        # description / target / focus_area / xp_reward edits that keep the
+        # same `unit` do NOT touch the countdown.
+        if new_unit != old_unit:
+            update["created_at"] = now_iso()
+            # Clearing last_completed_at lets the cycle-lockout helper fall
+            # back to the new `created_at` for the first-tick window.
+            update["last_completed_at"] = None
+            update["timeframe_reset_at"] = now_iso()
+
+    # ── XP clamp on edit ──────────────────────────────────────────────
+    # When the user supplies a new xp_reward or changes the unit, re-clamp
+    # against the per-unit cap (admins bypass).
+    if not is_admin and ("xp_reward" in update or "unit" in update):
+        effective_unit = update.get("unit", existing.get("unit") or "days")
+        proposed_xp = update.get("xp_reward", existing.get("xp_reward"))
+        if proposed_xp is not None:
+            update["xp_reward"] = _clamp_goal_xp(effective_unit, int(proposed_xp))
+
     res = await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     if res.matched_count == 0:
         raise HTTPException(404, "Goal not found")
