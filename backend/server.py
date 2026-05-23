@@ -1976,8 +1976,20 @@ def _enrich_goals(goals: list[dict]) -> list[dict]:
 @api_router.get("/goals")
 async def list_goals(user_id: str = Depends(get_user_or_legacy)):
     goals = await db.goals.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
-    goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
-    return {"goals": _enrich_goals(goals)}
+    # Rule (2026-05-23) — sort goals by how OFTEN they get completed:
+    # most-active first. We use `current_value` as the activity proxy
+    # (it increments every time the user logs progress / ticks a
+    # day-on-the-habit). Completed goals drop to the bottom (separate
+    # bucket) so the active board stays clean. Recomputes on every
+    # GET so the order updates "for each new day" automatically.
+    active = [g for g in goals if not g.get("completed")]
+    done = [g for g in goals if g.get("completed")]
+    active.sort(
+        key=lambda g: (int(g.get("current_value", 0) or 0), g.get("created_at", "")),
+        reverse=True,
+    )
+    done.sort(key=lambda g: g.get("completed_at", "") or g.get("created_at", ""), reverse=True)
+    return {"goals": _enrich_goals(active + done)}
 
 
 @api_router.post("/goals")
@@ -1986,6 +1998,10 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
     # don't count toward the limit so users always have room to add more
     # once they finish older ones.
     MAX_ACTIVE_GOALS = 5
+    # Per user-spec 2026-05-23: separately cap MONTHLY-unit goals at 2.
+    # Months goals are heavy commitments (30-day cycles, top XP cap)
+    # so we prevent users from stockpiling them.
+    MAX_ACTIVE_MONTHLY_GOALS = 2
     is_admin = await _is_admin_user(user_id)
     active_count = await db.goals.count_documents({"user_id": user_id, "completed": False})
     if active_count >= MAX_ACTIVE_GOALS and not is_admin:
@@ -1998,6 +2014,24 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
             },
         )
     unit_norm = (body.unit or "days").lower()
+    if unit_norm == "months" and not is_admin:
+        monthly_active = await db.goals.count_documents({
+            "user_id": user_id, "completed": False, "unit": "months",
+        })
+        if monthly_active >= MAX_ACTIVE_MONTHLY_GOALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "monthly_goal_limit_reached",
+                    "message": (
+                        f"You can have up to {MAX_ACTIVE_MONTHLY_GOALS} Monthly "
+                        "goals at once. Finish or delete one before adding a new "
+                        "Monthly goal — Weekly or Daily goals don't count."
+                    ),
+                    "limit": MAX_ACTIVE_MONTHLY_GOALS,
+                    "unit": "months",
+                },
+            )
     xp_reward = body.xp_reward if is_admin else _clamp_goal_xp(unit_norm, body.xp_reward)
     goal = {
         "id": str(uuid.uuid4()),
@@ -4010,7 +4044,21 @@ async def boosts_activate(body: BoostActivatePayload, user_id: str = Depends(get
     prof = await db.profile.find_one({"_id": user_id})
     if not prof:
         raise HTTPException(404, "Profile not found")
-    if not prof.get("boosts_unlocked"):
+
+    # Locate the inventory entry up-front so we can apply the relaxed
+    # gift-bypass: if the user is activating a GIFTED inventory entry
+    # we let them through even when boosts_unlocked is False (the gift
+    # shouldn't depend on the shop being unlocked — per user spec).
+    inv: list = prof.get("boost_inventory") or []
+    pending_entry = None
+    if body.inventory_id:
+        for it in inv:
+            if it.get("id") == body.inventory_id:
+                pending_entry = it
+                break
+    is_gift_activation = bool(pending_entry and pending_entry.get("source") in ("gift", "admin_gift"))
+
+    if not prof.get("boosts_unlocked") and not is_gift_activation:
         raise HTTPException(403, detail={
             "error": "boosts_locked",
             "message": "Enter the unlock code first to access XP boosts.",
@@ -7634,14 +7682,16 @@ async def admin_gift_boost(body: AdminGiftBoostBody, user_id: str = Depends(get_
             "activated": False,
         }
 
-    # Make sure boosts feature is unlocked for the recipient so they can
-    # actually activate the gifted boost without entering an unlock code.
+    # Surface the gifted boost in the recipient's inventory WITHOUT
+    # unlocking the entire Points+ shop (per user-fix 2026-05-18: a
+    # gifted multiplier should be the ONLY one the recipient gains —
+    # they shouldn't get free access to buy/claim every other boost).
+    # The /boosts/activate endpoint has a parallel relaxation that
+    # accepts gift-source inventory entries even when boosts_unlocked
+    # is False.
     await db.profile.update_one(
         {"_id": body.user_id},
-        {
-            "$set": {"boosts_unlocked": True, "boosts_unlocked_at": now_iso()},
-            "$push": {"boost_inventory": entry},
-        },
+        {"$push": {"boost_inventory": entry}},
         upsert=True,
     )
     sender_prof = await db.profile.find_one({"_id": user_id}) or {}
