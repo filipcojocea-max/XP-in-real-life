@@ -32,6 +32,7 @@ export default function ChallengesScreen() {
   const [loading, setLoading] = useState(true);
   const [showChallengeModal, setShowChallengeModal] = useState(false);
   const [showReflectModal, setShowReflectModal] = useState(false);
+  const [lateReflectId, setLateReflectId] = useState<string | null>(null);
   const [showMorningModal, setShowMorningModal] = useState(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [acting, setActing] = useState(false);
@@ -254,10 +255,17 @@ export default function ChallengesScreen() {
             </Text>
           </View>
         ) : (
-          past.map((c) => <PastChallengeCard key={c.id} c={c} onDelete={async () => {
-            await api.challengePastDelete(c.id);
-            await load();
-          }} />)
+          past.map((c) => (
+            <PastChallengeCard
+              key={c.id}
+              c={c}
+              onDelete={async () => {
+                await api.challengePastDelete(c.id);
+                await load();
+              }}
+              onReflect={() => setLateReflectId(c.id)}
+            />
+          ))
         )}
         <View style={{ height: spacing.xl }} />
       </ScrollView>
@@ -341,17 +349,43 @@ export default function ChallengesScreen() {
           await load();
         }}
       />
+
+      {/* ── Late-answer reflection for past auto-uncompleted challenges */}
+      <LateReflectModal
+        completionId={lateReflectId}
+        onClose={() => setLateReflectId(null)}
+        onDone={async () => {
+          setLateReflectId(null);
+          await load();
+        }}
+      />
     </SafeAreaView>
   );
 }
 
+// Reflection prompt copy — used in BOTH the post-completion flow and the
+// late-answer flow for past auto-uncompleted challenges. Keeping these in
+// one place so the wording stays consistent.
+const REFLECT_COPY = {
+  title: 'How did it go?',
+  tagline: 'Reflect on the challenge',
+  completedLabel: "Didn't you complete the challenge?",
+  howLabel: 'How was the challenge?',
+  howPlaceholder: 'A few words about how it felt...',
+  difficultyLabel: 'Was it difficult?',
+  experienceLabel: 'Write down your experience',
+  experiencePlaceholder: 'What did you learn? How did it change your day?',
+  rateLabel: 'How did you like the challenge?',
+};
+
 // ── Past-challenge card with view-more ─────────────────────────────────
-function PastChallengeCard({ c, onDelete }: { c: ChallengeCompletion; onDelete: () => void }) {
+function PastChallengeCard({ c, onDelete, onReflect }: { c: ChallengeCompletion; onDelete: () => void; onReflect: () => void }) {
   const [open, setOpen] = useState(false);
   const dateStr = new Date(c.completed_at).toLocaleDateString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric',
   });
   const isUncompleted = !!c.auto_uncompleted;
+  const canLateAnswer = isUncompleted && !!c.can_answer;
   const accent = isUncompleted ? colors.danger : colors.cyan;
   return (
     <View style={[styles.pastCard, isUncompleted && { borderColor: colors.danger + '55' }]}>
@@ -393,12 +427,32 @@ function PastChallengeCard({ c, onDelete }: { c: ChallengeCompletion; onDelete: 
           <View style={styles.pastDivider} />
 
           {isUncompleted ? (
-            <View style={styles.uncompletedNotice}>
-              <Ionicons name="time" size={14} color={colors.danger} />
-              <Text style={styles.uncompletedNoticeText}>
-                The 24-hour window expired before this challenge was completed.
-              </Text>
-            </View>
+            canLateAnswer ? (
+              <>
+                <View style={styles.uncompletedNotice}>
+                  <Ionicons name="alert-circle" size={14} color={colors.danger} />
+                  <Text style={styles.uncompletedNoticeText}>
+                    You didn't mark this as completed. Reflect on it now to still log it.
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  testID="past-late-reflect-btn"
+                  style={styles.lateReflectBtn}
+                  onPress={onReflect}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons name="create" size={18} color={colors.bg} />
+                  <Text style={styles.lateReflectBtnText}>Reflect on this challenge</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={styles.uncompletedNotice}>
+                <Ionicons name="time" size={14} color={colors.danger} />
+                <Text style={styles.uncompletedNoticeText}>
+                  The 24-hour window expired before this challenge was completed.
+                </Text>
+              </View>
+            )
           ) : (
             <>
               <PastField label="Did you complete it?" value={c.completed ? 'Yes' : 'No'} icon="checkmark-circle" color={c.completed ? colors.green : colors.danger} />
@@ -486,114 +540,289 @@ function ReflectModal({
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.backdrop}
-      >
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <ScrollView
-          style={{ maxHeight: '92%' }}
-          contentContainerStyle={styles.popup}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-          testID="reflect-modal"
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.solidBlackSafe}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.solidBlackBackdrop}
         >
-          <View style={styles.popupHandle} />
-
-          {step === 0 ? (
-            <>
-              <Text style={styles.popupTitle}>How did it go?</Text>
-              <Text style={styles.popupTagline}>Reflect on the challenge</Text>
-
-              <Text style={styles.formLabel}>Did you complete the challenge?</Text>
-              <View style={styles.choiceRow}>
-                <ChoiceChip active={completed === 'yes'} label="Yes ✓" onPress={() => setCompleted('yes')} testID="reflect-completed-yes" />
-                <ChoiceChip active={completed === 'no'}  label="No"    onPress={() => setCompleted('no')}  testID="reflect-completed-no" />
-              </View>
-
-              <Text style={styles.formLabel}>How was the challenge?</Text>
-              <TextInput
-                testID="reflect-how"
-                placeholder="A few words about how it felt..."
-                placeholderTextColor={colors.textMuted}
-                style={[styles.formInput, { minHeight: 60 }]}
-                multiline
-                value={howText}
-                onChangeText={setHowText}
-              />
-
-              <Text style={styles.formLabel}>Was it difficult?</Text>
-              <View style={styles.choiceRow}>
-                <ChoiceChip active={difficulty === 'easy'}      label="😌 Easy (30 XP)"        onPress={() => setDifficulty('easy')}      testID="reflect-difficulty-easy" />
-                <ChoiceChip active={difficulty === 'difficult'} label="🔥 Difficult (60 XP)" onPress={() => setDifficulty('difficult')} testID="reflect-difficulty-difficult" />
-              </View>
-
-              <Text style={styles.formLabel}>Write down your experience</Text>
-              <TextInput
-                testID="reflect-experience"
-                placeholder="What did you learn? How did it change your day?"
-                placeholderTextColor={colors.textMuted}
-                style={[styles.formInput, { minHeight: 90 }]}
-                multiline
-                value={experience}
-                onChangeText={setExperience}
-              />
-
-              <Text style={styles.formLabel}>Did you like this challenge?</Text>
-              <View style={styles.starsRow}>
-                {[1, 2, 3, 4, 5].map((s) => (
-                  <TouchableOpacity
-                    key={s}
-                    testID={`reflect-rating-${s}`}
-                    onPress={() => setRating(s)}
-                    style={styles.starBtn}
-                  >
-                    <Ionicons
-                      name={s <= rating ? 'star' : 'star-outline'}
-                      size={32}
-                      color={colors.amber}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <TouchableOpacity
-                testID="reflect-submit"
-                style={[styles.acceptBtn, submitting && { opacity: 0.6 }]}
-                disabled={submitting}
-                onPress={submit}
-              >
-                {submitting ? <ActivityIndicator color={colors.bg} /> : (
-                  <>
-                    <Ionicons name="checkmark-done" size={18} color={colors.bg} />
-                    <Text style={styles.acceptBtnText}>Submit Reflection</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </>
-          ) : (
-            <View style={{ alignItems: 'center', paddingVertical: spacing.lg }}>
-              <View style={[styles.popupIconRow]}>
-                <View style={[styles.challengeIconBubble, { width: 64, height: 64, borderRadius: 32, backgroundColor: colors.green + '22', borderColor: colors.green + '55' }]}>
-                  <Ionicons name="trophy" size={32} color={colors.green} />
-                </View>
-              </View>
-              <Text style={styles.successTitle}>Challenge Crushed! 🎉</Text>
-              <Text style={[styles.popupDesc, { textAlign: 'center' }]}>
-                You earned <Text style={{ color: colors.amber, fontWeight: '900' }}>+{awarded} XP</Text> for completing today's challenge.
-              </Text>
-              <TouchableOpacity style={styles.acceptBtn} onPress={onDone}>
-                <Ionicons name="checkmark-circle" size={18} color={colors.bg} />
-                <Text style={styles.acceptBtnText}>Done</Text>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.solidPopup}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            testID="reflect-modal"
+          >
+            <View style={styles.solidPopupHeader}>
+              <TouchableOpacity onPress={onClose} style={styles.solidPopupCloseBtn} testID="reflect-modal-close">
+                <Ionicons name="close" size={24} color={colors.text} />
               </TouchableOpacity>
             </View>
-          )}
-        </ScrollView>
-      </KeyboardAvoidingView>
+
+            {step === 0 ? (
+              <>
+                <Text style={styles.popupTitle}>{REFLECT_COPY.title}</Text>
+                <Text style={styles.popupTagline}>{REFLECT_COPY.tagline}</Text>
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.completedLabel}</Text>
+                <View style={styles.choiceRow}>
+                  <ChoiceChip active={completed === 'yes'} label="Yes ✓" onPress={() => setCompleted('yes')} testID="reflect-completed-yes" />
+                  <ChoiceChip active={completed === 'no'}  label="No"    onPress={() => setCompleted('no')}  testID="reflect-completed-no" />
+                </View>
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.howLabel}</Text>
+                <TextInput
+                  testID="reflect-how"
+                  placeholder={REFLECT_COPY.howPlaceholder}
+                  placeholderTextColor={colors.textMuted}
+                  style={[styles.formInput, { minHeight: 60 }]}
+                  multiline
+                  value={howText}
+                  onChangeText={setHowText}
+                />
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.difficultyLabel}</Text>
+                <View style={styles.choiceRow}>
+                  <ChoiceChip active={difficulty === 'easy'}      label="😌 Easy (30 XP)"        onPress={() => setDifficulty('easy')}      testID="reflect-difficulty-easy" />
+                  <ChoiceChip active={difficulty === 'difficult'} label="🔥 Difficult (60 XP)" onPress={() => setDifficulty('difficult')} testID="reflect-difficulty-difficult" />
+                </View>
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.experienceLabel}</Text>
+                <TextInput
+                  testID="reflect-experience"
+                  placeholder={REFLECT_COPY.experiencePlaceholder}
+                  placeholderTextColor={colors.textMuted}
+                  style={[styles.formInput, { minHeight: 90 }]}
+                  multiline
+                  value={experience}
+                  onChangeText={setExperience}
+                />
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.rateLabel}</Text>
+                <View style={styles.starsRow}>
+                  {[1, 2, 3, 4, 5].map((s) => (
+                    <TouchableOpacity
+                      key={s}
+                      testID={`reflect-rating-${s}`}
+                      onPress={() => setRating(s)}
+                      style={styles.starBtn}
+                    >
+                      <Ionicons
+                        name={s <= rating ? 'star' : 'star-outline'}
+                        size={32}
+                        color={colors.amber}
+                      />
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <TouchableOpacity
+                  testID="reflect-submit"
+                  style={[styles.acceptBtn, submitting && { opacity: 0.6 }]}
+                  disabled={submitting}
+                  onPress={submit}
+                >
+                  {submitting ? <ActivityIndicator color={colors.bg} /> : (
+                    <>
+                      <Ionicons name="checkmark-done" size={18} color={colors.bg} />
+                      <Text style={styles.acceptBtnText}>Submit Reflection</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={styles.successWrap}>
+                <View style={[styles.challengeIconBubble, { width: 84, height: 84, borderRadius: 42, backgroundColor: colors.green + '22', borderColor: colors.green + '55' }]}>
+                  <Ionicons name="trophy" size={44} color={colors.green} />
+                </View>
+                <Text style={styles.successTitle}>Challenge Crushed! 🎉</Text>
+                <Text style={[styles.popupDesc, { textAlign: 'center' }]}>
+                  You earned <Text style={{ color: colors.amber, fontWeight: '900' }}>+{awarded} XP</Text> for completing today's challenge.
+                </Text>
+                <TouchableOpacity style={styles.bigDoneBtn} onPress={onDone} testID="reflect-done-btn">
+                  <Ionicons name="checkmark-circle" size={24} color={colors.bg} />
+                  <Text style={styles.bigDoneBtnText}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     </Modal>
   );
 }
+// ── Late-answer reflection modal ────────────────────────────────────
+// Same prompts as ReflectModal but POSTs to /challenge/past/{id}/answer.
+// Mounted with `completionId` (string | null) — appears whenever non-null.
+function LateReflectModal({
+  completionId, onClose, onDone,
+}: { completionId: string | null; onClose: () => void; onDone: () => void }) {
+  const [completed, setCompleted] = useState<'yes' | 'no'>('no');
+  const [howText, setHowText] = useState('');
+  const [difficulty, setDifficulty] = useState<'easy' | 'difficult'>('easy');
+  const [experience, setExperience] = useState('');
+  const [rating, setRating] = useState(5);
+  const [submitting, setSubmitting] = useState(false);
+  const [step, setStep] = useState(0);
+  const [awarded, setAwarded] = useState(0);
+
+  const visible = !!completionId;
+
+  useEffect(() => {
+    if (visible) {
+      // Reset to a sensible default for a previously-uncompleted challenge.
+      setCompleted('no');
+      setHowText('');
+      setDifficulty('easy');
+      setExperience('');
+      setRating(5);
+      setStep(0);
+      setAwarded(0);
+    }
+  }, [visible]);
+
+  const submit = async () => {
+    if (!completionId) return;
+    setSubmitting(true);
+    try {
+      const r = await api.challengePastAnswer(completionId, {
+        completed: completed === 'yes',
+        how_text: howText,
+        difficulty,
+        experience_text: experience,
+        rating,
+      });
+      setAwarded(r.awarded_xp);
+      setStep(1);
+    } catch (e: any) {
+      showAlert('Could not submit', String(e?.message || e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.solidBlackSafe}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.solidBlackBackdrop}
+        >
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.solidPopup}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            testID="late-reflect-modal"
+          >
+            <View style={styles.solidPopupHeader}>
+              <TouchableOpacity onPress={onClose} style={styles.solidPopupCloseBtn} testID="late-reflect-modal-close">
+                <Ionicons name="close" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+
+            {step === 0 ? (
+              <>
+                <Text style={styles.popupTitle}>{REFLECT_COPY.title}</Text>
+                <Text style={styles.popupTagline}>{REFLECT_COPY.tagline}</Text>
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.completedLabel}</Text>
+                <View style={styles.choiceRow}>
+                  <ChoiceChip active={completed === 'yes'} label="Yes ✓" onPress={() => setCompleted('yes')} testID="late-reflect-completed-yes" />
+                  <ChoiceChip active={completed === 'no'}  label="No"    onPress={() => setCompleted('no')}  testID="late-reflect-completed-no" />
+                </View>
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.howLabel}</Text>
+                <TextInput
+                  testID="late-reflect-how"
+                  placeholder={REFLECT_COPY.howPlaceholder}
+                  placeholderTextColor={colors.textMuted}
+                  style={[styles.formInput, { minHeight: 60 }]}
+                  multiline
+                  value={howText}
+                  onChangeText={setHowText}
+                />
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.difficultyLabel}</Text>
+                <View style={styles.choiceRow}>
+                  <ChoiceChip active={difficulty === 'easy'}      label="😌 Easy (30 XP)"        onPress={() => setDifficulty('easy')}      testID="late-reflect-difficulty-easy" />
+                  <ChoiceChip active={difficulty === 'difficult'} label="🔥 Difficult (60 XP)" onPress={() => setDifficulty('difficult')} testID="late-reflect-difficulty-difficult" />
+                </View>
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.experienceLabel}</Text>
+                <TextInput
+                  testID="late-reflect-experience"
+                  placeholder={REFLECT_COPY.experiencePlaceholder}
+                  placeholderTextColor={colors.textMuted}
+                  style={[styles.formInput, { minHeight: 90 }]}
+                  multiline
+                  value={experience}
+                  onChangeText={setExperience}
+                />
+
+                <Text style={styles.formLabel}>{REFLECT_COPY.rateLabel}</Text>
+                <View style={styles.starsRow}>
+                  {[1, 2, 3, 4, 5].map((s) => (
+                    <TouchableOpacity
+                      key={s}
+                      testID={`late-reflect-rating-${s}`}
+                      onPress={() => setRating(s)}
+                      style={styles.starBtn}
+                    >
+                      <Ionicons
+                        name={s <= rating ? 'star' : 'star-outline'}
+                        size={32}
+                        color={colors.amber}
+                      />
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <TouchableOpacity
+                  testID="late-reflect-submit"
+                  style={[styles.acceptBtn, submitting && { opacity: 0.6 }]}
+                  disabled={submitting}
+                  onPress={submit}
+                >
+                  {submitting ? <ActivityIndicator color={colors.bg} /> : (
+                    <>
+                      <Ionicons name="checkmark-done" size={18} color={colors.bg} />
+                      <Text style={styles.acceptBtnText}>Submit Reflection</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={styles.successWrap}>
+                <View style={[styles.challengeIconBubble, { width: 84, height: 84, borderRadius: 42, backgroundColor: (awarded > 0 ? colors.green : colors.cyan) + '22', borderColor: (awarded > 0 ? colors.green : colors.cyan) + '55' }]}>
+                  <Ionicons name={awarded > 0 ? 'trophy' : 'checkmark-circle'} size={44} color={awarded > 0 ? colors.green : colors.cyan} />
+                </View>
+                <Text style={styles.successTitle}>
+                  {awarded > 0 ? 'Late Credit Logged! 🎉' : 'Reflection Saved'}
+                </Text>
+                <Text style={[styles.popupDesc, { textAlign: 'center' }]}>
+                  {awarded > 0 ? (
+                    <>
+                      You earned <Text style={{ color: colors.amber, fontWeight: '900' }}>+{awarded} XP</Text> for completing this challenge.
+                    </>
+                  ) : (
+                    <>Thanks for reflecting — your notes have been saved.</>
+                  )}
+                </Text>
+                <TouchableOpacity style={styles.bigDoneBtn} onPress={onDone} testID="late-reflect-done-btn">
+                  <Ionicons name="checkmark-circle" size={24} color={colors.bg} />
+                  <Text style={styles.bigDoneBtnText}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+
 
 function ChoiceChip({ active, label, onPress, testID }: { active: boolean; label: string; onPress: () => void; testID?: string }) {
   return (
@@ -1106,5 +1335,80 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     letterSpacing: -0.5,
     marginTop: spacing.sm,
+  },
+
+  // ── Solid-black reflection modal (no transparency) ─────────────────
+  solidBlackSafe: {
+    flex: 1,
+    backgroundColor: colors.bg,
+  },
+  solidBlackBackdrop: {
+    flex: 1,
+    backgroundColor: colors.bg,
+  },
+  solidPopup: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xl,
+    backgroundColor: colors.bg,
+  },
+  solidPopupHeader: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginBottom: spacing.sm,
+  },
+  solidPopupCloseBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+
+  // ── Success step: bigger Done button ──────────────────────────────
+  successWrap: {
+    alignItems: 'center',
+    paddingVertical: spacing.xl,
+    backgroundColor: colors.bg,
+    gap: spacing.md,
+  },
+  bigDoneBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: colors.green,
+    paddingVertical: 22,
+    paddingHorizontal: spacing.xxl,
+    borderRadius: radii.pill,
+    marginTop: spacing.lg,
+    alignSelf: 'stretch',
+  },
+  bigDoneBtnText: {
+    color: colors.bg,
+    fontWeight: '900',
+    fontSize: 20,
+    letterSpacing: 0.5,
+  },
+
+  // ── "Reflect on this challenge" CTA on past uncompleted cards ─────
+  lateReflectBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: colors.cyan,
+    paddingVertical: 13,
+    borderRadius: radii.pill,
+    marginTop: spacing.sm,
+  },
+  lateReflectBtnText: {
+    color: colors.bg,
+    fontWeight: '900',
+    fontSize: 14,
+    letterSpacing: 0.3,
   },
 });

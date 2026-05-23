@@ -591,6 +591,20 @@ export const api = {
     req<{ completions: ChallengeCompletion[]; count: number }>('/challenge/past'),
   challengePastDelete: (id: string) =>
     req<{ deleted: number }>(`/challenge/past/${id}`, { method: 'DELETE' }),
+  challengePastAnswer: (
+    id: string,
+    body: {
+      completed: boolean;
+      how_text?: string;
+      difficulty: 'easy' | 'difficult';
+      experience_text?: string;
+      rating: number;
+    },
+  ) =>
+    req<{ awarded_xp: number; completion: ChallengeCompletion }>(
+      `/challenge/past/${id}/answer`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   // ─── Friends+ ────────────────────────────────────────────────────────
   listPlayers: (q: string = '') =>
@@ -1555,6 +1569,8 @@ export type ChallengeCompletion = {
   rating: number;
   xp_awarded: number;
   completed_at: string;
+  can_answer?: boolean;
+  answer_deadline?: string | null;
 };
 
 // ───────────────────────── Friends+ ─────────────────────────
