@@ -1899,29 +1899,68 @@ def _goal_lockout_for(unit: Optional[str]) -> Optional[timedelta]:
     return GOAL_CYCLE_LOCKOUT.get((unit or "").lower())
 
 
-def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
-    """Returns (locked, next_unlock_dt). For `days` we use calendar-date
-    boundaries — a goal ticked on 2026-04-27 is locked until 2026-04-28 00:00
-    *local* (midnight). For weeks/months we use a rolling-window timedelta.
+def _is_goal_locked(
+    goal: dict,
+    *,
+    wake_str: Optional[str] = None,
+    tz_name: Optional[str] = None,
+) -> tuple[bool, Optional[datetime]]:
+    """Returns (locked, next_unlock_dt).
 
-    NEW (per user request): For weeks/months we ALSO lock the FIRST tick
+    For `days` (per user request 2026-05-24): lock fires after EVERY tick
+    (uses `last_ticked_at`, not `last_completed_at`). Reset boundary is
+    the user's morning wake-time (same as Challenge tasks), falling back
+    to 07:00 local if not configured. This means a Daily goal can only
+    be +1'd ONCE per "morning-to-morning" day, for ALL levels.
+
+    For weeks/months: rolling-window timedelta from `last_completed_at`
+    (legacy behaviour). NEW: For weeks/months we ALSO lock the FIRST tick
     for the same duration measured from the goal's `created_at`. This
     prevents a freshly-created Monthly goal with target=1 from being
     auto-completed on the same day it was created.
     """
     unit = (goal.get("unit") or "").lower()
+
+    # ── DAILY goals: lock after every tick, reset at user's wake-time ─
+    if unit == "days":
+        last_tick_iso = goal.get("last_ticked_at")
+        if not last_tick_iso:
+            return False, None
+        try:
+            last = datetime.fromisoformat(str(last_tick_iso).replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+        except Exception:
+            return False, None
+        wake_h, wake_m = _parse_hhmm(wake_str or "07:00")
+        tz: Optional["timezone"] = None
+        if tz_name:
+            try:
+                from zoneinfo import ZoneInfo as _ZI
+                tz = _ZI(tz_name)
+            except Exception:
+                tz = None
+        last_local = last.astimezone(tz) if tz is not None else last.astimezone()
+        today_wake = last_local.replace(
+            hour=wake_h, minute=wake_m, second=0, microsecond=0
+        )
+        # If the tick happened BEFORE today's wake-time, the user is
+        # still in the previous "day"; next unlock is today's wake.
+        # Otherwise unlock at tomorrow's wake.
+        next_unlock = today_wake if last_local < today_wake else today_wake + timedelta(days=1)
+        now = datetime.now(next_unlock.tzinfo) if next_unlock.tzinfo else datetime.now()
+        return now < next_unlock, next_unlock
+
+    # ── Cycle lockout for weeks/months (unchanged) ───────────────────
     # Cycle lockout fires ONLY after a completion. We deliberately do NOT
     # fall back to last_ticked_at — sub-completion progress ticks (e.g.
-    # 3/5 → 4/5 on a daily goal) must NOT be blocked by the lockout, and
-    # the un-tick path clears last_completed_at so re-completing in the
-    # same cycle is allowed.
+    # 3/5 → 4/5 on a weekly step goal) must NOT be blocked by the lockout,
+    # and the un-tick path now preserves last_completed_at so re-completing
+    # in the same cycle is rightly refused (XP-cheat fix 2026-05-23).
     last_iso = goal.get("last_completed_at")
     lock = GOAL_CYCLE_LOCKOUT.get(unit)
 
     # ── First-tick lock from creation date (weeks / months only) ──
-    # If the goal has NEVER been ticked and its cadence is weekly or
-    # monthly, the user must wait `lock` duration from `created_at`
-    # before the first tick is allowed.
     if not last_iso and lock and unit in ("weeks", "months"):
         created_iso = goal.get("created_at")
         if created_iso:
@@ -1934,7 +1973,6 @@ def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
                 if now < next_at:
                     return True, next_at
             except Exception:
-                # Bad created_at → don't lock; goal must remain usable.
                 pass
         return False, None
 
@@ -1947,33 +1985,47 @@ def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
     except Exception:
         return False, None
 
-    if unit == "days":
-        # Calendar-day reset: next unlock is the start of the day AFTER
-        # the day on which we last ticked.
-        last_local = last.astimezone()
-        next_local_midnight = (last_local + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        now = datetime.now(next_local_midnight.tzinfo)
-        return now < next_local_midnight, next_local_midnight
-
     if not lock:
         return False, None
     next_at = last + lock
     return datetime.now(timezone.utc) < next_at, next_at
 
 
-def _enrich_goal_lock_state(goal: dict) -> dict:
+def _enrich_goal_lock_state(
+    goal: dict,
+    *,
+    wake_str: Optional[str] = None,
+    tz_name: Optional[str] = None,
+) -> dict:
     """Compute and attach `next_tick_available_at` / `is_locked` so the
-    frontend can render the cycle-lock UI without re-implementing the rules."""
-    locked, next_at = _is_goal_locked(goal)
+    frontend can render the cycle-lock UI without re-implementing the rules.
+
+    Callers SHOULD pass `wake_str`/`tz_name` (per-user). For backward
+    compatibility, when missing we default to 07:00 / local — which still
+    locks the goal, just at calendar midnight instead of the user's true
+    wake-time."""
+    locked, next_at = _is_goal_locked(goal, wake_str=wake_str, tz_name=tz_name)
     goal["is_locked"] = locked
     goal["next_tick_available_at"] = next_at.isoformat() if next_at else None
     return goal
 
 
-def _enrich_goals(goals: list[dict]) -> list[dict]:
-    return [_enrich_goal_lock_state(g) for g in goals]
+async def _enrich_goal_lock_state_for_user(goal: dict, user_id: str) -> dict:
+    """Convenience: fetch wake/tz once for the user, then enrich."""
+    wake = await _wake_for_user(user_id)
+    tz = await _tz_for_user(user_id)
+    return _enrich_goal_lock_state(goal, wake_str=wake, tz_name=tz)
+
+
+def _enrich_goals(
+    goals: list[dict],
+    *,
+    wake_str: Optional[str] = None,
+    tz_name: Optional[str] = None,
+) -> list[dict]:
+    return [
+        _enrich_goal_lock_state(g, wake_str=wake_str, tz_name=tz_name) for g in goals
+    ]
 
 
 @api_router.get("/goals")
@@ -1992,7 +2044,9 @@ async def list_goals(user_id: str = Depends(get_user_or_legacy)):
         reverse=True,
     )
     done.sort(key=lambda g: g.get("completed_at", "") or g.get("created_at", ""), reverse=True)
-    return {"goals": _enrich_goals(active + done)}
+    wake = await _wake_for_user(user_id)
+    tz = await _tz_for_user(user_id)
+    return {"goals": _enrich_goals(active + done, wake_str=wake, tz_name=tz)}
 
 
 @api_router.post("/goals")
@@ -2058,7 +2112,7 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
     # Surface is_locked + next_tick_available_at on the create response
     # so the UI can show the countdown pill immediately for a freshly-
     # created Monthly/Weekly goal (lock starts from `created_at`).
-    goal = _enrich_goal_lock_state(goal)
+    goal = await _enrich_goal_lock_state_for_user(goal, user_id)
     return goal
 
 
@@ -2127,7 +2181,7 @@ async def update_goal(goal_id: str, body: GoalUpdate, user_id: str = Depends(get
     if res.matched_count == 0:
         raise HTTPException(404, "Goal not found")
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
-    return _enrich_goal_lock_state(goal) if goal else goal
+    return await _enrich_goal_lock_state_for_user(goal, user_id) if goal else goal
 
 
 @api_router.post("/goals/{goal_id}/progress")
@@ -2142,14 +2196,25 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     # message. The unit-aware logic lives in `_is_goal_locked`.
     requested_value = max(0, min(body.current_value, goal["target_value"]))
     incrementing = requested_value > int(goal.get("current_value", 0))
+    # Fetch wake/tz ONCE (daily-lock needs them; we also reuse for the
+    # final enrichment response below).
+    wake_str = await _wake_for_user(user_id)
+    tz_name = await _tz_for_user(user_id)
     if incrementing:
-        locked, next_at = _is_goal_locked(goal)
+        locked, next_at = _is_goal_locked(goal, wake_str=wake_str, tz_name=tz_name)
         if locked and next_at is not None:
+            unit_lower = (goal.get("unit") or "cycle").lower()
+            if unit_lower == "days":
+                msg = "This daily goal is already ticked today. Comes back at your morning reset."
+                err_code = "daily_locked"
+            else:
+                msg = f"This goal is locked until the next {unit_lower.rstrip('s')} cycle."
+                err_code = "cycle_locked"
             raise HTTPException(
                 status_code=429,
                 detail={
-                    "error": "cycle_locked",
-                    "message": f"This goal is locked until the next {(goal.get('unit') or 'cycle').rstrip('s')} cycle.",
+                    "error": err_code,
+                    "message": msg,
                     "next_tick_available_at": next_at.isoformat(),
                     "unit": goal.get("unit"),
                 },
@@ -2160,9 +2225,16 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     if incrementing:
         update["last_ticked_at"] = now_iso()
     elif requested_value < int(goal.get("current_value", 0)):
-        # User un-ticked: clear the lockout so they can re-tick immediately
-        # (matches the "until it's clicked again" UX).
-        update["last_ticked_at"] = None
+        # User un-ticked.
+        # XP-cheat fix (2026-05-24): for DAILY goals we deliberately
+        # preserve `last_ticked_at` so the user can't un-tick + re-tick
+        # within the same day to oscillate (and also keeps the streak/
+        # achievement/chart counters honest). The XP refund still
+        # happens below. For weeks/months the cycle-lock anchor is
+        # `last_completed_at` (NOT last_ticked_at), so clearing
+        # last_ticked_at here is safe and matches the legacy UX.
+        if (goal.get("unit") or "").lower() != "days":
+            update["last_ticked_at"] = None
 
     # ── Per-step XP for DAILY goals ──
     # Daily goals (unit == "days") award 30 XP per +1 step up to (but not
@@ -2302,7 +2374,7 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
             logger.exception("[goal-uncomplete] chart row cleanup failed")
     await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
-    goal = _enrich_goal_lock_state(goal)
+    goal = _enrich_goal_lock_state(goal, wake_str=wake_str, tz_name=tz_name)
     if awarded_xp:
         goal["awarded_xp"] = awarded_xp
     if refunded_xp:
