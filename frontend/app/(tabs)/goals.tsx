@@ -94,6 +94,11 @@ export default function Goals() {
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   // Maps goal_id → toast message currently visible. Auto-clears after 5s.
   const [lockToast, setLockToast] = useState<Record<string, string>>({});
+  // Tracks whether a long-press just fired on a given goal id so we can
+  // suppress the implicit onPress that React Native fires when the user
+  // releases the press. Without this, the edit modal would open on top of
+  // the delete-confirm dialog the user just triggered.
+  const longPressFiredRef = useRef<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     try {
@@ -249,12 +254,23 @@ export default function Goals() {
                 key={g.id}
                 testID={`goal-row-${g.id}`}
                 onPress={() => {
+                  // Suppress the implicit onPress that fires when a long-press
+                  // is released — otherwise the edit modal pops on top of the
+                  // delete confirm dialog (regression from tap-to-edit).
+                  if (longPressFiredRef.current[g.id]) {
+                    longPressFiredRef.current[g.id] = false;
+                    return;
+                  }
                   // Tap-anywhere-on-card → open edit modal. The +/− buttons
                   // are TouchableOpacity children with their own onPress, so
                   // taps on them are consumed before reaching this Pressable.
                   if (!g.completed) setEditingGoal(g);
                 }}
-                onLongPress={() => remove(g)}
+                onLongPress={() => {
+                  longPressFiredRef.current[g.id] = true;
+                  remove(g);
+                }}
+                delayLongPress={400}
                 style={{ marginBottom: spacing.md }}
               >
                 <Card accent={meta.color}>
