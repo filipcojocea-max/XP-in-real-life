@@ -13,7 +13,7 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "app.emergent.xpconfidencec2316dfc",
+      "bundleIdentifier": "app.emergent.xpconfidencec2316dfc2",
       "buildNumber": "1023",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
@@ -22,7 +22,7 @@
       }
     },
     "android": {
-      "package": "app.emergent.xpconfidencec2316dfc",
+      "package": "app.emergent.xpconfidencec2316dfc2",
       "googleServicesFile": "./google-services.json",
       "versionCode": 1023,
       "adaptiveIcon": {
