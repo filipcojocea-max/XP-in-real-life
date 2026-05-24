@@ -1,0 +1,46 @@
+{
+  "summary": "Backend regression suite executed against XP-In-Real-Life clone via public ingress (EXPO_PUBLIC_BACKEND_URL). 21/21 pytest tests pass. Verified health, admin auth (login + JWT), registration (verification disabled by design), admin profile + is_admin flag, JWT enforcement on strict auth route, day-anchor onboarding lock rule (timezone + day_start_time), challenges endpoints, APScheduler status with all four expected jobs (motivation_tick, spot_surprise_tick, streak_warning_tick, match_invite_expiry), and MongoDB _id never leaked in five hot endpoints.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/profile, /api/tasks, /api/goals, /api/challenge/* and most /api/* endpoints (anything using get_user_or_legacy in server.py:308)",
+        "issue": "These endpoints fall back to a hard-coded 'main' user when no Authorization header is sent (legacy/anon-mode). Calling GET /api/profile with NO token returns 200 + the shared anonymous Hero profile. This is INTENTIONAL per the code comment ('Anonymous IDs are prefixed with anon-') but is a security-architecture smell because it (a) exposes a shared 'main' tenant to anyone hitting the API and (b) means missing/invalid JWTs silently degrade instead of failing closed. Strict guard (get_current_user, used by /api/auth/me) correctly returns 401. Flagging for E1 to confirm this is desired in production."
+      },
+      {
+        "endpoint": "backend startup",
+        "issue": "passlib emits a harmless WARNING ('module bcrypt has no attribute __about__') because bcrypt 4.x dropped the legacy __about__ shim that passlib 1.7.4 still probes. Login still works correctly. Cosmetic — already called out in the review request notes."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_backend_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "[INFO ONLY] Decide whether the get_user_or_legacy 'main' fallback should remain enabled in production. If the mobile client always sends either a JWT or X-Anonymous-Id, consider tightening get_user_or_legacy to 401 when both are missing.",
+    "[OPTIONAL] Pin bcrypt to 4.0.x or upgrade passlib to silence the startup warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 9,000 lines in a single module — far above the 700-line guideline. Strongly recommend splitting into routers per feature (auth, profile, challenges, spot, friends, admin, payments, scheduler, etc.). Not blocking but high-impact for maintainability.",
+    "get_user_or_legacy silently swallows JWT decode errors (server.py:319-327) — an expired/invalid token returns the 'main' user instead of 401. Reasonable for anon UX but should be paired with explicit '/api/auth/*' verification on the client.",
+    "EXPO_BACKEND_URL key is documented in the system prompt but the repo uses EXPO_PUBLIC_BACKEND_URL — tests adapted to read both. Consider standardising the env var name for forward compatibility."
+  ],
+  "updated_files": [
+    "/app/backend/tests/conftest.py (new)",
+    "/app/backend/tests/test_backend_api.py (new)"
+  ],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "n/a (skipped per request)"},
+  "seed_data_creation": "Two TEST_*@gmail.com users created via /api/auth/register during the run (one for registration smoke, one for day-anchor onboarding flow). They are isolated by uuid prefix and harmless; no production data was touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Public URL lives in frontend/.env as EXPO_PUBLIC_BACKEND_URL (NOT EXPO_BACKEND_URL). The conftest auto-handles both names. Admin creds in /app/memory/test_credentials.md still valid and seeded on every backend boot. Scheduler job IDs are without underscore-prefix: motivation_tick, spot_surprise_tick, streak_warning_tick, match_invite_expiry. Most endpoints use get_user_or_legacy which fall-backs to a 'main' anon user when no JWT is sent — do NOT assert 401 on those, only on /api/auth/me. Stripe checkout endpoints are gracefully disabled (STRIPE_SECRET_KEY missing) — not tested.",
+  "rca_of_issue": "n/a — no failures after aligning tests with the documented anon-mode contract and the actual scheduler job IDs."
+}

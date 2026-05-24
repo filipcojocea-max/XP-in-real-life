@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+
+  <!-- Special Android permission. The user MUST manually enable it via
+       Settings → Apps → Special access → Usage access. We declare it
+       here so it shows up in that list with our app name. -->
+  <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+                   tools:ignore="ProtectedPermissions" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- Lets us see installed app labels for the "Apps that cost you XP"
+       summary screen. Granted automatically on Android 13+. -->
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.MAIN" />
+    </intent>
+  </queries>
+
+  <application>
+    <service
+      android:name="expo.modules.appblocker.AppBlockerService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Polls UsageStatsManager during a Focus Mode session to enforce the user's self-imposed app blocklist." />
+    </service>
+  </application>
+</manifest>
