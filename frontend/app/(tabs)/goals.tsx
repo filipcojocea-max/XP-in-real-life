@@ -364,7 +364,6 @@ export default function Goals() {
             );
           })
         )}
-        <Text style={styles.hint}>Tip: long-press to delete.</Text>
       </ScrollView>
 
       <GoalEditorModal
@@ -373,6 +372,12 @@ export default function Goals() {
         isAdmin={isAdmin}
         onClose={() => { setShowAdd(false); setEditingGoal(null); }}
         onSaved={() => { setShowAdd(false); setEditingGoal(null); load(); }}
+        onDelete={async (g) => {
+          // Reuse the same verification confirm + DELETE flow used by
+          // long-press, then close the editor modal on success.
+          await remove(g);
+          setEditingGoal(null);
+        }}
       />
     </SafeAreaView>
   );
@@ -383,12 +388,14 @@ function GoalEditorModal({
   editingGoal,
   onClose,
   onSaved,
+  onDelete,
   isAdmin,
 }: {
   visible: boolean;
   editingGoal: Goal | null;
   onClose: () => void;
   onSaved: () => void;
+  onDelete?: (g: Goal) => void | Promise<void>;
   isAdmin?: boolean;
 }) {
   const isEdit = !!editingGoal;
@@ -650,6 +657,21 @@ function GoalEditorModal({
               {saving ? <ActivityIndicator color={colors.bg} /> : <Text style={styles.saveText}>{isEdit ? 'Save Changes' : 'Create Goal'}</Text>}
             </TouchableOpacity>
           </View>
+
+          {/* Edit mode only: bottom-anchored Delete-this-goal button.
+              Tapping it triggers the same verification confirm used by
+              long-press, then closes this modal on success. */}
+          {isEdit && editingGoal && onDelete ? (
+            <TouchableOpacity
+              testID="goal-delete-btn"
+              style={styles.deleteFromEditBtn}
+              onPress={() => onDelete(editingGoal)}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="trash-outline" size={16} color={colors.danger} />
+              <Text style={styles.deleteFromEditText}>Delete this goal</Text>
+            </TouchableOpacity>
+          ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
@@ -815,6 +837,27 @@ const styles = StyleSheet.create({
   cancelText: { color: colors.textSecondary, fontWeight: '700' },
   saveBtn: { backgroundColor: colors.green },
   saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
+
+  // ── Bottom-anchored "Delete this goal" button (edit mode only) ────
+  deleteFromEditBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: spacing.lg,
+    paddingVertical: 14,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.danger + '55',
+    backgroundColor: colors.danger + '10',
+  },
+  deleteFromEditText: {
+    color: colors.danger,
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
 
   // ── Edit-mode banner when user picks a different duration ─────────
   timeframeBanner: {
