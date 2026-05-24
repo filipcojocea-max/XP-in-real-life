@@ -184,8 +184,21 @@ export default function Goals() {
   };
 
   const remove = async (g: Goal) => {
-    const ok = await showConfirm('Delete Goal?', `Remove "${g.title}"?`, {
-      confirmText: 'Delete',
+    // Verification-style confirm: surface what the user is about to lose
+    // so a long-press doesn't accidentally nuke a long-term goal.
+    const lines: string[] = [
+      `Are you sure you want to delete "${g.title}"?`,
+      '',
+      'This will permanently remove the goal and its progress.',
+    ];
+    if (typeof g.current_value === 'number' && typeof g.target_value === 'number') {
+      lines.push(`Current progress: ${g.current_value}/${g.target_value} ${g.unit || ''}`.trim());
+    }
+    lines.push('');
+    lines.push('XP you already earned will NOT be refunded.');
+    const ok = await showConfirm('Delete this goal?', lines.join('\n'), {
+      confirmText: 'Delete Goal',
+      cancelText: 'Keep It',
       destructive: true,
     });
     if (!ok) return;
@@ -270,7 +283,7 @@ export default function Goals() {
                   longPressFiredRef.current[g.id] = true;
                   remove(g);
                 }}
-                delayLongPress={400}
+                delayLongPress={1000}
                 style={{ marginBottom: spacing.md }}
               >
                 <Card accent={meta.color}>
