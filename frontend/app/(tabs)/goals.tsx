@@ -788,7 +788,7 @@ function GoalEditorModal({
               onPress={() => onDelete(editingGoal)}
               activeOpacity={0.75}
             >
-              <Ionicons name="trash-outline" size={16} color={colors.danger} />
+              <Ionicons name="trash-outline" size={16} color={colors.text} />
               <Text style={styles.deleteFromEditText}>Delete this goal</Text>
             </TouchableOpacity>
           ) : null}
@@ -969,11 +969,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: colors.danger + '55',
-    backgroundColor: colors.danger + '10',
+    borderColor: colors.red + '55',
+    backgroundColor: colors.red + '10',
   },
   deleteFromEditText: {
-    color: colors.danger,
+    color: colors.text,
     fontSize: 14,
     fontWeight: '800',
     letterSpacing: 0.3,
