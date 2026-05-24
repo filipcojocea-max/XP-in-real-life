@@ -1220,6 +1220,8 @@ export const api = {
       xp_reward?: number;
     },
   ) => req<Goal>(`/goals/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  restartGoal: (id: string) =>
+    req<Goal>(`/goals/${id}/restart`, { method: 'POST' }),
   deleteGoal: (id: string) =>
     req<{ deleted: boolean }>(`/goals/${id}`, { method: 'DELETE' }),
 

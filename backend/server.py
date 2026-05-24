@@ -2051,14 +2051,18 @@ async def list_goals(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.post("/goals")
 async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legacy)):
-    # Cap users to 5 active long-term goals at any time. Completed goals
+    # Cap users to 8 active long-term goals at any time. Completed goals
     # don't count toward the limit so users always have room to add more
     # once they finish older ones.
-    MAX_ACTIVE_GOALS = 5
+    MAX_ACTIVE_GOALS = 8
     # Per user-spec 2026-05-23: separately cap MONTHLY-unit goals at 2.
     # Months goals are heavy commitments (30-day cycles, top XP cap)
     # so we prevent users from stockpiling them.
     MAX_ACTIVE_MONTHLY_GOALS = 2
+    # Per user-spec 2026-05-24: cap DAILY-unit goals at 5. Daily goals
+    # are quick to complete and could otherwise fill the whole 8-slot
+    # quota leaving no room for longer-horizon Weekly/Monthly goals.
+    MAX_ACTIVE_DAILY_GOALS = 5
     is_admin = await _is_admin_user(user_id)
     active_count = await db.goals.count_documents({"user_id": user_id, "completed": False})
     if active_count >= MAX_ACTIVE_GOALS and not is_admin:
@@ -2087,6 +2091,24 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
                     ),
                     "limit": MAX_ACTIVE_MONTHLY_GOALS,
                     "unit": "months",
+                },
+            )
+    if unit_norm == "days" and not is_admin:
+        daily_active = await db.goals.count_documents({
+            "user_id": user_id, "completed": False, "unit": "days",
+        })
+        if daily_active >= MAX_ACTIVE_DAILY_GOALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "daily_goal_limit_reached",
+                    "message": (
+                        f"You can have up to {MAX_ACTIVE_DAILY_GOALS} Daily "
+                        "goals at once. Finish or delete one before adding a "
+                        "new Daily goal — Weekly or Monthly goals don't count."
+                    ),
+                    "limit": MAX_ACTIVE_DAILY_GOALS,
+                    "unit": "days",
                 },
             )
     xp_reward = body.xp_reward if is_admin else _clamp_goal_xp(unit_norm, body.xp_reward)
@@ -2154,6 +2176,28 @@ async def update_goal(goal_id: str, body: GoalUpdate, user_id: str = Depends(get
                         ),
                         "limit": 2,
                         "unit": "months",
+                    },
+                )
+
+        # Mirror the cap for DAILY goals when switching INTO days
+        # (admins exempt; don't count the goal being edited).
+        if new_unit == "days" and not is_admin and old_unit != "days":
+            daily_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "days",
+                "id": {"$ne": goal_id},
+            })
+            if daily_active >= 5:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "daily_goal_limit_reached",
+                        "message": (
+                            "You can have up to 5 Daily goals at once. "
+                            "Finish or delete one before switching this goal "
+                            "to Daily."
+                        ),
+                        "limit": 5,
+                        "unit": "days",
                     },
                 )
 
@@ -2397,6 +2441,112 @@ async def delete_goal(goal_id: str, user_id: str = Depends(get_user_or_legacy)):
     if res.deleted_count == 0:
         raise HTTPException(404, "Goal not found")
     return {"deleted": True}
+
+
+@api_router.post("/goals/{goal_id}/restart")
+async def restart_goal(goal_id: str, user_id: str = Depends(get_user_or_legacy)):
+    """Restart a previously-completed goal: zero progress, new cycle, same
+    title/target/unit/xp_reward/focus_area. The XP already earned for the
+    original completion is NOT revoked.
+
+    Re-checks the active-goal caps (overall 8, monthly 2, daily 5) before
+    re-activating — a "restart" turns a completed goal back into an active
+    one, so the caps apply just like creating a new goal.
+    """
+    goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    if not goal:
+        raise HTTPException(404, "Goal not found")
+    if not goal.get("completed"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "goal_not_completed",
+                "message": "Only completed goals can be restarted.",
+            },
+        )
+
+    is_admin = await _is_admin_user(user_id)
+    MAX_ACTIVE_GOALS = 8
+    MAX_ACTIVE_MONTHLY_GOALS = 2
+    MAX_ACTIVE_DAILY_GOALS = 5
+    unit_norm = (goal.get("unit") or "days").lower()
+
+    # Overall cap.
+    if not is_admin:
+        active_count = await db.goals.count_documents({
+            "user_id": user_id, "completed": False, "id": {"$ne": goal_id},
+        })
+        if active_count >= MAX_ACTIVE_GOALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "goal_limit_reached",
+                    "message": (
+                        f"You can have up to {MAX_ACTIVE_GOALS} active goals "
+                        "at once. Finish or delete one before restarting this one."
+                    ),
+                    "limit": MAX_ACTIVE_GOALS,
+                },
+            )
+        if unit_norm == "months":
+            monthly_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "months",
+                "id": {"$ne": goal_id},
+            })
+            if monthly_active >= MAX_ACTIVE_MONTHLY_GOALS:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "monthly_goal_limit_reached",
+                        "message": (
+                            f"You can have up to {MAX_ACTIVE_MONTHLY_GOALS} Monthly "
+                            "goals at once. Finish or delete one before restarting "
+                            "this Monthly goal."
+                        ),
+                        "limit": MAX_ACTIVE_MONTHLY_GOALS,
+                        "unit": "months",
+                    },
+                )
+        if unit_norm == "days":
+            daily_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "days",
+                "id": {"$ne": goal_id},
+            })
+            if daily_active >= MAX_ACTIVE_DAILY_GOALS:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "daily_goal_limit_reached",
+                        "message": (
+                            f"You can have up to {MAX_ACTIVE_DAILY_GOALS} Daily "
+                            "goals at once. Finish or delete one before restarting "
+                            "this Daily goal."
+                        ),
+                        "limit": MAX_ACTIVE_DAILY_GOALS,
+                        "unit": "days",
+                    },
+                )
+
+    # Reset to a fresh cycle. We preserve title/description/focus_area/unit/
+    # target_value/xp_reward + the user's original `id` so the user feels
+    # they're restarting "the same goal" — not making a clone.
+    reset = {
+        "current_value": 0,
+        "completed": False,
+        "completed_at": None,
+        "last_completed_at": None,
+        "last_ticked_at": None,
+        "xp_awarded_on_complete": None,
+        # New cycle from "now" — drives the first-tick lock window for
+        # weekly/monthly goals and the daily morning-reset reference.
+        "created_at": now_iso(),
+        "restarted_at": now_iso(),
+    }
+    await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": reset})
+    goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    return await _enrich_goal_lock_state_for_user(goal, user_id) if goal else goal
+
+
 
 
 # --------- Achievements ---------

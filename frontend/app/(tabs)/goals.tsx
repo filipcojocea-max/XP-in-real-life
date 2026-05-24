@@ -26,7 +26,9 @@ const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
 // Maximum number of active (uncompleted) long-term goals a user can hold
 // at one time. Mirrors the server-side cap in /api/goals.
-const GOAL_LIMIT = 5;
+const GOAL_LIMIT = 8;
+// Per-unit caps (also mirrored server-side).
+const DAILY_GOAL_LIMIT = 5;
 
 // Cycle-lockout helpers for the Goals "tick rate-limit" feature.
 // Backend enforces this — these helpers are just for the UI countdown.
@@ -91,6 +93,9 @@ export default function Goals() {
   const [showAdd, setShowAdd] = useState(false);
   // When set to a Goal object, opens the editor in EDIT mode for that goal.
   const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
+  // When set, opens the "🎉 Congratulations" celebration modal for a
+  // completed goal with Restart / Delete actions.
+  const [celebratingGoal, setCelebratingGoal] = useState<Goal | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   // Maps goal_id → toast message currently visible. Auto-clears after 5s.
   const [lockToast, setLockToast] = useState<Record<string, string>>({});
@@ -274,10 +279,14 @@ export default function Goals() {
                     longPressFiredRef.current[g.id] = false;
                     return;
                   }
-                  // Tap-anywhere-on-card → open edit modal. The +/− buttons
-                  // are TouchableOpacity children with their own onPress, so
-                  // taps on them are consumed before reaching this Pressable.
-                  if (!g.completed) setEditingGoal(g);
+                  // Tap-anywhere-on-card:
+                  //  • Completed goal  → 🎉 Congrats modal (Restart / Delete)
+                  //  • Active goal     → Edit modal
+                  // The +/− buttons are TouchableOpacity children with their
+                  // own onPress so their taps are consumed before reaching
+                  // this Pressable.
+                  if (g.completed) setCelebratingGoal(g);
+                  else setEditingGoal(g);
                 }}
                 onLongPress={() => {
                   longPressFiredRef.current[g.id] = true;
@@ -379,9 +388,120 @@ export default function Goals() {
           setEditingGoal(null);
         }}
       />
+
+      <CompletedGoalActionsModal
+        goal={celebratingGoal}
+        onClose={() => setCelebratingGoal(null)}
+        onRestart={async (g) => {
+          try {
+            await api.restartGoal(g.id);
+            setCelebratingGoal(null);
+            await load();
+          } catch (e: any) {
+            showAlert('Could not restart', String(e?.detail?.message || e.message || e));
+          }
+        }}
+        onDelete={async (g) => {
+          // Reuse the verification confirm + DELETE flow.
+          await remove(g);
+          setCelebratingGoal(null);
+        }}
+      />
     </SafeAreaView>
   );
 }
+// ── Completed-goal celebration modal ─────────────────────────────────
+// Shown when the user taps a goal that has `completed=true`. Surfaces a
+// congratulatory message + two actions: Restart the goal (re-uses /restart
+// endpoint, preserves title/target/xp) or Delete it. Tapping outside or
+// the X just dismisses the modal.
+function CompletedGoalActionsModal({
+  goal,
+  onClose,
+  onRestart,
+  onDelete,
+}: {
+  goal: Goal | null;
+  onClose: () => void;
+  onRestart: (g: Goal) => void | Promise<void>;
+  onDelete: (g: Goal) => void | Promise<void>;
+}) {
+  const visible = !!goal;
+  const [busy, setBusy] = useState<'restart' | 'delete' | null>(null);
+
+  useEffect(() => {
+    if (!visible) setBusy(null);
+  }, [visible]);
+
+  if (!goal) return null;
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.celebBackdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View style={styles.celebCard} testID="celebrate-modal">
+          <TouchableOpacity
+            onPress={onClose}
+            style={styles.celebCloseBtn}
+            testID="celebrate-modal-close"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="close" size={22} color={colors.text} />
+          </TouchableOpacity>
+
+          <View style={styles.celebTrophyBubble}>
+            <Ionicons name="trophy" size={42} color={colors.amber} />
+          </View>
+
+          <Text style={styles.celebTitle}>Congratulations!</Text>
+          <Text style={styles.celebSubtitle}>
+            You completed your goal:
+          </Text>
+          <Text style={styles.celebGoalTitle} numberOfLines={3}>
+            {'\u201C'}{goal.title}{'\u201D'}
+          </Text>
+
+          <View style={styles.celebDivider} />
+
+          <Text style={styles.celebPrompt}>What would you like to do?</Text>
+
+          <TouchableOpacity
+            testID="celebrate-restart-btn"
+            style={[styles.celebActionBtn, styles.celebRestartBtn, busy ? { opacity: 0.6 } : null]}
+            disabled={!!busy}
+            onPress={async () => {
+              setBusy('restart');
+              try { await onRestart(goal); } finally { setBusy(null); }
+            }}
+            activeOpacity={0.85}
+          >
+            {busy === 'restart' ? <ActivityIndicator color={colors.bg} /> : (
+              <>
+                <Ionicons name="refresh" size={18} color={colors.bg} />
+                <Text style={styles.celebRestartText}>Restart this goal</Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            testID="celebrate-delete-btn"
+            style={[styles.celebActionBtn, styles.celebDeleteBtn, busy ? { opacity: 0.6 } : null]}
+            disabled={!!busy}
+            onPress={async () => {
+              setBusy('delete');
+              try { await onDelete(goal); } finally { setBusy(null); }
+            }}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="trash-outline" size={18} color={colors.danger} />
+            <Text style={styles.celebDeleteText}>Delete this goal</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+
 
 function GoalEditorModal({
   visible,
@@ -856,6 +976,118 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontSize: 14,
     fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+
+  // ── Celebration modal (Congrats! Restart / Delete) ──────────────────
+  celebBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.lg,
+  },
+  celebCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+    borderRadius: radii.lg,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.lg,
+    alignItems: 'center',
+  },
+  celebCloseBtn: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceGlass,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  celebTrophyBubble: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.amber + '18',
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+    marginBottom: spacing.md,
+  },
+  celebTitle: {
+    color: colors.amber,
+    fontSize: 24,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  celebSubtitle: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  celebGoalTitle: {
+    color: colors.text,
+    fontSize: 17,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginTop: 6,
+    paddingHorizontal: spacing.sm,
+  },
+  celebDivider: {
+    width: '60%',
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.lg,
+  },
+  celebPrompt: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  celebActionBtn: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 16,
+    borderRadius: radii.pill,
+    marginTop: spacing.sm,
+    borderWidth: 1,
+  },
+  celebRestartBtn: {
+    backgroundColor: colors.green,
+    borderColor: colors.green,
+  },
+  celebRestartText: {
+    color: colors.bg,
+    fontWeight: '900',
+    fontSize: 15,
+    letterSpacing: 0.3,
+  },
+  celebDeleteBtn: {
+    backgroundColor: colors.danger + '10',
+    borderColor: colors.danger + '55',
+  },
+  celebDeleteText: {
+    color: colors.danger,
+    fontWeight: '800',
+    fontSize: 14,
     letterSpacing: 0.3,
   },
 
