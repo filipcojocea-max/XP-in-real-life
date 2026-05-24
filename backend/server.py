@@ -2271,11 +2271,18 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
         )
         update["completed_at"] = None
         update["xp_awarded_on_complete"] = None
-        # Clear last_completed_at so the cycle-lockout doesn't keep
-        # firing after the user has un-completed the goal. They should
-        # be free to re-tick / re-complete immediately within the same
-        # cycle if they choose to.
-        update["last_completed_at"] = None
+        # ── XP-cheat fix (2026-05-23) ─────────────────────────────────
+        # We DELIBERATELY DO NOT clear `last_completed_at` here.
+        # Weekly/monthly goals must stay LOCKED for the full cycle
+        # (1 week / 30 days) measured from the original completion
+        # timestamp — regardless of whether the user un-ticks. Otherwise
+        # the user could exploit: tick → +XP → untick → -XP refund →
+        # re-tick within the same cycle → +XP again, oscillating to
+        # game streak/achievement counters and chart entries. Per
+        # user request (issue: "Goal cooldown breaks at Level 10"),
+        # the cycle-lock now persists through un-ticks for ALL levels.
+        # (The user can still un-tick to give up the XP, but they
+        # forfeit re-ticking until the cycle expires.)
         await db.profile.update_one(
             {"_id": user_id},
             {"$inc": {"goals_completed": -1, "total_xp": -refunded_xp}},
