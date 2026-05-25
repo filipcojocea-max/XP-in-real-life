@@ -130,7 +130,11 @@
       "typedRoutes": true
     },
     "extra": {
+      "eas": {
+        "projectId": "382f4294-8e88-460c-8e1f-9513a2ae347d"
+      },
       "router": {}
-    }
+    },
+    "owner": "filipisaman"
   }
 }
