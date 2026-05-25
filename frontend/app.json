@@ -2,9 +2,9 @@
   "expo": {
     "name": "XP in Real Life",
     "slug": "xp-confidence",
-    "version": "1.1.1",
+    "version": "1.0.28",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/new-icon.png",
     "scheme": "xpconfidence",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -14,7 +14,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.emergent.xpconfidencec2316dfc2",
-      "buildNumber": "111",
+      "buildNumber": "1023",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Upload a profile photo to personalize your account",
         "NSCameraUsageDescription": "Take photos for profile and Spot the Object challenges",
@@ -24,9 +24,9 @@
     "android": {
       "package": "app.emergent.xpconfidencec2316dfc2",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 111,
+      "versionCode": 1023,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "foregroundImage": "./assets/images/new-icon.png",
         "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
@@ -56,14 +56,14 @@
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/new-icon.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-image.png",
+          "image": "./assets/images/new-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#000000"
@@ -88,8 +88,8 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Check local weather for outfit advice",
-          "locationWhenInUsePermission": "Check local weather for outfit advice",
+          "locationAlwaysAndWhenInUsePermission": "Used by Buried Treasure to spawn chests near you and confirm your find \u2014 only while the app is open.",
+          "locationWhenInUsePermission": "Used by Buried Treasure to spawn chests near you and confirm your find \u2014 only while the app is open.",
           "isIosBackgroundLocationEnabled": false,
           "isAndroidBackgroundLocationEnabled": false
         }

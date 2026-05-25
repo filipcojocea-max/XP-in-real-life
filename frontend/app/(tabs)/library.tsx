@@ -24,25 +24,37 @@ import {
   SetDiscountModal,
   BuyAppModal,
 } from '../../src/components/LibraryPricing';
-import type { LibraryAppPricing } from '../../src/api';
+import {
+  SetDuoDiscountModal,
+  DuoBadge,
+  DuoJoinModal,
+} from '../../src/components/DuoDiscount';
+import type { LibraryAppPricing, DuoGroup } from '../../src/api';
 
 type Tab = 'add' | 'mine';
 
 // IDs that match the backend's LIBRARY_APP_IDS list. Keep in sync.
-type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence';
+// `treasure` joins the original 4 mini-apps in v1.0.29 — it now needs
+// to flow through the pricing menu / duo-discount modals just like the
+// rest, so we add it to the union here. NB: APP_LABELS / APP_TINTS /
+// EMPTY_PRICING / initial ratings record are all keyed on this type, so
+// the compiler will scream if we forget any of them.
+type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence' | 'treasure';
 
 const APP_LABELS: Record<MiniAppId, string> = {
   sleep: 'Improve Sleeping',
   challenges: 'Challenge Tasks',
   spot: 'Spot the Object',
   confidence: 'Build Self-Confidence',
+  treasure: 'Buried Treasure',
 };
 
 const APP_TINTS: Record<MiniAppId, string> = {
   sleep: colors.cyan,
   challenges: colors.green,
   spot: colors.amber,
-  confidence: '#FFD700',
+  confidence: '#00FF88',
+  treasure: '#FFC857',
 };
 
 const EMPTY_STATS: MiniAppRatingStats = { average: 0, count: 0, user_rating: null };
@@ -58,29 +70,43 @@ export default function Library() {
     challenges: EMPTY_STATS,
     spot: EMPTY_STATS,
     confidence: EMPTY_STATS,
+    treasure: EMPTY_STATS,
   });
   const [rateTarget, setRateTarget] = useState<MiniAppId | null>(null);
   const [submittingRating, setSubmittingRating] = useState(false);
 
   // ── Pricing state ───────────────────────────────────────────────
   const EMPTY_PRICING: Record<MiniAppId, LibraryAppPricing | null> = {
-    sleep: null, challenges: null, spot: null, confidence: null,
+    sleep: null, challenges: null, spot: null, confidence: null, treasure: null,
   };
   const [pricing, setPricing] = useState<Record<MiniAppId, LibraryAppPricing | null>>(EMPTY_PRICING);
   const [currencies, setCurrencies] = useState<string[]>(['USD', 'EUR', 'GBP', 'AUD', 'CAD']);
   const [creatorMenuApp, setCreatorMenuApp] = useState<MiniAppId | null>(null);
   const [setPriceFor, setSetPriceFor] = useState<MiniAppId | null>(null);
   const [setDiscountFor, setSetDiscountFor] = useState<MiniAppId | null>(null);
+  /** Admin upsert sheet for the v1.0.29 "Friends/Duo" group-buy. */
+  const [setDuoDiscountFor, setSetDuoDiscountFor] = useState<MiniAppId | null>(null);
+  /** User-facing "start or join a duo group" modal. */
+  const [duoJoinFor, setDuoJoinFor] = useState<MiniAppId | null>(null);
+  /** Set when the user has reached a FULL duo group and tapped "Pay" — drives
+   *  the Buy modal to checkout with duo_group_id attached. */
+  const [duoBuyContext, setDuoBuyContext] = useState<DuoGroup | null>(null);
   const [buyAppFor, setBuyAppFor] = useState<MiniAppId | null>(null);
 
   const loadPricing = useCallback(async () => {
     try {
       const r = await api.libraryPricing();
+      // Every MiniAppId key MUST be set here; missing keys make
+      // <PricingBadge> fall into the !pricing branch which renders a
+      // non-tappable View — so the Creator can't open the price /
+      // discount / duo-discount menu. See also: loadRatings for the
+      // sibling bug we fixed last turn.
       setPricing({
         sleep: r.pricing.sleep,
         challenges: r.pricing.challenges,
         spot: r.pricing.spot,
         confidence: r.pricing.confidence,
+        treasure: r.pricing.treasure ?? null,
       });
       if (Array.isArray(r.currencies) && r.currencies.length) setCurrencies(r.currencies);
     } catch (e) {
@@ -131,11 +157,17 @@ export default function Library() {
   const loadRatings = useCallback(async () => {
     try {
       const r = await api.libraryRatings();
+      // NB: every key on `MiniAppId` MUST be present here — the rating
+      // modal does `ratings[rateTarget].user_rating` without a defensive
+      // optional chain, so if we forget a new mini-app the app crashes
+      // with `Cannot read properties of undefined (reading 'user_rating')`
+      // the moment the user taps that app's RATE button.
       setRatings({
         sleep: r.ratings.sleep ?? EMPTY_STATS,
         challenges: r.ratings.challenges ?? EMPTY_STATS,
         spot: r.ratings.spot ?? EMPTY_STATS,
         confidence: r.ratings.confidence ?? EMPTY_STATS,
+        treasure: r.ratings.treasure ?? EMPTY_STATS,
       });
     } catch (e) {
       // Silent — strip just shows "No reviews" on failure.
@@ -314,6 +346,10 @@ export default function Library() {
                   testID="pricing-badge-sleep"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.sleep?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('sleep') : setDuoJoinFor('sleep'))}
+              />
             </TouchableOpacity>
 
             {/* Challenge Tasks mini-app — featured */}
@@ -374,6 +410,10 @@ export default function Library() {
                   testID="pricing-badge-challenges"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.challenges?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('challenges') : setDuoJoinFor('challenges'))}
+              />
             </TouchableOpacity>
 
             {/* Spot the Object mini-app — featured */}
@@ -434,15 +474,19 @@ export default function Library() {
                   testID="pricing-badge-spot"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.spot?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('spot') : setDuoJoinFor('spot'))}
+              />
             </TouchableOpacity>
             {/* Build Self-Confidence mini-app — featured */}
             <TouchableOpacity
               testID="library-card-confidence"
               activeOpacity={0.85}
               onPress={() => handleCardTap('confidence', '/confidence')}
-              style={[styles.featureCard, { marginTop: spacing.md, borderColor: '#FFD70055' }]}
+              style={[styles.featureCard, { marginTop: spacing.md, borderColor: '#00FF8855' }]}
             >
-              <View style={[styles.featureGlow, { backgroundColor: '#FFD70022' }]} />
+              <View style={[styles.featureGlow, { backgroundColor: '#00FF8822' }]} />
               <View style={styles.featureRow}>
                 <MiniAppRatingStrip
                   testID="rating-strip-confidence"
@@ -450,12 +494,12 @@ export default function Library() {
                   tint={APP_TINTS.confidence}
                   onPress={() => setRateTarget('confidence')}
                 />
-                <View style={[styles.featureIcon, { backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
-                  <Ionicons name="shirt" size={32} color={'#FFD700'} />
+                <View style={[styles.featureIcon, { backgroundColor: '#00FF8822', borderColor: '#00FF8888' }]}>
+                  <Ionicons name="shirt" size={32} color={'#00FF88'} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <View style={styles.featureKickerRow}>
-                    <Text style={[styles.featureKicker, { color: '#FFD700' }]}>NEW · 4 TRACKS</Text>
+                    <Text style={[styles.featureKicker, { color: '#00FF88' }]}>NEW · 4 TRACKS</Text>
                     <View style={styles.unlockedPill}>
                       <Ionicons name="checkmark" size={10} color={colors.green} />
                       <Text style={styles.unlockedText}>UNLOCKED</Text>
@@ -466,20 +510,20 @@ export default function Library() {
                     Daily speaking + posture challenges, gratitude prompts, and an AI Style Coach that reviews your outfit photos.
                   </Text>
                   <View style={styles.tagRow}>
-                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
-                      <Ionicons name="chatbubbles" size={10} color={'#FFD700'} />
-                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>Social</Text>
+                    <View style={[styles.featTag, { backgroundColor: '#00FF8815', borderColor: '#00FF8833' }]}>
+                      <Ionicons name="chatbubbles" size={10} color={'#00FF88'} />
+                      <Text style={[styles.featTagText, { color: '#00FF88' }]}>Social</Text>
                     </View>
-                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
-                      <Ionicons name="body" size={10} color={'#FFD700'} />
-                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>Posture</Text>
+                    <View style={[styles.featTag, { backgroundColor: '#00FF8815', borderColor: '#00FF8833' }]}>
+                      <Ionicons name="body" size={10} color={'#00FF88'} />
+                      <Text style={[styles.featTagText, { color: '#00FF88' }]}>Posture</Text>
                     </View>
-                    <View style={[styles.featTag, { backgroundColor: '#FFD70015', borderColor: '#FFD70033' }]}>
-                      <Ionicons name="sparkles" size={10} color={'#FFD700'} />
-                      <Text style={[styles.featTagText, { color: '#FFD700' }]}>AI Stylist</Text>
+                    <View style={[styles.featTag, { backgroundColor: '#00FF8815', borderColor: '#00FF8833' }]}>
+                      <Ionicons name="sparkles" size={10} color={'#00FF88'} />
+                      <Text style={[styles.featTagText, { color: '#00FF88' }]}>AI Stylist</Text>
                     </View>
                   </View>
-                  <View style={[styles.featureCta, { backgroundColor: '#FFD700' }]}>
+                  <View style={[styles.featureCta, { backgroundColor: '#00FF88' }]}>
                     <Text style={styles.featureCtaText}>Open mini-app</Text>
                     <Ionicons name="arrow-forward" size={14} color={colors.bg} />
                   </View>
@@ -493,6 +537,83 @@ export default function Library() {
                   testID="pricing-badge-confidence"
                 />
               </View>
+              <DuoBadge
+                offer={pricing.confidence?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('confidence') : setDuoJoinFor('confidence'))}
+              />
+            </TouchableOpacity>
+
+            {/* ── 🏴‍☠️ Buried Treasure (v1.0.29 Phase 1) — same price/duo
+                   tag pattern as the other mini-apps so the Creator can
+                   set a price + Duo discount from this card. ── */}
+            <TouchableOpacity
+              testID="library-card-treasure"
+              activeOpacity={0.85}
+              onPress={() => handleCardTap('treasure', '/treasure')}
+              style={[styles.featureCard, { borderColor: '#FFC85799' }]}
+            >
+              <View style={styles.featureRow}>
+                {/* Vertical 5-star strip — tappable; opens the global
+                    rating modal. Aggregate average + count are visible
+                    to every player (read from /api/library/ratings). */}
+                <MiniAppRatingStrip
+                  testID="rating-strip-treasure"
+                  stats={ratings.treasure}
+                  tint={APP_TINTS.treasure}
+                  onPress={() => setRateTarget('treasure')}
+                />
+                <View style={[styles.featureIcon, { backgroundColor: '#FFC85722', borderColor: '#FFC85788' }]}>
+                  <Ionicons name="map" size={32} color="#FFC857" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.featureKickerRow}>
+                    <Text style={[styles.featureKicker, { color: '#FFC857' }]}>NEW · DAILY HUNT</Text>
+                    {pricing.treasure?.purchased ? (
+                      <View style={styles.unlockedPill}>
+                        <Ionicons name="checkmark" size={10} color={colors.green} />
+                        <Text style={styles.unlockedText}>UNLOCKED</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  <Text style={styles.featureTitle}>Buried Treasure</Text>
+                  <Text style={styles.featureDesc}>
+                    A new chest spawns daily on real parks &amp; ovals near you. Compass +
+                    distance lead you to the spot — snap a photo to claim +50 XP.
+                  </Text>
+                  <View style={styles.tagRow}>
+                    <View style={[styles.featTag, { borderColor: '#FFC85788', backgroundColor: '#FFC85722' }]}>
+                      <Ionicons name="compass" size={10} color="#FFC857" />
+                      <Text style={[styles.featTagText, { color: '#FFC857' }]}>2D-AR compass</Text>
+                    </View>
+                    <View style={[styles.featTag, { borderColor: '#FFC85788', backgroundColor: '#FFC85722' }]}>
+                      <Ionicons name="leaf" size={10} color="#FFC857" />
+                      <Text style={[styles.featTagText, { color: '#FFC857' }]}>OSM parks</Text>
+                    </View>
+                    <View style={[styles.featTag, { borderColor: '#FFC85788', backgroundColor: '#FFC85722' }]}>
+                      <Ionicons name="sunny" size={10} color="#FFC857" />
+                      <Text style={[styles.featTagText, { color: '#FFC857' }]}>Day-only toggle</Text>
+                    </View>
+                  </View>
+                  <View style={[styles.featureCta, { backgroundColor: '#FFC857' }]}>
+                    <Text style={styles.featureCtaText}>Open mini-app</Text>
+                    <Ionicons name="arrow-forward" size={14} color={colors.bg} />
+                  </View>
+                </View>
+              </View>
+              {/* Bottom-LEFT: original AUD price (or "FREE" / "Set price"). */}
+              <View style={styles.pricingCorner} pointerEvents="box-none">
+                <PricingBadge
+                  pricing={pricing.treasure}
+                  isAdmin={isAdmin}
+                  onCreatorTap={() => handleCreatorBadgeTap('treasure')}
+                  testID="pricing-badge-treasure"
+                />
+              </View>
+              {/* Bottom-RIGHT: duo-with-friends discount (set by Creator). */}
+              <DuoBadge
+                offer={pricing.treasure?.duo_offer || null}
+                onPress={() => (isAdmin ? handleCreatorBadgeTap('treasure') : setDuoJoinFor('treasure'))}
+              />
             </TouchableOpacity>
           </View>
         ) : (
@@ -553,10 +674,10 @@ export default function Library() {
               testID="library-mine-confidence"
               activeOpacity={0.85}
               onPress={() => router.push('/confidence' as any)}
-              style={[styles.mineCard, { borderColor: '#FFD70055' }]}
+              style={[styles.mineCard, { borderColor: '#00FF8855' }]}
             >
-              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: '#FFD70022', borderColor: '#FFD70088' }]}>
-                <Ionicons name="shirt" size={24} color={'#FFD700'} />
+              <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: '#00FF8822', borderColor: '#00FF8888' }]}>
+                <Ionicons name="shirt" size={24} color={'#00FF88'} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.mineTitle}>Build Self-Confidence</Text>
@@ -575,7 +696,7 @@ export default function Library() {
         visible={rateTarget !== null}
         appLabel={rateTarget ? APP_LABELS[rateTarget] : ''}
         tint={rateTarget ? APP_TINTS[rateTarget] : colors.amber}
-        initialStars={rateTarget ? ratings[rateTarget].user_rating : null}
+        initialStars={rateTarget ? (ratings[rateTarget]?.user_rating ?? null) : null}
         submitting={submittingRating}
         onCancel={() => setRateTarget(null)}
         onSubmit={submitRating}
@@ -591,7 +712,8 @@ export default function Library() {
           const id = creatorMenuApp;
           setCreatorMenuApp(null);
           if (which === 'price') setSetPriceFor(id);
-          else setSetDiscountFor(id);
+          else if (which === 'discount') setSetDiscountFor(id);
+          else if (which === 'duo') setSetDuoDiscountFor(id);
         }}
       />
       <SetPriceModal
@@ -609,6 +731,35 @@ export default function Library() {
         onClose={() => setSetDiscountFor(null)}
         onSaved={onPricingSaved}
       />
+      <SetDuoDiscountModal
+        visible={setDuoDiscountFor !== null}
+        appId={setDuoDiscountFor}
+        pricing={setDuoDiscountFor ? pricing[setDuoDiscountFor] : null}
+        onClose={() => setSetDuoDiscountFor(null)}
+        onSaved={onPricingSaved}
+      />
+      <DuoJoinModal
+        visible={duoJoinFor !== null}
+        appId={duoJoinFor}
+        appName={duoJoinFor ? APP_LABELS[duoJoinFor] : ''}
+        offer={duoJoinFor ? pricing[duoJoinFor]?.duo_offer || null : null}
+        onClose={() => setDuoJoinFor(null)}
+        onCheckout={(group: DuoGroup) => {
+          // Hand off to the existing PaymentSheet flow on the same screen
+          // with duo_group_id attached so the backend uses the snapshotted
+          // discounted_price. The BuyAppModal already supports the kind
+          // 'library' PaymentSheet — we open it with extra context.
+          setDuoJoinFor(null);
+          if (duoJoinFor) {
+            // Stash group id on a global ref the BuyAppModal can pick up.
+            // Simpler: open the buy modal with duo_group_id as a hint via
+            // a state field. For MVP we re-use buyAppFor and pass the
+            // group via a sibling state set just below.
+            setBuyAppFor(group.app_id as MiniAppId);
+            setDuoBuyContext(group);
+          }
+        }}
+      />
       {/* Buy modal — opens when a non-Creator taps a priced/un-purchased card */}
       <BuyAppModal
         visible={buyAppFor !== null}
@@ -625,8 +776,9 @@ export default function Library() {
                   ? 'Daily speaking + posture drills, gratitude prompts, and an AI Style Coach.'
                   : ''
         }
-        onClose={() => setBuyAppFor(null)}
+        onClose={() => { setBuyAppFor(null); setDuoBuyContext(null); }}
         onPurchased={onPurchaseConfirmed}
+        duoGroupId={duoBuyContext?.group_id || null}
       />
     </SafeAreaView>
   );

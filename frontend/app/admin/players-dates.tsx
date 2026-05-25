@@ -85,6 +85,24 @@ export default function PlayersDatesScreen() {
         </View>
       </View>
 
+      {/* Inactive accounts entry point — v1.0.29 admin tool to find
+          long-dormant accounts and (optionally) delete them. */}
+      <TouchableOpacity
+        testID="apd-inactive-link"
+        onPress={() => router.push('/admin/inactive-accounts' as any)}
+        style={styles.inactiveLink}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="time-outline" size={16} color="#FF4D6D" />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.inactiveLinkTitle}>Inactive Accounts</Text>
+          <Text style={styles.inactiveLinkSub}>
+            View dormant players · 2 weeks / 1 month / 6 months
+          </Text>
+        </View>
+        <Ionicons name="chevron-forward" size={16} color="#FF4D6D" />
+      </TouchableOpacity>
+
       {/* Search */}
       <View style={styles.searchWrap}>
         <Ionicons name="search" size={16} color={colors.textMuted} />
@@ -266,4 +284,16 @@ const styles = StyleSheet.create({
   emailText: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 3 },
   metaText: { color: colors.textMuted, fontSize: 11 },
+
+  /** Banner-style entry point near the top of the screen that opens the
+   *  v1.0.29 inactive-accounts admin view. */
+  inactiveLink: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginHorizontal: spacing.md, marginTop: 10,
+    paddingVertical: 12, paddingHorizontal: 14,
+    borderRadius: radii.md, borderWidth: 1, borderColor: '#FF4D6D55',
+    backgroundColor: '#FF4D6D15',
+  },
+  inactiveLinkTitle: { color: '#FF4D6D', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  inactiveLinkSub: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
 });

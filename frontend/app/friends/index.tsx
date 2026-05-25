@@ -24,11 +24,20 @@ import LeaderboardTab from '../../src/components/LeaderboardTab';
 import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
 import { SuspendUserModal } from '../../src/components/SuspendUserModal';
 import { GiftComposerModal } from '../../src/components/GiftComposerModal';
+import {
+  PlayerPriceOverridesModal,
+  DeletePlayerConfirmModal,
+} from '../../src/components/AdminPlayerTools';
+import { useGuestGate } from '../../src/components/GuestGate';
 
 type TopTab = 'players' | 'friends' | 'leaderboard';
 type FriendsSubTab = 'requests' | 'mine';
 
 export default function FriendsScreen() {
+  // Guest-gate: anonymous users can browse this screen (see the players
+  // list, leaderboard, etc.) but tapping a player or sending a friend
+  // request must show the sign-in prompt instead of opening the action.
+  const guard = useGuestGate();
   const [topTab, setTopTab] = useState<TopTab>('players');
   const [subTab, setSubTab] = useState<FriendsSubTab>('requests');
 
@@ -44,6 +53,9 @@ export default function FriendsScreen() {
   const [friends, setFriends] = useState<Player[]>([]);
   // Per-friend unread DM counts → drives the red dot on each friend card.
   const [unreadByFriend, setUnreadByFriend] = useState<Record<string, number>>({});
+  // Set of friend_ids the caller has soft-blocked (v1.0.29 chat prefs).
+  // Drives the lock-icon overlay on each row's Message button.
+  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
   const [loadingFriends, setLoadingFriends] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -82,14 +94,20 @@ export default function FriendsScreen() {
   const loadFriendsData = useCallback(async () => {
     setLoadingFriends(true);
     try {
-      const [reqs, fr, unread] = await Promise.all([
+      const [reqs, fr, unread, prefs] = await Promise.all([
         api.listFriendRequests(),
         api.listFriends(),
         api.messagesUnreadSummary().catch(() => ({ unread_by_friend: {}, total_unread: 0 })),
+        api.chatPrefsBulk().catch(() => ({ preferences: [] })),
       ]);
       setRequests(reqs);
       setFriends(fr.friends);
       setUnreadByFriend(unread.unread_by_friend || {});
+      const blocked = new Set<string>();
+      for (const p of (prefs.preferences || [])) {
+        if (p.blocked && p.friend_id) blocked.add(p.friend_id);
+      }
+      setBlockedIds(blocked);
     } catch (e: any) {
       console.log('friends', e);
     } finally {
@@ -121,6 +139,7 @@ export default function FriendsScreen() {
   };
 
   const onAddFriend = async (p: Player) => {
+    if (guard.block('add a friend')) return;
     setSavingId(p.user_id);
     try {
       const r = await api.sendFriendRequest(p.user_id);
@@ -134,6 +153,7 @@ export default function FriendsScreen() {
   };
 
   const onAccept = async (p: Player) => {
+    if (guard.block('accept the friend request')) return;
     setSavingId(p.user_id);
     try {
       await api.acceptFriendRequest(p.user_id);
@@ -196,6 +216,16 @@ export default function FriendsScreen() {
             <Text style={[adminStrip.title, { color: colors.cyan }]}>Global Leaderboard</Text>
             <Text style={adminStrip.sub}>Top 100 · week / month / year / all</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[adminStrip.card, { borderColor: '#B388FF99' }]}
+            activeOpacity={0.85}
+            onPress={() => router.push('/admin/purchase-history' as any)}
+            testID="admin-purchase-history"
+          >
+            <Ionicons name="receipt" size={18} color="#B388FF" />
+            <Text style={[adminStrip.title, { color: '#B388FF' }]}>Purchase History</Text>
+            <Text style={adminStrip.sub}>Library+ buys + duo referral activity</Text>
+          </TouchableOpacity>
         </View>
       ) : null}
 
@@ -214,7 +244,12 @@ export default function FriendsScreen() {
           loading={loadingPlayers}
           refreshing={refreshing}
           onRefresh={onRefresh}
-          onPress={setOpenProfile}
+          // Guests can SEE players but tapping a player to open
+          // their profile sheet must show the sign-in prompt instead.
+          onPress={(p) => {
+            if (guard.block('view this player')) return;
+            setOpenProfile(p);
+          }}
           onAddFriend={onAddFriend}
           savingId={savingId}
         />
@@ -225,12 +260,16 @@ export default function FriendsScreen() {
           requests={requests}
           friends={friends}
           unreadByFriend={unreadByFriend}
+          blockedIds={blockedIds}
           loading={loadingFriends}
           refreshing={refreshing}
           onRefresh={onRefresh}
           onAccept={onAccept}
           onDecline={onDecline}
-          onPress={setOpenProfile}
+          onPress={(p) => {
+            if (guard.block('view this player')) return;
+            setOpenProfile(p);
+          }}
           savingId={savingId}
         />
       ) : (
@@ -329,7 +368,7 @@ function PlayersTab({
 }
 
 function FriendsTab({
-  subTab, setSubTab, requests, friends, unreadByFriend, loading, refreshing, onRefresh,
+  subTab, setSubTab, requests, friends, unreadByFriend, blockedIds, loading, refreshing, onRefresh,
   onAccept, onDecline, onPress, savingId,
 }: {
   subTab: FriendsSubTab;
@@ -337,6 +376,7 @@ function FriendsTab({
   requests: { incoming: FriendRequestEntry[]; outgoing: FriendRequestEntry[] };
   friends: Player[];
   unreadByFriend: Record<string, number>;
+  blockedIds: Set<string>;
   loading: boolean;
   refreshing: boolean;
   onRefresh: () => void;
@@ -439,6 +479,7 @@ function FriendsTab({
               onMessage={() => router.push(`/messages/${item.user_id}`)}
               saving={savingId === item.user_id}
               unreadCount={unreadByFriend[item.user_id] || 0}
+              isBlocked={blockedIds.has(item.user_id)}
             />
           )}
         />
@@ -523,13 +564,14 @@ function PulsingUnreadDot({ count, testID }: { count: number; testID?: string })
   );
 }
 
-function PlayerCard({ player, onPress, onAddFriend, onMessage, saving, unreadCount }: {
+function PlayerCard({ player, onPress, onAddFriend, onMessage, saving, unreadCount, isBlocked }: {
   player: Player;
   onPress: () => void;
   onAddFriend?: () => void;
   onMessage?: () => void;
   saving?: boolean;
   unreadCount?: number;
+  isBlocked?: boolean;
 }) {
   const adminView = !!player.is_admin_view;
   // ── Admin moderation visuals (only the Creator sees these flags) ──
@@ -625,6 +667,15 @@ function PlayerCard({ player, onPress, onAddFriend, onMessage, saving, unreadCou
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         >
           <Ionicons name="chatbubble-ellipses" size={18} color={colors.cyan} />
+          {isBlocked ? (
+            <View
+              style={styles.quickMessageLock}
+              testID={`friend-blocked-lock-${player.user_id}`}
+              pointerEvents="none"
+            >
+              <Ionicons name="lock-closed" size={9} color="#fff" />
+            </View>
+          ) : null}
         </TouchableOpacity>
       ) : onAddFriend ? (
         <FriendActionButton player={player} onAddFriend={onAddFriend} saving={saving} />
@@ -764,6 +815,25 @@ function PlayerProfileModal({
   const saving = savingId === player.user_id;
   const [showUnfriendConfirm, setShowUnfriendConfirm] = useState(false);
   const [unfriending, setUnfriending] = useState(false);
+  // Live-refresh the player's stats every time the modal opens, so the
+  // viewer always sees the most up-to-the-second XP/level/streak/quests/
+  // goals/last-active counters instead of a stale snapshot from the
+  // list endpoint.
+  const [livePlayer, setLivePlayer] = useState<Player>(player);
+  useEffect(() => { setLivePlayer(player); }, [player.user_id]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const fresh = await api.playerProfile(player.user_id);
+        if (!cancelled) setLivePlayer((prev) => ({ ...prev, ...fresh }));
+      } catch {/* keep snapshot on failure */}
+    })();
+    return () => { cancelled = true; };
+  }, [player.user_id]);
+  // Use livePlayer everywhere below so any later edits flip to fresh
+  // data without re-templating. We alias to `player` for minimal diff.
+  player = livePlayer;
 
   // Days since the friendship was accepted — drives the unfriend
   // confirmation dialog subtitle. Null when the server didn't send
@@ -845,6 +915,15 @@ function PlayerProfileModal({
             </View>
           )}
           <Text style={[styles.modalName, player.is_admin_view && { color: '#FFD700' }]}>{player.name}</Text>
+          {/* Live "last active" subtitle so the public profile card
+              clearly shows how fresh the player's activity is. Admin
+              creator profiles are always "Now" since they're omnipresent. */}
+          <Text style={styles.modalLastActive}>
+            <Ionicons name="time-outline" size={12} color={colors.textMuted} />{' '}
+            {player.is_admin_view
+              ? 'Last active: Now'
+              : `Last active: ${formatLastSeen((player as any).last_seen_at)}`}
+          </Text>
 
           <View style={styles.modalStatsGrid}>
             <ModalStat icon="flash" color={player.is_admin_view ? '#FFD700' : colors.amber}
@@ -857,6 +936,8 @@ function PlayerProfileModal({
               value={player.is_admin_view ? '∞' : player.tasks_completed.toString()} label="Quests" />
             <ModalStat icon="flag" color={player.is_admin_view ? '#FFD700' : colors.cyan}
               value={player.is_admin_view ? '∞' : player.goals_completed.toString()} label="Goals" />
+            <ModalStat icon="rocket" color={player.is_admin_view ? '#FFD700' : colors.cyan}
+              value={player.is_admin_view ? '∞' : ((player as any).active_goals_count ?? 0).toString()} label="Active goals" />
           </View>
 
           {player.bio && !player.is_admin_view ? (
@@ -877,7 +958,18 @@ function PlayerProfileModal({
               sees this block. Non-self only. Lets the Creator suspend
               the player straight from their profile modal. */}
           {viewerIsAdmin && player.friend_status !== 'self' && !player.is_admin_view ? (
-            <AdminControlsBlock userId={player.user_id} userName={player.name} />
+            <AdminControlsBlock
+              userId={player.user_id}
+              userName={player.name}
+              userEmail={(player as any).email}
+              onAccountDeleted={() => {
+                // Close the modal and trigger the parent's refresh hook so
+                // the just-deleted player drops out of the list / search
+                // results immediately.
+                onClose();
+                onFriendChanged?.();
+              }}
+            />
           ) : null}
 
           {/* Action area */}
@@ -1044,11 +1136,25 @@ function ModalStat({ icon, color, value, label }: { icon: string; color: string;
  * Suspend/Lift Suspension buttons. Sending Gifts and admin-bypass DM
  * will be added to this block in subsequent phases.
  */
-function AdminControlsBlock({ userId, userName }: { userId: string; userName: string }) {
+function AdminControlsBlock({
+  userId,
+  userName,
+  userEmail,
+  onAccountDeleted,
+}: {
+  userId: string;
+  userName: string;
+  userEmail?: string;
+  /** Called after cascade delete succeeds — parent should close the
+   *  profile modal and refresh the players list. */
+  onAccountDeleted?: () => void;
+}) {
   const [status, setStatus] = useState<{ suspended: boolean; forever?: boolean; remaining_seconds?: number | null; until?: string | null; reason?: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [showSuspend, setShowSuspend] = useState(false);
   const [showGift, setShowGift] = useState(false);
+  const [showOverrides, setShowOverrides] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
   const [working, setWorking] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -1155,6 +1261,18 @@ function AdminControlsBlock({ userId, userName }: { userId: string; userName: st
         <Text style={styles.adminGiftText}>Send Gift</Text>
       </TouchableOpacity>
 
+      {/* Per-player price overrides — Creator-set custom prices on the
+          four Library+ mini-apps that ONLY this player sees. v1.0.29. */}
+      <TouchableOpacity
+        testID="admin-overrides-btn"
+        onPress={() => setShowOverrides(true)}
+        style={styles.adminOverridesBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="pricetags" size={16} color="#FFD700" />
+        <Text style={styles.adminOverridesText}>Per-Player Prices</Text>
+      </TouchableOpacity>
+
       {/* Direct message — admin can DM anyone, no friendship needed */}
       <TouchableOpacity
         testID="admin-dm-btn"
@@ -1172,6 +1290,51 @@ function AdminControlsBlock({ userId, userName }: { userId: string; userName: st
         targetName={userName}
         onClose={() => setShowGift(false)}
       />
+
+      <PlayerPriceOverridesModal
+        visible={showOverrides}
+        userId={userId}
+        userName={userName}
+        onClose={() => setShowOverrides(false)}
+      />
+
+      {/* Delete this account — RED danger zone with two-step
+          type-DELETE-to-confirm guard. v1.0.29. */}
+      <TouchableOpacity
+        testID="admin-delete-account-btn"
+        onPress={() => setShowDelete(true)}
+        style={styles.adminDangerBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="trash" size={16} color={colors.red} />
+        <Text style={styles.adminDangerText}>Delete Account</Text>
+      </TouchableOpacity>
+
+      <DeletePlayerConfirmModal
+        visible={showDelete}
+        userId={userId}
+        userName={userName}
+        userEmail={userEmail}
+        onClose={() => setShowDelete(false)}
+        onDeleted={() => {
+          showAlert('Deleted', `${userName} has been removed.`);
+          onAccountDeleted?.();
+        }}
+      />
+
+      {/* Open the full creator-only player page where the XP Penalty
+          Subtraction tool + bar/line charts (with black penalty
+          overlay) + recent-penalty history live. */}
+      <TouchableOpacity
+        testID="admin-open-full-profile"
+        onPress={() => router.push(`/admin/player/${userId}` as any)}
+        style={styles.adminPenaltyBtn}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="remove-circle" size={16} color={colors.red} />
+        <Text style={styles.adminPenaltyText}>XP Penalty Subtraction & Charts</Text>
+        <Ionicons name="chevron-forward" size={14} color={colors.red} />
+      </TouchableOpacity>
     </View>
   );
 }
@@ -1576,6 +1739,21 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.cyan + '66',
   },
+  /** Tiny red lock badge overlayed on the Message button when the
+   *  caller has soft-blocked this friend (chat_preferences.blocked). */
+  quickMessageLock: {
+    position: 'absolute',
+    bottom: -4,
+    right: -4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: colors.red,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.bg,
+  },
 
   actionBtn: {
     flexDirection: 'row',
@@ -1628,7 +1806,8 @@ const styles = StyleSheet.create({
   },
   levelPillText: { color: colors.bg, fontWeight: '900', fontSize: 11, letterSpacing: 0.5 },
 
-  modalName: { color: colors.text, fontWeight: '900', fontSize: 24, textAlign: 'center', marginBottom: spacing.lg },
+  modalName: { color: colors.text, fontWeight: '900', fontSize: 24, textAlign: 'center', marginBottom: 4 },
+  modalLastActive: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginBottom: spacing.lg, fontWeight: '600' },
 
   modalStatsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: spacing.md },
   modalStatBox: {
@@ -1833,6 +2012,23 @@ const styles = StyleSheet.create({
     borderColor: '#FFD700',
   },
   adminGiftText: { color: '#FFD700', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  /** Per-Player Prices — admin opens the price-override editor for the
+   *  Library+ mini-apps for THIS player only. v1.0.29. */
+  adminOverridesBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 12, borderRadius: radii.pill,
+    backgroundColor: 'rgba(255, 215, 0, 0.12)',
+    borderWidth: 1, borderColor: '#FFD70088', marginTop: 6,
+  },
+  adminOverridesText: { color: '#FFD700', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  /** RED danger zone — Delete Account (two-step type-DELETE confirm). */
+  adminDangerBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 12, borderRadius: radii.pill,
+    backgroundColor: colors.red + '15',
+    borderWidth: 1, borderColor: colors.red + '99', marginTop: 12,
+  },
+  adminDangerText: { color: colors.red, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
   adminDMBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1845,6 +2041,19 @@ const styles = StyleSheet.create({
     borderColor: colors.cyan,
   },
   adminDMText: { color: colors.cyan, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  adminPenaltyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: radii.pill,
+    backgroundColor: colors.red + '22',
+    borderWidth: 1,
+    borderColor: colors.red,
+    marginTop: 8,
+  },
+  adminPenaltyText: { color: colors.red, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
 
   // Admin moderation badges on player cards
   suspendedDot: {

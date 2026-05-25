@@ -71,13 +71,33 @@ export function GiftReceivedAlert() {
   }
 
   const isXP = current.kind === 'xp';
-  const giftIcon = isXP ? 'flash' : 'rocket';
+  // Pick a boost-strength icon based on the multiplier value — bigger
+  // multiplier = bigger icon. Falls back to 'rocket' when missing.
+  const multiplierVal = Number(current.boost_multiplier || 0);
+  const durationDays = Number(current.boost_duration_days || 0);
+  let boostIcon: 'flash' | 'rocket' | 'flame' | 'planet' = 'rocket';
+  if (!isXP) {
+    if (multiplierVal >= 5) boostIcon = 'planet';
+    else if (multiplierVal >= 3) boostIcon = 'flame';
+    else if (multiplierVal >= 2) boostIcon = 'rocket';
+    else boostIcon = 'flash';
+  }
+  const giftIcon = isXP ? 'flash' : boostIcon;
+  // For boost gifts, surface the multiplier prominently AND show the
+  // duration period — per user spec 2026-05-23: "ensure the popup
+  // displays the details for the 'multiplier icon' and the duration
+  // period". For XP gifts the amount line is enough.
   const giftLine = isXP
     ? `${current.amount.toLocaleString()} XP Points`
-    : `${current.boost_label || 'Bonus Top-Up'}`;
+    : (multiplierVal > 0 ? `${multiplierVal}× XP Multiplier` : (current.boost_label || 'XP Boost'));
+  const giftDurationLine = !isXP && durationDays > 0
+    ? `Lasts ${durationDays} day${durationDays === 1 ? '' : 's'} once activated`
+    : null;
   const subLine = isXP
     ? 'Already added to your total XP.'
-    : 'Available in your Points+ inventory now.';
+    : (current.boost_label
+        ? `${current.boost_label} · in your Points+ inventory now`
+        : 'Available in your Points+ inventory now.');
 
   return (
     <Modal visible animationType="fade" transparent onRequestClose={() => { /* must claim */ }}>
@@ -96,6 +116,12 @@ export function GiftReceivedAlert() {
               <Ionicons name={giftIcon as any} size={28} color={GOLD} />
             </View>
             <Text style={styles.giftMain}>{giftLine}</Text>
+            {giftDurationLine ? (
+              <View style={styles.durationPill}>
+                <Ionicons name="time-outline" size={12} color={GOLD} />
+                <Text style={styles.durationPillText}>{giftDurationLine}</Text>
+              </View>
+            ) : null}
             <Text style={styles.giftSub}>{subLine}</Text>
           </View>
 

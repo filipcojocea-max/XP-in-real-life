@@ -6,6 +6,12 @@ import { Platform } from 'react-native';
 const TOKEN_KEY = 'xp_token';
 const USER_KEY = 'xp_user';
 const ANON_KEY = 'xp_anon_id';
+// When a guest signs in / registers, we move their anonymous id from
+// ANON_KEY → PENDING_MIGRATION_KEY so the api client stops sending it
+// (the new JWT takes over), but we still remember it so the post-
+// onboarding modal can offer to migrate guest progress to the new
+// account.
+const PENDING_MIGRATION_KEY = 'xp_pending_migration_anon_id';
 
 // SecureStore is only on iOS/Android — fall back to AsyncStorage on web/dev
 const storage = {
@@ -51,6 +57,13 @@ type AuthState = {
   signIn: (token: string, user: AuthUser) => Promise<void>;
   signOut: () => Promise<void>;
   continueAnonymously: () => Promise<void>;
+  /** Set by signIn() when the user came from guest mode. The post-
+   *  onboarding migration host reads this to decide whether to show
+   *  the "continue guest progress?" prompt. */
+  pendingMigrationAnonId: string | null;
+  /** Clears pendingMigrationAnonId from state + storage. Called by the
+   *  migration modal on BOTH "migrate" success and "start fresh". */
+  clearPendingMigration: () => Promise<void>;
   // Set by the API client when a 403 account_suspended response arrives.
   // The root layout listens for this and renders the golden alert.
   suspension: {
@@ -72,6 +85,8 @@ const AuthContext = createContext<AuthState>({
   signIn: async () => {},
   signOut: async () => {},
   continueAnonymously: async () => {},
+  pendingMigrationAnonId: null,
+  clearPendingMigration: async () => {},
   suspension: null,
   clearSuspension: () => {},
 });
@@ -125,19 +140,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [anonymousId, setAnonymousId] = useState<string | null>(null);
+  const [pendingMigrationAnonId, setPendingMigrationAnonId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [t, u, a] = await Promise.all([
+        const [t, u, a, pend] = await Promise.all([
           storage.get(TOKEN_KEY),
           storage.get(USER_KEY),
           storage.get(ANON_KEY),
+          storage.get(PENDING_MIGRATION_KEY),
         ]);
         if (t && u) {
           currentToken = t;
           setToken(t);
           setUser(JSON.parse(u));
+          if (pend) setPendingMigrationAnonId(pend);
         } else if (a) {
           currentAnonId = a;
           setAnonymousId(a);
@@ -151,14 +169,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signIn = useCallback(async (newToken: string, newUser: AuthUser) => {
+    // Capture the guest's anonymous id BEFORE wiping it. The post-
+    // onboarding migration prompt reads it to know whether there's
+    // anything to migrate.
+    let prevAnon: string | null = null;
+    try {
+      prevAnon = await storage.get(ANON_KEY);
+    } catch {
+      prevAnon = null;
+    }
     currentToken = newToken;
     currentAnonId = null;
     await storage.set(TOKEN_KEY, newToken);
     await storage.set(USER_KEY, JSON.stringify(newUser));
     await storage.del(ANON_KEY);
+    if (prevAnon) {
+      try {
+        await storage.set(PENDING_MIGRATION_KEY, prevAnon);
+      } catch {
+        /* non-fatal */
+      }
+      setPendingMigrationAnonId(prevAnon);
+    }
     setToken(newToken);
     setUser(newUser);
     setAnonymousId(null);
+  }, []);
+
+  const clearPendingMigration = useCallback(async () => {
+    try {
+      await storage.del(PENDING_MIGRATION_KEY);
+    } catch {
+      /* ignore */
+    }
+    setPendingMigrationAnonId(null);
   }, []);
 
   const signOut = useCallback(async () => {
@@ -212,7 +256,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const isAnonymous = !token && !!anonymousId;
 
   return (
-    <AuthContext.Provider value={{ loading, token, user, anonymousId, isAnonymous, signIn, signOut, continueAnonymously, suspension, clearSuspension }}>
+    <AuthContext.Provider value={{ loading, token, user, anonymousId, isAnonymous, signIn, signOut, continueAnonymously, pendingMigrationAnonId, clearPendingMigration, suspension, clearSuspension }}>
       {children}
     </AuthContext.Provider>
   );

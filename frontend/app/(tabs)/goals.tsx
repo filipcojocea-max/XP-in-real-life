@@ -26,7 +26,9 @@ const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
 // Maximum number of active (uncompleted) long-term goals a user can hold
 // at one time. Mirrors the server-side cap in /api/goals.
-const GOAL_LIMIT = 5;
+const GOAL_LIMIT = 8;
+// Per-unit caps (also mirrored server-side).
+const DAILY_GOAL_LIMIT = 5;
 
 // Cycle-lockout helpers for the Goals "tick rate-limit" feature.
 // Backend enforces this — these helpers are just for the UI countdown.
@@ -89,9 +91,19 @@ export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  // When set to a Goal object, opens the editor in EDIT mode for that goal.
+  const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
+  // When set, opens the "🎉 Congratulations" celebration modal for a
+  // completed goal with Restart / Delete actions.
+  const [celebratingGoal, setCelebratingGoal] = useState<Goal | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
   // Maps goal_id → toast message currently visible. Auto-clears after 5s.
   const [lockToast, setLockToast] = useState<Record<string, string>>({});
+  // Tracks whether a long-press just fired on a given goal id so we can
+  // suppress the implicit onPress that React Native fires when the user
+  // releases the press. Without this, the edit modal would open on top of
+  // the delete-confirm dialog the user just triggered.
+  const longPressFiredRef = useRef<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     try {
@@ -177,8 +189,21 @@ export default function Goals() {
   };
 
   const remove = async (g: Goal) => {
-    const ok = await showConfirm('Delete Goal?', `Remove "${g.title}"?`, {
-      confirmText: 'Delete',
+    // Verification-style confirm: surface what the user is about to lose
+    // so a long-press doesn't accidentally nuke a long-term goal.
+    const lines: string[] = [
+      `Are you sure you want to delete "${g.title}"?`,
+      '',
+      'This will permanently remove the goal and its progress.',
+    ];
+    if (typeof g.current_value === 'number' && typeof g.target_value === 'number') {
+      lines.push(`Current progress: ${g.current_value}/${g.target_value} ${g.unit || ''}`.trim());
+    }
+    lines.push('');
+    lines.push('XP you already earned will NOT be refunded.');
+    const ok = await showConfirm('Delete this goal?', lines.join('\n'), {
+      confirmText: 'Delete Goal',
+      cancelText: 'Keep It',
       destructive: true,
     });
     if (!ok) return;
@@ -246,7 +271,28 @@ export default function Goals() {
               <Pressable
                 key={g.id}
                 testID={`goal-row-${g.id}`}
-                onLongPress={() => remove(g)}
+                onPress={() => {
+                  // Suppress the implicit onPress that fires when a long-press
+                  // is released — otherwise the edit modal pops on top of the
+                  // delete confirm dialog (regression from tap-to-edit).
+                  if (longPressFiredRef.current[g.id]) {
+                    longPressFiredRef.current[g.id] = false;
+                    return;
+                  }
+                  // Tap-anywhere-on-card:
+                  //  • Completed goal  → 🎉 Congrats modal (Restart / Delete)
+                  //  • Active goal     → Edit modal
+                  // The +/− buttons are TouchableOpacity children with their
+                  // own onPress so their taps are consumed before reaching
+                  // this Pressable.
+                  if (g.completed) setCelebratingGoal(g);
+                  else setEditingGoal(g);
+                }}
+                onLongPress={() => {
+                  longPressFiredRef.current[g.id] = true;
+                  remove(g);
+                }}
+                delayLongPress={1000}
                 style={{ marginBottom: spacing.md }}
               >
                 <Card accent={meta.color}>
@@ -327,25 +373,152 @@ export default function Goals() {
             );
           })
         )}
-        <Text style={styles.hint}>Tip: long-press to delete.</Text>
       </ScrollView>
 
-      <AddGoalModal visible={showAdd} isAdmin={isAdmin} onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); load(); }} />
+      <GoalEditorModal
+        visible={showAdd || !!editingGoal}
+        editingGoal={editingGoal}
+        isAdmin={isAdmin}
+        onClose={() => { setShowAdd(false); setEditingGoal(null); }}
+        onSaved={() => { setShowAdd(false); setEditingGoal(null); load(); }}
+        onDelete={async (g) => {
+          // Reuse the same verification confirm + DELETE flow used by
+          // long-press, then close the editor modal on success.
+          await remove(g);
+          setEditingGoal(null);
+        }}
+      />
+
+      <CompletedGoalActionsModal
+        goal={celebratingGoal}
+        onClose={() => setCelebratingGoal(null)}
+        onRestart={async (g) => {
+          try {
+            await api.restartGoal(g.id);
+            setCelebratingGoal(null);
+            await load();
+          } catch (e: any) {
+            showAlert('Could not restart', String(e?.detail?.message || e.message || e));
+          }
+        }}
+        onDelete={async (g) => {
+          // Reuse the verification confirm + DELETE flow.
+          await remove(g);
+          setCelebratingGoal(null);
+        }}
+      />
     </SafeAreaView>
   );
 }
-
-function AddGoalModal({
-  visible,
+// ── Completed-goal celebration modal ─────────────────────────────────
+// Shown when the user taps a goal that has `completed=true`. Surfaces a
+// congratulatory message + two actions: Restart the goal (re-uses /restart
+// endpoint, preserves title/target/xp) or Delete it. Tapping outside or
+// the X just dismisses the modal.
+function CompletedGoalActionsModal({
+  goal,
   onClose,
-  onAdded,
+  onRestart,
+  onDelete,
+}: {
+  goal: Goal | null;
+  onClose: () => void;
+  onRestart: (g: Goal) => void | Promise<void>;
+  onDelete: (g: Goal) => void | Promise<void>;
+}) {
+  const visible = !!goal;
+  const [busy, setBusy] = useState<'restart' | 'delete' | null>(null);
+
+  useEffect(() => {
+    if (!visible) setBusy(null);
+  }, [visible]);
+
+  if (!goal) return null;
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.celebBackdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View style={styles.celebCard} testID="celebrate-modal">
+          <TouchableOpacity
+            onPress={onClose}
+            style={styles.celebCloseBtn}
+            testID="celebrate-modal-close"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="close" size={22} color={colors.text} />
+          </TouchableOpacity>
+
+          <View style={styles.celebTrophyBubble}>
+            <Ionicons name="trophy" size={42} color={colors.amber} />
+          </View>
+
+          <Text style={styles.celebTitle}>Congratulations!</Text>
+          <Text style={styles.celebSubtitle}>
+            You completed your goal:
+          </Text>
+          <Text style={styles.celebGoalTitle} numberOfLines={3}>
+            {'\u201C'}{goal.title}{'\u201D'}
+          </Text>
+
+          <View style={styles.celebDivider} />
+
+          <Text style={styles.celebPrompt}>What would you like to do?</Text>
+
+          <TouchableOpacity
+            testID="celebrate-restart-btn"
+            style={[styles.celebActionBtn, styles.celebRestartBtn, busy ? { opacity: 0.6 } : null]}
+            disabled={!!busy}
+            onPress={async () => {
+              setBusy('restart');
+              try { await onRestart(goal); } finally { setBusy(null); }
+            }}
+            activeOpacity={0.85}
+          >
+            {busy === 'restart' ? <ActivityIndicator color={colors.bg} /> : (
+              <>
+                <Ionicons name="refresh" size={18} color={colors.bg} />
+                <Text style={styles.celebRestartText}>Restart this goal</Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            testID="celebrate-delete-btn"
+            style={[styles.celebActionBtn, styles.celebDeleteBtn, busy ? { opacity: 0.6 } : null]}
+            disabled={!!busy}
+            onPress={async () => {
+              setBusy('delete');
+              try { await onDelete(goal); } finally { setBusy(null); }
+            }}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="trash-outline" size={18} color={colors.danger} />
+            <Text style={styles.celebDeleteText}>Delete this goal</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+
+
+function GoalEditorModal({
+  visible,
+  editingGoal,
+  onClose,
+  onSaved,
+  onDelete,
   isAdmin,
 }: {
   visible: boolean;
+  editingGoal: Goal | null;
   onClose: () => void;
-  onAdded: () => void;
+  onSaved: () => void;
+  onDelete?: (g: Goal) => void | Promise<void>;
   isAdmin?: boolean;
 }) {
+  const isEdit = !!editingGoal;
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [area, setArea] = useState<FocusArea>('fitness');
@@ -353,6 +526,9 @@ function AddGoalModal({
   const [unit, setUnit] = useState<DurationUnit>('days');
   const [xp, setXp] = useState<string>('15');
   const [saving, setSaving] = useState(false);
+  // Captures the original unit when EDIT modal opens so we can detect a
+  // timeframe change and surface the reset-warning banner.
+  const [originalUnit, setOriginalUnit] = useState<DurationUnit>('days');
 
   // Sensible default XP per unit (half of cap, rounded to a nice round number)
   const defaultXpFor = useCallback((u: DurationUnit): number => {
@@ -362,15 +538,28 @@ function AddGoalModal({
   }, []);
 
   useEffect(() => {
-    if (visible) {
+    if (!visible) return;
+    if (editingGoal) {
+      // EDIT mode — pre-fill from the goal we're editing.
+      const u = ((editingGoal.unit as DurationUnit) || 'days') as DurationUnit;
+      setTitle(editingGoal.title || '');
+      setDesc(editingGoal.description || '');
+      setArea((editingGoal.focus_area as FocusArea) || 'fitness');
+      setTarget(String(editingGoal.target_value ?? 30));
+      setUnit(u);
+      setOriginalUnit(u);
+      setXp(String(editingGoal.xp_reward ?? defaultXpFor(u)));
+    } else {
+      // CREATE mode — fresh defaults.
       setTitle('');
       setDesc('');
       setArea('fitness');
       setTarget('30');
       setUnit('days');
+      setOriginalUnit('days');
       setXp(String(defaultXpFor('days')));
     }
-  }, [visible, defaultXpFor]);
+  }, [visible, editingGoal, defaultXpFor]);
 
   // Creator/Admin: bypass per-unit XP caps and allow up to 100,000 XP per goal.
   const ADMIN_CAP = 100000;
@@ -414,17 +603,28 @@ function AddGoalModal({
     const xpRequested = Math.max(1, Math.min(cap, parseInt(xp, 10) || defaultXpFor(unit)));
     setSaving(true);
     try {
-      await api.createGoal({
-        title: title.trim(),
-        description: desc.trim(),
-        focus_area: area,
-        target_value: targetN,
-        unit,
-        xp_reward: xpRequested,
-      });
-      onAdded();
+      if (isEdit && editingGoal) {
+        await api.updateGoal(editingGoal.id, {
+          title: title.trim(),
+          description: desc.trim(),
+          focus_area: area,
+          target_value: targetN,
+          unit,
+          xp_reward: xpRequested,
+        });
+      } else {
+        await api.createGoal({
+          title: title.trim(),
+          description: desc.trim(),
+          focus_area: area,
+          target_value: targetN,
+          unit,
+          xp_reward: xpRequested,
+        });
+      }
+      onSaved();
     } catch (e: any) {
-      showAlert('Failed', String(e.message || e));
+      showAlert('Failed', String(e?.detail?.message || e.message || e));
     } finally {
       setSaving(false);
     }
@@ -442,7 +642,16 @@ function AddGoalModal({
           testID="add-goal-modal"
         >
           <View style={styles.handle} />
-          <Text style={styles.sheetTitle}>New Goal</Text>
+          <Text style={styles.sheetTitle}>{isEdit ? 'Edit Goal' : 'New Goal'}</Text>
+
+          {isEdit && unit !== originalUnit ? (
+            <View style={styles.timeframeBanner} testID="goal-timeframe-banner">
+              <Ionicons name="refresh" size={14} color={colors.amber} />
+              <Text style={styles.timeframeBannerText}>
+                Changing duration will reset the countdown.
+              </Text>
+            </View>
+          ) : null}
 
           <Text style={styles.inputLabel}>Title</Text>
           <TextInput
@@ -565,9 +774,24 @@ function AddGoalModal({
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity testID="goal-save-btn" style={[styles.actionBtn, styles.saveBtn]} onPress={save} disabled={saving}>
-              {saving ? <ActivityIndicator color={colors.bg} /> : <Text style={styles.saveText}>Create Goal</Text>}
+              {saving ? <ActivityIndicator color={colors.bg} /> : <Text style={styles.saveText}>{isEdit ? 'Save Changes' : 'Create Goal'}</Text>}
             </TouchableOpacity>
           </View>
+
+          {/* Edit mode only: bottom-anchored Delete-this-goal button.
+              Tapping it triggers the same verification confirm used by
+              long-press, then closes this modal on success. */}
+          {isEdit && editingGoal && onDelete ? (
+            <TouchableOpacity
+              testID="goal-delete-btn"
+              style={styles.deleteFromEditBtn}
+              onPress={() => onDelete(editingGoal)}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="trash-outline" size={16} color={colors.text} />
+              <Text style={styles.deleteFromEditText}>Delete this goal</Text>
+            </TouchableOpacity>
+          ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
@@ -733,6 +957,161 @@ const styles = StyleSheet.create({
   cancelText: { color: colors.textSecondary, fontWeight: '700' },
   saveBtn: { backgroundColor: colors.green },
   saveText: { color: colors.bg, fontWeight: '800', fontSize: 15 },
+
+  // ── Bottom-anchored "Delete this goal" button (edit mode only) ────
+  deleteFromEditBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: spacing.lg,
+    paddingVertical: 14,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.red + '55',
+    backgroundColor: colors.red + '10',
+  },
+  deleteFromEditText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+
+  // ── Celebration modal (Congrats! Restart / Delete) ──────────────────
+  celebBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.lg,
+  },
+  celebCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+    borderRadius: radii.lg,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xl,
+    paddingBottom: spacing.lg,
+    alignItems: 'center',
+  },
+  celebCloseBtn: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceGlass,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  celebTrophyBubble: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.amber + '18',
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+    marginBottom: spacing.md,
+  },
+  celebTitle: {
+    color: colors.amber,
+    fontSize: 24,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  celebSubtitle: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  celebGoalTitle: {
+    color: colors.text,
+    fontSize: 17,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginTop: 6,
+    paddingHorizontal: spacing.sm,
+  },
+  celebDivider: {
+    width: '60%',
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: spacing.lg,
+  },
+  celebPrompt: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
+  celebActionBtn: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 16,
+    borderRadius: radii.pill,
+    marginTop: spacing.sm,
+    borderWidth: 1,
+  },
+  celebRestartBtn: {
+    backgroundColor: colors.green,
+    borderColor: colors.green,
+  },
+  celebRestartText: {
+    color: colors.bg,
+    fontWeight: '900',
+    fontSize: 15,
+    letterSpacing: 0.3,
+  },
+  celebDeleteBtn: {
+    backgroundColor: colors.danger + '10',
+    borderColor: colors.danger + '55',
+  },
+  celebDeleteText: {
+    color: colors.danger,
+    fontWeight: '800',
+    fontSize: 14,
+    letterSpacing: 0.3,
+  },
+
+  // ── Edit-mode banner when user picks a different duration ─────────
+  timeframeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: radii.md,
+    backgroundColor: colors.amber + '15',
+    borderWidth: 1,
+    borderColor: colors.amber + '55',
+    marginTop: spacing.sm,
+    marginBottom: 4,
+  },
+  timeframeBannerText: {
+    color: colors.amber,
+    fontSize: 12,
+    fontWeight: '800',
+    flex: 1,
+    lineHeight: 17,
+  },
 
   xpBadge: {
     flexDirection: 'row',

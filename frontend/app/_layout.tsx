@@ -18,6 +18,10 @@ import { GiftReceivedAlert } from '../src/components/GiftReceivedAlert';
 import { LevelUpReviewModal } from '../src/components/LevelUpReviewModal';
 import { useLevelUpDetector } from '../src/hooks/useLevelUpDetector';
 import { StripeReturnHandler } from '../src/StripeReturnHandler';
+import { PenaltyHost } from '../src/PenaltyHost';
+import { OfflineProvider, OfflineBanner } from '../src/Offline';
+import { GuestGateHost } from '../src/components/GuestGate';
+import { GuestProgressMigrationHost } from '../src/components/GuestProgressMigrationHost';
 
 /**
  * LevelUpPromptHost — wires the level-up detector hook to the modal.
@@ -162,9 +166,16 @@ export default function RootLayout() {
   return (
     <AuthProvider>
       <ImmersiveProvider>
-        <View style={{ flex: 1, backgroundColor: colors.bg }}>
-          <StatusBar style="light" />
-          <AuthGate>
+        <OfflineProvider>
+          <View style={{ flex: 1, backgroundColor: colors.bg }}>
+            <StatusBar style="light" />
+            {/* Floating offline / pending-sync pill — sits above all
+                screens so the user always knows when their writes are
+                queued. Hidden when online + queue empty. */}
+            <View pointerEvents="box-none" style={{ alignItems: 'center', position: 'absolute', top: 0, left: 0, right: 0, zIndex: 9999 }}>
+              <OfflineBanner />
+            </View>
+            <AuthGate>
             <Stack
               screenOptions={{
                 headerShown: false,
@@ -220,8 +231,25 @@ export default function RootLayout() {
                 confirmation alert if the webhook hasn't already
                 inserted the OWNED row. */}
             <StripeReturnHandler />
+            {/* Pops a full-screen "XP Penalty Received" modal the next
+                time the player opens the app after the Creator has
+                applied an XP deduction against them. Hold-to-close
+                gesture (2s) acknowledges + dismisses, then we advance
+                to the next pending penalty if any. */}
+            <PenaltyHost />
+            {/* Singleton modal shown when a guest tries to take an
+                action that requires a real account (friends, DM, buy,
+                duo, BT/Spot invite, etc). useGuestGate() hook pokes
+                this host. */}
+            <GuestGateHost />
+            {/* Pops after the new user finishes onboarding if they had
+                guest-mode progress before signing in / registering.
+                Offers two options: migrate everything to the new
+                account, or start fresh and discard the guest data. */}
+            <GuestProgressMigrationHost />
           </AuthGate>
-        </View>
+          </View>
+        </OfflineProvider>
       </ImmersiveProvider>
     </AuthProvider>
   );

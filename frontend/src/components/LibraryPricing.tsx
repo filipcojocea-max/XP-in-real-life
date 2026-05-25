@@ -49,6 +49,7 @@ import * as Haptics from 'expo-haptics';
 import { colors, spacing, radii } from '../theme';
 import { api, type LibraryAppPricing } from '../api';
 import { presentNativePaymentSheet } from '../PaymentSheetNative';
+import { useGuestGate } from './GuestGate';
 
 export type MiniAppId = 'sleep' | 'challenges' | 'spot' | 'confidence';
 export type BoostId = 'triple_day' | 'double_week' | 'double_month';
@@ -123,8 +124,32 @@ export function PricingBadge({
   testID?: string;
 }) {
   if (!pricing) {
+    // Pricing row not loaded yet (or backend hasn't seeded this app).
+    // For the Creator we STILL want this pill to be tappable so they
+    // can set the price for the first time — otherwise the menu is
+    // unreachable from cards whose backend row was just inserted (e.g.
+    // a freshly-added mini-app like Buried Treasure right after we
+    // bump LIBRARY_APP_IDS). For non-admins we keep it a plain pill so
+    // the parent card's TouchableOpacity catches the tap.
+    if (isAdmin && onCreatorTap) {
+      return (
+        <TouchableOpacity
+          testID={testID}
+          activeOpacity={0.7}
+          hitSlop={8}
+          onPress={() => {
+            Haptics.selectionAsync().catch(() => {});
+            onCreatorTap();
+          }}
+          style={[badgeStyles.pill, badgeStyles.free, badgeStyles.adminFree]}
+        >
+          <Text style={badgeStyles.freeText}>FREE</Text>
+          <Ionicons name="create-outline" size={11} color={colors.green} />
+        </TouchableOpacity>
+      );
+    }
     return (
-      <View style={[badgeStyles.pill, badgeStyles.free]}>
+      <View style={[badgeStyles.pill, badgeStyles.free]} testID={testID}>
         <Text style={badgeStyles.freeText}>FREE</Text>
       </View>
     );
@@ -202,6 +227,10 @@ const badgeStyles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   free: { backgroundColor: colors.green + '22', borderColor: colors.green + '88' },
+  // Same green pill but with a slightly stronger border + the pencil
+  // icon, so the Creator can spot that the FREE pill is editable even
+  // before the backend pricing row has loaded.
+  adminFree: { borderColor: colors.green, borderWidth: 1.5 },
   freeText: { color: colors.green, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
   priced: { backgroundColor: colors.bg, borderColor: '#FFD70066' },
   priceText: { color: colors.text, fontSize: 11, fontWeight: '900' },
@@ -239,10 +268,14 @@ export function CreatorPricingMenu({
   appId: MiniAppId | BoostId | null;
   pricing: LibraryAppPricing | null;
   onClose: () => void;
-  onChoose: (which: 'price' | 'discount') => void;
+  /** 'price' = change full price, 'discount' = solo % discount,
+   *  'duo'   = friends/duo group-buy discount (Library+ only). */
+  onChoose: (which: 'price' | 'discount' | 'duo') => void;
   kind?: PricingKind;
 }) {
   if (!appId) return null;
+  // Duo is Library+ only — boosts can't be group-bought.
+  const showDuo = kind === 'library';
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <TouchableOpacity activeOpacity={1} onPress={onClose} style={menuStyles.backdrop}>
@@ -258,6 +291,9 @@ export function CreatorPricingMenu({
                 : pricing.discount_active
                   ? `${formatPrice(pricing.effective_price, pricing.currency)} (${pricing.discount_percent}% off ${formatPrice(pricing.price, pricing.currency)})`
                   : formatPrice(pricing.price, pricing.currency)}
+              {pricing.duo_offer
+                ? `\n🎟 Duo: ${formatPrice(pricing.duo_offer.discounted_price, pricing.duo_offer.currency)} w/ ${pricing.duo_offer.required_people} friends`
+                : ''}
             </Text>
           ) : null}
 
@@ -283,11 +319,29 @@ export function CreatorPricingMenu({
           >
             <Ionicons name="flame" size={20} color="#FFD700" />
             <View style={{ flex: 1 }}>
-              <Text style={[menuStyles.rowTitle, { color: '#FFD700' }]}>Add discount</Text>
+              <Text style={[menuStyles.rowTitle, { color: '#FFD700' }]}>Solo discount</Text>
               <Text style={menuStyles.rowSub}>% off for a limited time (days / weeks / months).</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color="#FFD700" />
           </TouchableOpacity>
+
+          {showDuo ? (
+            <TouchableOpacity
+              testID="pricing-menu-duo"
+              onPress={() => onChoose('duo')}
+              style={[menuStyles.row, { borderColor: '#B388FF88', backgroundColor: '#B388FF15' }]}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="people-circle" size={20} color="#B388FF" />
+              <View style={{ flex: 1 }}>
+                <Text style={[menuStyles.rowTitle, { color: '#B388FF' }]}>Friends / Duo discount</Text>
+                <Text style={menuStyles.rowSub}>
+                  Group-buy unlock — 1–5 friends together pay a lower price.
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color="#B388FF" />
+            </TouchableOpacity>
+          ) : null}
 
           <TouchableOpacity onPress={onClose} style={menuStyles.cancel}>
             <Text style={menuStyles.cancelText}>Cancel</Text>
@@ -344,7 +398,10 @@ export function SetPriceModal({
   kind?: PricingKind;
 }) {
   const [price, setPrice] = useState<string>('0');
-  const [currency, setCurrency] = useState<string>('USD');
+  // Default currency = AUD (Australian dollars). Creator can still pick
+  // any of the 10 supported currencies from the chips below — this is
+  // only the seed value for a brand-new mini-app row.
+  const [currency, setCurrency] = useState<string>('AUD');
   const [purchaseUrl, setPurchaseUrl] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -354,11 +411,11 @@ export function SetPriceModal({
     setErr(null);
     if (initial) {
       setPrice(String(initial.price.toFixed(2)));
-      setCurrency(initial.currency || 'USD');
+      setCurrency(initial.currency || 'AUD');
       setPurchaseUrl(initial.purchase_url || '');
     } else {
       setPrice('0');
-      setCurrency('USD');
+      setCurrency('AUD');
       setPurchaseUrl('');
     }
   }, [visible, initial]);
@@ -783,6 +840,7 @@ export function BuyAppModal({
   onClose,
   onPurchased,
   kind = 'library',
+  duoGroupId = null,
 }: {
   visible: boolean;
   appId: MiniAppId | BoostId | null;
@@ -791,6 +849,9 @@ export function BuyAppModal({
   onClose: () => void;
   onPurchased: () => void;
   kind?: PricingKind;
+  /** When set, the create-payment-intent is sent with this group id and
+   *  the backend charges the snapshotted duo discounted price. */
+  duoGroupId?: string | null;
 }) {
   const [redirecting, setRedirecting] = useState(false);
   const [redirectError, setRedirectError] = useState<string | null>(null);
@@ -799,6 +860,10 @@ export function BuyAppModal({
   const [confirming, setConfirming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [successView, setSuccessView] = useState(false);
+  // Guest gate — anonymous users can browse the prices but tapping
+  // "Buy" must show the sign-in prompt rather than firing checkout.
+  const _guard = useGuestGate();
+  const gateBlock = (label?: string) => _guard.block(label);
 
   useEffect(() => {
     if (!visible) {
@@ -823,6 +888,10 @@ export function BuyAppModal({
 
   const openCheckout = async () => {
     Haptics.selectionAsync().catch(() => {});
+    // Guests can VIEW prices but tapping "Buy" must show the sign-in
+    // modal — purchases are tied to a real account so we can attribute
+    // the unlock and tax records correctly.
+    if (gateBlock('buy this')) return;
     setRedirecting(true);
     setRedirectError(null);
     setErr(null);
@@ -832,7 +901,7 @@ export function BuyAppModal({
       try {
         // Pass kind to backend so it knows whether to read price from
         // library_pricing or boost_pricing.
-        const intent = await api.paymentsCreatePaymentIntent(appId as any, kind);
+        const intent = await api.paymentsCreatePaymentIntent(appId as any, kind, duoGroupId || undefined);
         await new Promise((res) => setTimeout(res, 450));
         const r = await presentNativePaymentSheet({
           publishableKey: intent.publishable_key,

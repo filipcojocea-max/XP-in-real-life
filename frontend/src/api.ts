@@ -1,5 +1,6 @@
 import type { FocusArea, TimeSlot } from './theme';
 import { getAuthToken, getAnonymousId, fireUnauthorized, fireAccountSuspended } from './AuthContext';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /**
  * API base URL resolution order:
@@ -22,7 +23,155 @@ const BASE =
   (process.env.EXPO_PUBLIC_API_URL && process.env.EXPO_PUBLIC_API_URL.trim()) ||
   process.env.EXPO_PUBLIC_BACKEND_URL;
 
+// ── Offline-first replay hook ───────────────────────────────────────
+// `OfflineProvider` injects a runner that replays a `QueuedMutation`
+// by re-issuing the same HTTP call we'd have made online. We register
+// our internal `req` for that purpose. Import here is lazy via
+// `setOfflineRunner` so the module load order doesn't matter.
+import { setOfflineRunner, isOnlineNow } from './Offline';
+setOfflineRunner(async (m) => {
+  // Re-issue the request. We deliberately don't return a value — the
+  // caller already optimistically updated the UI, and the eventual
+  // server response is reconciled by the next GET refresh.
+  await req(m.path, {
+    method: m.method,
+    body: m.body === undefined ? undefined : JSON.stringify(m.body),
+  });
+});
+
+// Re-exported so call-site wrappers can decide between queue-and-toast
+// vs hard-block-with-toast without importing Offline directly.
+export { isOnlineNow };
+
+// ── Offline-write classification tables ─────────────────────────────
+// Used by the offline guard inside `req()` below.
+//
+// HARD_BLOCK = paths that must NEVER be queued (real money, Stripe).
+// QUEUEABLE  = paths whose writes are safe to defer and replay later.
+// Anything not listed throws a generic "you're offline" error so call
+// sites can surface their own toast / fallback.
+const HARD_BLOCK_OFFLINE: RegExp[] = [
+  /^\/library\/checkout/,
+  /^\/library\/pricing\/[^/]+\/(buy|purchase)/,
+  /^\/boost\/checkout/,
+  /^\/payments\//,
+  /^\/stripe\//,
+];
+
+const QUEUEABLE_OFFLINE: { pattern: RegExp; label: string }[] = [
+  // Goals — create / update / complete / un-tick
+  { pattern: /^\/goals(\/|$)/, label: 'Goal' },
+  // Tasks — create / complete / delete
+  { pattern: /^\/tasks(\/|$)/, label: 'Task' },
+  // DMs (message send + image attach)
+  { pattern: /^\/messages\/[^/]+\/send/, label: 'Message' },
+  { pattern: /^\/messages\/[^/]+\/read/, label: 'Read receipt' },
+  // Spot — feed posts, likes, comments
+  { pattern: /^\/spot\/(post|complete|like|comment|edit)/, label: 'Feed action' },
+  // Buried Treasure — match invite/accept/reject/find/bury, feed likes
+  { pattern: /^\/bt\/match\//, label: 'Treasure match' },
+  { pattern: /^\/bt\/feed\//, label: 'Treasure feed' },
+  { pattern: /^\/bt\/report/, label: 'Report' },
+  // Friends — send/accept/decline requests
+  { pattern: /^\/friends\/(request|accept|decline|block|unblock)/, label: 'Friend request' },
+  // Chat preferences
+  { pattern: /^\/chat\/preferences/, label: 'Chat setting' },
+];
+
+// Lazy import from Offline.tsx to avoid a circular load order on boot.
+// Resolved on first call.
+let _offlineEnqueue:
+  | null
+  | ((m: { path: string; method: any; body?: any; kind: string; label: string }) => Promise<string>) = null;
+
+export function _setOfflineEnqueue(
+  fn: (m: { path: string; method: any; body?: any; kind: string; label: string }) => Promise<string>,
+) {
+  _offlineEnqueue = fn;
+}
+
+async function _enqueueFromApi(m: { path: string; method: any; body?: any; kind: string; label: string }) {
+  if (!_offlineEnqueue) {
+    // Shouldn't happen — provider mounts first — but guard anyway.
+    return null;
+  }
+  return _offlineEnqueue(m);
+}
+
 async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
+  const method = ((opts.method || 'GET') as string).toUpperCase();
+  const isMutation = method !== 'GET' && method !== 'HEAD';
+
+  // ── Offline guard ───────────────────────────────────────────────
+  // For mutating requests fired while offline we either:
+  //   • HARD-BLOCK (payments, Stripe sessions, library/boost checkout)
+  //     — can't queue real money. Throw a clear error.
+  //   • QUEUE silently if the path matches a known queue-able pattern
+  //     (goals, tasks, messages, spot/bt feed actions). The queue is
+  //     drained automatically on reconnect by `Offline.tsx`. We return
+  //     a `{ __queued: true }` shaped payload so call sites can choose
+  //     to render an optimistic "pending" affordance.
+  //   • Throw a generic "you're offline" error otherwise so the call
+  //     site can surface its own toast.
+  if (isMutation && !isOnlineNow()) {
+    if (HARD_BLOCK_OFFLINE.some((rx) => rx.test(path))) {
+      throw new Error("You need internet to make a purchase.");
+    }
+    const q = QUEUEABLE_OFFLINE.find((p) => p.pattern.test(path));
+    if (q) {
+      let parsed: any = undefined;
+      const raw = (opts as any).body;
+      if (typeof raw === 'string') {
+        try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+      } else if (raw !== undefined) {
+        parsed = raw;
+      }
+      await _enqueueFromApi({
+        path,
+        method: method as any,
+        body: parsed,
+        kind: q.label,
+        label: q.label,
+      });
+      return { __queued: true } as any;
+    }
+    throw new Error("You're offline — this action will sync when you reconnect.");
+  }
+
+  // ── GET-cache (offline view) ────────────────────────────────────
+  // For non-mutation requests, when we're offline we serve a snapshot
+  // of the last successful response from AsyncStorage so the user can
+  // still browse the app (tasks, goals, profile, feed, etc.).
+  // Cache TTL is informational only — we always serve the cached row
+  // when there's no network.
+  const CACHEABLE_GET = (
+    !isMutation && (
+      path === '/profile' ||
+      path === '/tasks' ||
+      path === '/goals' ||
+      path === '/stats/daily' ||
+      path === '/levels' ||
+      path === '/library/pricing' ||
+      path === '/library/ratings' ||
+      path === '/spot/feed' ||
+      path === '/bt/chest/today' ||
+      path === '/bt/finds' ||
+      path === '/friends' ||
+      path === '/friends/requests' ||
+      path.startsWith('/messages/')
+    )
+  );
+  const cacheKey = CACHEABLE_GET ? `@xp.api_cache:${path}` : null;
+  if (cacheKey && !isOnlineNow()) {
+    try {
+      const raw = await AsyncStorage.getItem(cacheKey);
+      if (raw) return JSON.parse(raw) as T;
+    } catch {
+      /* fall through and throw "offline" below */
+    }
+    throw new Error("You're offline and this page hasn't been viewed yet.");
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...((opts.headers as Record<string, string>) || {}),
@@ -81,7 +230,19 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
     err.detail = detail;
     throw err;
   }
-  return res.json() as Promise<T>;
+  const data = (await res.json()) as T;
+  // Persist successful GET responses we whitelisted above so that the
+  // next offline call can serve a snapshot. We `await` but swallow
+  // failures — caching is a best-effort optimisation, never block the
+  // user on it.
+  if (cacheKey) {
+    try {
+      await AsyncStorage.setItem(cacheKey, JSON.stringify(data));
+    } catch {
+      /* ignore */
+    }
+  }
+  return data;
 }
 
 export type Profile = {
@@ -248,7 +409,7 @@ export type DailyStats = {
   xp_today: number;
 };
 
-export type WeeklyStats = { days: { date: string; day: string; xp: number; gifted_xp?: number; tasks: number }[] };
+export type WeeklyStats = { days: { date: string; day: string; xp: number; gifted_xp?: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
 
 export type OnboardingPayload = {
   name?: string;
@@ -284,11 +445,103 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),
+  // ── Spot the Object — Permanent Groups (v1.0.29 Phase 1) ─────────
+  spotGroupsList: () =>
+    req<{ groups: any[] }>('/spot/groups'),
+  spotGroupGet: (gid: string) =>
+    req<{ group: any }>(`/spot/groups/${gid}`),
+  spotGroupCreate: (params: { name?: string; member_ids: string[] }) =>
+    req<{ group: any }>('/spot/groups', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+  spotGroupAddMembers: (gid: string, member_ids: string[]) =>
+    req<{ group: any; added: string[]; reactivated: string[] }>(
+      `/spot/groups/${gid}/members`,
+      { method: 'POST', body: JSON.stringify({ member_ids }) },
+    ),
+  spotGroupLeave: (gid: string) =>
+    req<{ left_at: string }>(`/spot/groups/${gid}/leave`, { method: 'POST' }),
+  spotGroupPatch: (gid: string, patch: { name?: string }) =>
+    req<{ group: any }>(`/spot/groups/${gid}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  // Phase 4 — invite lifecycle + per-member toggle + start.
+  spotGroupAccept: (gid: string) =>
+    req<{ group: any; accepted_at?: string; no_op?: boolean }>(
+      `/spot/groups/${gid}/accept`, { method: 'POST' },
+    ),
+  spotGroupDecline: (gid: string) =>
+    req<{ left_at: string; declined: boolean }>(
+      `/spot/groups/${gid}/decline`, { method: 'POST' },
+    ),
+  spotGroupStart: (gid: string) =>
+    req<{ group: any; started_at?: string; no_op?: boolean }>(
+      `/spot/groups/${gid}/start`, { method: 'POST' },
+    ),
+  spotGroupNotifications: (gid: string, on: boolean) =>
+    req<{ group: any; notifications_on: boolean }>(
+      `/spot/groups/${gid}/notifications`,
+      { method: 'POST', body: JSON.stringify({ on }) },
+    ),
+  // Phase 2/4 — Auto-Challenge Scheduler feed
+  spotGroupChallenges: (gid: string) =>
+    req<{ challenges: Array<{
+      id: string;
+      group_id: string;
+      anchor_date: string;
+      anchor_idx: number;
+      target_object: string;
+      scheduled_at_utc: string;
+      fired_at_utc: string;
+      // Phase 4 — round window + result.
+      round_ends_at_utc?: string;
+      round_seconds?: number;
+      resolved?: boolean;
+      resolved_at_utc?: string | null;
+      winners?: string[];
+      losers?: string[];
+      xp_per_winner?: number;
+      xp_per_loser?: number;
+      you_won?: boolean;
+      you_lost?: boolean;
+      recipients_count: number;
+      // Phase 3 — extra skip-bucket counters.
+      skipped_sleeping_count?: number;
+      skipped_work_count?: number;
+      skipped_night_count?: number;
+      you_received: boolean;
+      // Phase 3 — group feed responses (members' posted photos).
+      responses?: Array<{
+        id: string;
+        user_id: string;
+        photo_base64: string | null;
+        taken_at: string;
+        remaining_seconds?: number;
+      }>;
+      response_count?: number;
+      you_responded?: boolean;
+    }> }>(`/spot/groups/${gid}/challenges`),
+
   authResend: (email: string) =>
     req<{ message: string; dev_code?: string }>('/auth/resend', {
       method: 'POST',
       body: JSON.stringify({ email }),
     }),
+  // ── Guest mode → registered account migration ────────────────────
+  guestMigrate: (anonymous_id: string) =>
+    req<{ moved: number; collections_touched: number; merged_profile: boolean }>(
+      '/guest/migrate',
+      {
+        method: 'POST',
+        body: JSON.stringify({ anonymous_id }),
+      },
+    ),
+  guestHasProgress: (anonymous_id: string) =>
+    req<{ has_progress: boolean; user_id: string }>(
+      `/guest/has_progress?anon_id=${encodeURIComponent(anonymous_id)}`,
+    ),
   authForgotPassword: (email: string, app_origin?: string) =>
     req<{
       message: string;
@@ -338,6 +591,20 @@ export const api = {
     req<{ completions: ChallengeCompletion[]; count: number }>('/challenge/past'),
   challengePastDelete: (id: string) =>
     req<{ deleted: number }>(`/challenge/past/${id}`, { method: 'DELETE' }),
+  challengePastAnswer: (
+    id: string,
+    body: {
+      completed: boolean;
+      how_text?: string;
+      difficulty: 'easy' | 'difficult';
+      experience_text?: string;
+      rating: number;
+    },
+  ) =>
+    req<{ awarded_xp: number; completion: ChallengeCompletion }>(
+      `/challenge/past/${id}/answer`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   // ─── Friends+ ────────────────────────────────────────────────────────
   listPlayers: (q: string = '') =>
@@ -391,10 +658,38 @@ export const api = {
   adminPlayerCharts: (playerId: string) =>
     req<{
       user_id: string;
-      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; tasks: number }[] };
-      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; tasks: number }[] };
+      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
+      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
       by_area: Record<string, number>;
     }>(`/admin/players/${playerId}/charts`),
+
+  // ── XP Penalty (Creator-only) ────────────────────────────────────
+  // Apply a penalty to a player. Subtracts XP, queues an in-app modal
+  // for the next time they open the app, and fires a push.
+  adminApplyPenalty: (playerId: string, amount: number, note: string) =>
+    req<{
+      ok: boolean;
+      penalty_id: string;
+      player_id: string;
+      amount: number;
+      note: string;
+      new_total_xp: number;
+      new_level: number;
+      created_at: string;
+    }>(`/admin/players/${playerId}/penalty`, {
+      method: 'POST',
+      body: JSON.stringify({ amount, note }),
+    }),
+  // Penalties — for the receiving player.
+  penaltiesPending: () =>
+    req<{ penalties: PenaltyNotice[] }>('/penalties/pending'),
+  penaltyAcknowledge: (id: string) =>
+    req<{ ok: boolean; already?: boolean }>(`/penalties/${id}/acknowledge`, { method: 'POST' }),
+  penaltiesHistory: (limit: number = 50) =>
+    req<{ penalties: PenaltyNotice[] }>(`/penalties/history?limit=${limit}`),
+  // Admin view of any player's penalty history.
+  adminPlayerPenalties: (playerId: string) =>
+    req<{ penalties: PenaltyNotice[] }>(`/admin/players/${playerId}/penalties`),
 
 
   // Top-100 players by total XP, with switchable rolling window.
@@ -540,7 +835,7 @@ export const api = {
     ),
   spotFeed: (limit = 50) =>
     req<{ entries: SpotEntry[]; count: number }>(`/spot/feed?limit=${limit}`),
-  spotEntry: (id: string) => req<SpotEntry>(`/spot/${id}`),
+  spotEntry: (id: string) => req<SpotEntry>(`/spot/photo/${id}`),
   spotLike: (id: string) =>
     req<{ like_count: number; liked_by_you: boolean }>(`/spot/${id}/like`, {
       method: 'POST',
@@ -702,6 +997,121 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ token, platform }),
     }),
+
+  // ─── Per-friend chat preferences (colors + mute + soft-block) ─────
+  chatPrefsBulk: () =>
+    req<{ preferences: ChatPreferences[] }>('/chat/preferences'),
+  chatPrefsGet: (friendId: string) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}`),
+  chatPrefsUpsert: (friendId: string, patch: Partial<ChatPreferencesPatch>) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}`, {
+      method: 'POST',
+      body: JSON.stringify(patch),
+    }),
+  chatPrefsMute: (friendId: string, value: boolean) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}/mute`, {
+      method: 'POST',
+      body: JSON.stringify({ value }),
+    }),
+  chatPrefsBlock: (friendId: string, value: boolean) =>
+    req<ChatPreferences>(`/chat/preferences/${friendId}/block`, {
+      method: 'POST',
+      body: JSON.stringify({ value }),
+    }),
+
+  // ─── Duo Referral Discounts (Library+) ─────────────────────────
+  libraryDuoOfferSet: (appId: string, requiredPeople: number, discountedPrice: number, currency = 'USD') =>
+    req<{ saved: boolean; duo_offer: DuoOffer | null }>(`/library/pricing/${appId}/duo-discount`, {
+      method: 'POST',
+      body: JSON.stringify({
+        required_people: requiredPeople,
+        discounted_price: discountedPrice,
+        currency,
+      }),
+    }),
+  libraryDuoOfferClear: (appId: string) =>
+    req<{ saved: boolean; duo_offer: null }>(`/library/pricing/${appId}/duo-discount`, {
+      method: 'DELETE',
+    }),
+  libraryDuoOfferGet: (appId: string) =>
+    req<{ duo_offer: DuoOffer | null }>(`/library/duo-offer/${appId}`),
+  duoCreate: (appId: string) =>
+    req<DuoGroup>('/duo/create', { method: 'POST', body: JSON.stringify({ app_id: appId }) }),
+  duoJoin: (codeOrGroupId: { code?: string; group_id?: string }) =>
+    req<DuoGroup>('/duo/join', { method: 'POST', body: JSON.stringify(codeOrGroupId) }),
+  duoLeave: (groupId: string) =>
+    req<DuoGroup>(`/duo/${groupId}/leave`, { method: 'POST', body: '{}' }),
+  duoMy: () => req<{ groups: DuoGroup[] }>('/duo/my'),
+  duoGet: (groupId: string) => req<DuoGroup>(`/duo/${groupId}`),
+  adminPurchaseHistory: () =>
+    req<{ purchases: AdminPurchaseRow[]; count: number }>('/admin/purchase-history'),
+
+  // ─── v1.0.29 Admin Player Tools ────────────────────────────────
+  /** Per-player price overrides (Creator-set, applies only to that player). */
+  adminPriceOverridesList: (userId: string) =>
+    req<{ user_id: string; overrides: Record<string, PriceOverrideRow> }>(
+      `/admin/players/${userId}/price-overrides`,
+    ),
+  adminPriceOverrideUpsert: (userId: string, appId: string, overridePrice: number, currency = 'USD') =>
+    req<{ user_id: string; overrides: Record<string, PriceOverrideRow> }>(
+      `/admin/players/${userId}/price-overrides/${appId}`,
+      { method: 'POST', body: JSON.stringify({ override_price: overridePrice, currency }) },
+    ),
+  adminPriceOverrideClear: (userId: string, appId: string) =>
+    req<{ user_id: string; overrides: Record<string, PriceOverrideRow> }>(
+      `/admin/players/${userId}/price-overrides/${appId}`,
+      { method: 'DELETE' },
+    ),
+  /** Hard-delete a player account. Cascades to every collection. Body
+   *  must include {confirm:'DELETE'} as a guard against accidental taps. */
+  adminDeletePlayer: (userId: string) =>
+    req<{ deleted: boolean; user_id: string; email: string; name: string; summary: Record<string, number> }>(
+      `/admin/players/${userId}`,
+      { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE' }) },
+    ),
+  /** Inactive players list — bucket '2w' | '1m' | '6m'. */
+  adminInactivePlayers: (bucket: '2w' | '1m' | '6m') =>
+    req<{ bucket: string; threshold_days: number; count: number; players: InactivePlayerRow[] }>(
+      `/admin/players/inactive?bucket=${bucket}`,
+    ),
+
+  // ─── Buried Treasure mini-app (Phase 1 — daily solo hunt) ──────
+  btLocationGet: () => req<{ location: BTLocation | null }>('/bt/location'),
+  btLocationSet: (lat: number, lng: number, radius_m: number, label?: string, tz_offset_minutes?: number) =>
+    req<{ saved: boolean }>('/bt/location', {
+      method: 'POST',
+      body: JSON.stringify({ lat, lng, radius_m, label, tz_offset_minutes }),
+    }),
+  btChestToday: () => req<{ chest: BTChest }>('/bt/chest/today'),
+  btChestFind: (lat: number, lng: number, photoBase64?: string) =>
+    req<{ chest: BTChest; xp_awarded?: number; already_found?: boolean }>('/bt/chest/find', {
+      method: 'POST',
+      body: JSON.stringify({ lat, lng, photo_base64: photoBase64 }),
+    }),
+  btFindsHistory: () => req<{ finds: BTFind[] }>('/bt/finds'),
+  btSettingsGet: () => req<{ settings: { daylight_only: boolean } }>('/bt/settings'),
+  btSettingsSet: (daylight_only: boolean) =>
+    req<{ saved: boolean }>('/bt/settings', {
+      method: 'POST',
+      body: JSON.stringify({ daylight_only }),
+    }),
+  btZonesList: () => req<{ zones: BTNoGoZone[] }>('/bt/no-go-zones'),
+  btZoneCreate: (name: string, polygon: { lat: number; lng: number }[]) =>
+    req<{ id: string; created: boolean }>('/bt/no-go-zones', {
+      method: 'POST',
+      body: JSON.stringify({ name, polygon }),
+    }),
+  btZoneDelete: (zoneId: string) =>
+    req<{ deleted: number }>(`/bt/no-go-zones/${zoneId}`, { method: 'DELETE' }),
+  btReport: (
+    kind: 'location' | 'object',
+    message: string,
+    extra?: { lat?: number; lng?: number; photo_base64?: string },
+  ) =>
+    req<{ id: string; sent_to_admin_count: number }>('/bt/report', {
+      method: 'POST',
+      body: JSON.stringify({ kind, message, ...(extra || {}) }),
+    }),
   // Health Connect debug reporter — used by the Sleep / "Connect Samsung
   // Health" flow to ship native crashes + error messages to the server
   // so we can audit why the system permission dialog never appears.
@@ -798,6 +1208,20 @@ export const api = {
   }) => req<Goal>('/goals', { method: 'POST', body: JSON.stringify(body) }),
   updateGoalProgress: (id: string, current_value: number) =>
     req<Goal>(`/goals/${id}/progress`, { method: 'POST', body: JSON.stringify({ current_value }) }),
+  updateGoal: (
+    id: string,
+    body: {
+      title?: string;
+      description?: string;
+      current_value?: number;
+      target_value?: number;
+      unit?: string;
+      focus_area?: FocusArea;
+      xp_reward?: number;
+    },
+  ) => req<Goal>(`/goals/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  restartGoal: (id: string) =>
+    req<Goal>(`/goals/${id}/restart`, { method: 'POST' }),
   deleteGoal: (id: string) =>
     req<{ deleted: boolean }>(`/goals/${id}`, { method: 'DELETE' }),
 
@@ -875,6 +1299,7 @@ export const api = {
   paymentsCreatePaymentIntent: (
     app_id: string,
     kind: 'library' | 'boost' = 'library',
+    duo_group_id?: string,
   ) =>
     req<{
       payment_intent_client_secret: string;
@@ -887,9 +1312,10 @@ export const api = {
       app_id: string;
       kind: string;
       payment_intent_id: string;
+      duo_group_id?: string | null;
     }>('/payments/create-payment-intent', {
       method: 'POST',
-      body: JSON.stringify({ app_id, kind }),
+      body: JSON.stringify({ app_id, kind, duo_group_id: duo_group_id || undefined }),
     }),
 
   // Polled after returning from Stripe — finalises OWNED state if the
@@ -1157,6 +1583,8 @@ export type ChallengeCompletion = {
   rating: number;
   xp_awarded: number;
   completed_at: string;
+  can_answer?: boolean;
+  answer_deadline?: string | null;
 };
 
 // ───────────────────────── Friends+ ─────────────────────────
@@ -1224,6 +1652,29 @@ export type Player = {
   // /friends/list endpoint (null elsewhere). Powers the unfriend
   // confirmation dialog's "You've been friends for X days" subtitle.
   friended_at?: string | null;
+  // Live counts surfaced by /friends/profile/{id} for the public
+  // profile card so every viewer sees the freshest XP/level/streaks/
+  // quest+goal counts. These are recomputed on every read so they
+  // never drift from the canonical task_logs / goals collections.
+  active_goals_count?: number;
+  total_goals_count?: number;
+  joined_at?: string | null;
+};
+
+/**
+ * XP Penalty notice — issued by the Creator/Admin and surfaced to the
+ * player via a full-screen modal on next app-open, plus a push
+ * notification. Stored in MongoDB as `xp_penalties`.
+ */
+export type PenaltyNotice = {
+  id: string;
+  creator_id: string;
+  player_id: string;
+  amount: number;          // positive XP value that was subtracted
+  note: string;
+  created_at: string;
+  date: string;            // YYYY-MM-DD (chart aggregation key)
+  acknowledged_at: string | null;
 };
 
 export type FriendRequestEntry = {
@@ -1520,6 +1971,8 @@ export type DMThread = {
   friend_avatar_base64: string | null;
   last_message: DMMessage | null;
   unread_count: number;
+  /** Set true by the backend when the caller has soft-blocked this friend. */
+  blocked?: boolean;
 };
 export type AdminReport = {
   id: string;
@@ -1583,7 +2036,183 @@ export type LibraryAppPricing = {
   effective_price: number;
   is_free: boolean;
   purchased: boolean;
+  /** Duo Referral Discount, if Creator has an active offer for the app. */
+  duo_offer?: DuoOffer | null;
 };
+
+// ─── Per-friend chat preferences (bubble colors + mute + soft-block) ───
+export type ChatPreferences = {
+  owner_id: string;
+  friend_id: string;
+  sent_bubble_color: string;
+  sent_text_color: string;
+  received_bubble_color: string;
+  received_text_color: string;
+  muted: boolean;
+  blocked: boolean;
+  updated_at: string | null;
+};
+
+// ─── Duo Referral Discount ─────────────────────────────────────────
+export type DuoOffer = {
+  app_id: string;
+  required_people: number;       // 1..5
+  discounted_price: number;
+  currency: string;
+  active: boolean;
+  updated_at?: string | null;
+};
+
+export type DuoMember = {
+  user_id: string;
+  joined_at: string;
+  paid_at: string | null;
+  name: string;
+  avatar_base64: string | null;
+};
+
+export type DuoGroupStatus = 'waiting' | 'full' | 'completed' | 'expired';
+
+export type DuoGroup = {
+  group_id: string;
+  app_id: string;
+  code: string;
+  host_id: string;
+  is_host: boolean;
+  is_member: boolean;
+  required_people: number;
+  discounted_price: number;
+  currency: string;
+  status: DuoGroupStatus;
+  members: DuoMember[];
+  members_count: number;
+  is_full: boolean;
+  created_at: string;
+  expires_at: string;
+  completed_at: string | null;
+  already_exists?: boolean;
+  already_member?: boolean;
+};
+
+export type AdminPurchaseRow = {
+  id: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  user_avatar_base64: string | null;
+  app_id: string;
+  paid_amount: number | null;
+  paid_currency: string | null;
+  source: string;                    // 'stripe' | 'koffi' | 'free' | 'duo'
+  stripe_session_id: string | null;
+  stripe_payment_intent: string | null;
+  duo_group_id: string | null;
+  duo: {
+    group_id: string;
+    code: string;
+    host_id: string;
+    required_people: number;
+    members_count: number;
+  } | null;
+  purchased_at: string;
+};
+
+// ─── v1.0.29 Admin Player Tools ──────────────────────────────────
+export type PriceOverrideRow = {
+  app_id: string;
+  override_price: number;
+  currency: string;
+  updated_at: string | null;
+};
+
+export type InactivePlayerRow = {
+  user_id: string;
+  name: string;
+  email: string;
+  avatar_base64: string | null;
+  level: number;
+  total_xp: number;
+  last_active_at: string;
+  days_inactive: number;
+};
+
+// ─── Buried Treasure (Phase 1 — daily solo hunt) ────────────────
+export type BTLocation = {
+  lat: number;
+  lng: number;
+  radius_m: number;
+  label?: string | null;
+  tz_offset_minutes?: number;
+  updated_at?: string;
+};
+
+export type BTChest = {
+  id: string;
+  date: string;
+  lat: number;
+  lng: number;
+  hint: string;
+  spawn_source: 'osm_park' | 'fallback_random';
+  osm_feature_name?: string | null;
+  status: 'hidden' | 'found' | 'expired';
+  found_at: string | null;
+  spawned_at: string;
+  expires_at: string;
+  daylight_only: boolean;
+  has_photo: boolean;
+};
+
+export type BTFind = {
+  id: string;
+  chest_id: string;
+  lat: number;
+  lng: number;
+  found_at: string;
+  has_photo: boolean;
+  photo_base64?: string | null;
+};
+
+export type BTNoGoZone = {
+  id: string;
+  name: string;
+  polygon: { lat: number; lng: number }[];
+  created_at: string;
+};
+
+export type ChatPreferencesPatch = {
+  sent_bubble_color: string;
+  sent_text_color: string;
+  received_bubble_color: string;
+  received_text_color: string;
+  muted: boolean;
+  blocked: boolean;
+};
+
+/** Default colors used when the server has no row for the pair yet —
+ *  mirrors the backend constants in chat_preferences.py. */
+export const CHAT_DEFAULTS = {
+  sent_bubble_color: '#00E1FF',
+  sent_text_color: '#0A0A0F',
+  received_bubble_color: '#1A1A24',
+  received_text_color: '#E6E6F0',
+} as const;
+
+/** Curated palette tab — 12 high-contrast colors that pair well with
+ *  dark backgrounds. Users can also enter a custom HEX via the picker. */
+export const CHAT_PRESET_COLORS: { name: string; hex: string }[] = [
+  { name: 'Cyan',    hex: '#00E1FF' },
+  { name: 'Green',   hex: '#00E68F' },
+  { name: 'Amber',   hex: '#FFC857' },
+  { name: 'Red',     hex: '#FF4D6D' },
+  { name: 'Purple',  hex: '#B388FF' },
+  { name: 'Pink',    hex: '#FF6FB5' },
+  { name: 'Blue',    hex: '#4F9CFF' },
+  { name: 'Teal',    hex: '#00C9A7' },
+  { name: 'Gold',    hex: '#FFD166' },
+  { name: 'White',   hex: '#FFFFFF' },
+  { name: 'Slate',   hex: '#2E2E3A' },
+  { name: 'Black',   hex: '#0A0A0F' },
+];
 
 
 // ── Build Self-Confidence mini-app ────────────────────────────────

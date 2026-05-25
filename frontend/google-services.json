@@ -12,12 +12,7 @@
           "package_name": "app.emergent.xpconfidencec2316dfc2"
         }
       },
-      "oauth_client": [
-        {
-          "client_id": "134348982481-7tplr8jh2a7du8c38hgd0ta0mr6es8id.apps.googleusercontent.com",
-          "client_type": 3
-        }
-      ],
+      "oauth_client": [],
       "api_key": [
         {
           "current_key": "AIzaSyDeKaODqTyoCmvyICTJM3voFI3NmWIoS4M"
@@ -25,12 +20,7 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": [
-            {
-              "client_id": "134348982481-7tplr8jh2a7du8c38hgd0ta0mr6es8id.apps.googleusercontent.com",
-              "client_type": 3
-            }
-          ]
+          "other_platform_oauth_client": []
         }
       }
     }

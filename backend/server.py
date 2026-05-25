@@ -571,6 +571,61 @@ def _is_in_silence_window(prof: Optional[dict], local_now: datetime) -> bool:
     return sleep <= cur < start
 
 
+def _is_at_work(prof: Optional[dict], local_now: datetime) -> bool:
+    """Phase 3 — at-work detection for Spot Groups availability badges.
+    Returns True ONLY when the user has BOTH a shift schedule enabled
+    AND that shift defines a `work_end_time` (HH:MM). The window is
+    [start_time .. work_end_time) in local time. If `work_end_time` is
+    not set on the user's shift, the function returns False (we can't
+    tell whether they're working or just awake — fall back to 'active')."""
+    if not prof or not (prof.get("shift_schedule") or {}).get("enabled"):
+        return False
+    today_iso = local_now.date().isoformat()
+    shift = _shift_for_date(prof, today_iso)
+    if shift is None:
+        return False
+    shifts = (prof.get("shift_schedule") or {}).get("shifts") or {}
+    s_def = shifts.get(shift) or DEFAULT_SHIFTS.get(shift) or {}
+    work_end_raw = s_def.get("work_end_time")
+    if not work_end_raw:
+        return False
+    start_hh, start_mm = _parse_hhmm(s_def.get("start_time"), default=(7, 0))
+    end_hh, end_mm = _parse_hhmm(work_end_raw, default=(17, 0))
+    start = (start_hh, start_mm)
+    end = (end_hh, end_mm)
+    cur = (local_now.hour, local_now.minute)
+    # Same wrap-around handling as silence: end < start (e.g. night
+    # shift start 22, end 06) → window is start..24 OR 0..end.
+    if end < start:
+        return cur >= start or cur < end
+    return start <= cur < end
+
+
+def _spot_groups_availability(prof: Optional[dict]) -> str:
+    """Phase 3 availability resolver wired into spot_groups. Returns one
+    of 'sleeping' | 'at_work' | 'active'. Computes the user's CURRENT
+    local time from prof.timezone (falls back to UTC), then layers:
+       1) silence window → 'sleeping'
+       2) at_work window → 'at_work'
+       3) else → 'active'
+    """
+    try:
+        tz_name = (prof or {}).get("timezone") or "UTC"
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        local_now = datetime.now(tz)
+    except Exception:
+        local_now = datetime.now(timezone.utc)
+    if _is_in_silence_window(prof, local_now):
+        return "sleeping"
+    if _is_at_work(prof, local_now):
+        return "at_work"
+    return "active"
+
+
 async def user_today_str_for(user_id: str) -> str:
     # NOTE: include shift_schedule so _effective_day_start_for can pick
     # the rotating shift's wake-up time when the user's Adaptive Work-Life
@@ -940,6 +995,9 @@ class GoalUpdate(BaseModel):
     description: Optional[str] = None
     current_value: Optional[int] = None
     target_value: Optional[int] = None
+    unit: Optional[str] = None
+    focus_area: Optional[Literal["social", "fitness", "appearance", "mindset"]] = None
+    xp_reward: Optional[int] = None
 
 
 class GoalProgress(BaseModel):
@@ -1826,11 +1884,14 @@ async def uncomplete_task(task_id: str, body: CompleteTaskBody, user_id: str = D
 # Long-term goals can only be ticked once per cycle. The cycle length depends
 # on the goal's `unit`:
 #   days   →  one tick per **calendar date** (resets at local midnight)
-#   weeks  →  one tick per 7-day rolling window (from last tick)
-#   months →  one tick per 29-day rolling window
+#   weeks  →  one tick per 7-day rolling window
+#   months →  one tick per 30-day rolling window (per user spec — used to be 29)
+# Additionally for weeks/months: the FIRST tick is locked for the same
+# duration measured from `created_at` so a freshly-created Monthly goal
+# with target=1 can't be auto-completed on the same day it was created.
 GOAL_CYCLE_LOCKOUT: dict = {
     "weeks": timedelta(days=7),
-    "months": timedelta(days=29),
+    "months": timedelta(days=30),
 }
 
 
@@ -1838,12 +1899,83 @@ def _goal_lockout_for(unit: Optional[str]) -> Optional[timedelta]:
     return GOAL_CYCLE_LOCKOUT.get((unit or "").lower())
 
 
-def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
-    """Returns (locked, next_unlock_dt). For `days` we use calendar-date
-    boundaries — a goal ticked on 2026-04-27 is locked until 2026-04-28 00:00
-    *local* (midnight). For weeks/months we use a rolling-window timedelta."""
+def _is_goal_locked(
+    goal: dict,
+    *,
+    wake_str: Optional[str] = None,
+    tz_name: Optional[str] = None,
+) -> tuple[bool, Optional[datetime]]:
+    """Returns (locked, next_unlock_dt).
+
+    For `days` (per user request 2026-05-24): lock fires after EVERY tick
+    (uses `last_ticked_at`, not `last_completed_at`). Reset boundary is
+    the user's morning wake-time (same as Challenge tasks), falling back
+    to 07:00 local if not configured. This means a Daily goal can only
+    be +1'd ONCE per "morning-to-morning" day, for ALL levels.
+
+    For weeks/months: rolling-window timedelta from `last_completed_at`
+    (legacy behaviour). NEW: For weeks/months we ALSO lock the FIRST tick
+    for the same duration measured from the goal's `created_at`. This
+    prevents a freshly-created Monthly goal with target=1 from being
+    auto-completed on the same day it was created.
+    """
     unit = (goal.get("unit") or "").lower()
-    last_iso = goal.get("last_ticked_at")
+
+    # ── DAILY goals: lock after every tick, reset at user's wake-time ─
+    if unit == "days":
+        last_tick_iso = goal.get("last_ticked_at")
+        if not last_tick_iso:
+            return False, None
+        try:
+            last = datetime.fromisoformat(str(last_tick_iso).replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+        except Exception:
+            return False, None
+        wake_h, wake_m = _parse_hhmm(wake_str or "07:00")
+        tz: Optional["timezone"] = None
+        if tz_name:
+            try:
+                from zoneinfo import ZoneInfo as _ZI
+                tz = _ZI(tz_name)
+            except Exception:
+                tz = None
+        last_local = last.astimezone(tz) if tz is not None else last.astimezone()
+        today_wake = last_local.replace(
+            hour=wake_h, minute=wake_m, second=0, microsecond=0
+        )
+        # If the tick happened BEFORE today's wake-time, the user is
+        # still in the previous "day"; next unlock is today's wake.
+        # Otherwise unlock at tomorrow's wake.
+        next_unlock = today_wake if last_local < today_wake else today_wake + timedelta(days=1)
+        now = datetime.now(next_unlock.tzinfo) if next_unlock.tzinfo else datetime.now()
+        return now < next_unlock, next_unlock
+
+    # ── Cycle lockout for weeks/months (unchanged) ───────────────────
+    # Cycle lockout fires ONLY after a completion. We deliberately do NOT
+    # fall back to last_ticked_at — sub-completion progress ticks (e.g.
+    # 3/5 → 4/5 on a weekly step goal) must NOT be blocked by the lockout,
+    # and the un-tick path now preserves last_completed_at so re-completing
+    # in the same cycle is rightly refused (XP-cheat fix 2026-05-23).
+    last_iso = goal.get("last_completed_at")
+    lock = GOAL_CYCLE_LOCKOUT.get(unit)
+
+    # ── First-tick lock from creation date (weeks / months only) ──
+    if not last_iso and lock and unit in ("weeks", "months"):
+        created_iso = goal.get("created_at")
+        if created_iso:
+            try:
+                created = datetime.fromisoformat(str(created_iso).replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                next_at = created + lock
+                now = datetime.now(timezone.utc)
+                if now < next_at:
+                    return True, next_at
+            except Exception:
+                pass
+        return False, None
+
     if not last_iso:
         return False, None
     try:
@@ -1853,49 +1985,84 @@ def _is_goal_locked(goal: dict) -> tuple[bool, Optional[datetime]]:
     except Exception:
         return False, None
 
-    if unit == "days":
-        # Calendar-day reset: next unlock is the start of the day AFTER
-        # the day on which we last ticked.
-        last_local = last.astimezone()
-        next_local_midnight = (last_local + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        now = datetime.now(next_local_midnight.tzinfo)
-        return now < next_local_midnight, next_local_midnight
-
-    lock = GOAL_CYCLE_LOCKOUT.get(unit)
     if not lock:
         return False, None
     next_at = last + lock
     return datetime.now(timezone.utc) < next_at, next_at
 
 
-def _enrich_goal_lock_state(goal: dict) -> dict:
+def _enrich_goal_lock_state(
+    goal: dict,
+    *,
+    wake_str: Optional[str] = None,
+    tz_name: Optional[str] = None,
+) -> dict:
     """Compute and attach `next_tick_available_at` / `is_locked` so the
-    frontend can render the cycle-lock UI without re-implementing the rules."""
-    locked, next_at = _is_goal_locked(goal)
+    frontend can render the cycle-lock UI without re-implementing the rules.
+
+    Callers SHOULD pass `wake_str`/`tz_name` (per-user). For backward
+    compatibility, when missing we default to 07:00 / local — which still
+    locks the goal, just at calendar midnight instead of the user's true
+    wake-time."""
+    locked, next_at = _is_goal_locked(goal, wake_str=wake_str, tz_name=tz_name)
     goal["is_locked"] = locked
     goal["next_tick_available_at"] = next_at.isoformat() if next_at else None
     return goal
 
 
-def _enrich_goals(goals: list[dict]) -> list[dict]:
-    return [_enrich_goal_lock_state(g) for g in goals]
+async def _enrich_goal_lock_state_for_user(goal: dict, user_id: str) -> dict:
+    """Convenience: fetch wake/tz once for the user, then enrich."""
+    wake = await _wake_for_user(user_id)
+    tz = await _tz_for_user(user_id)
+    return _enrich_goal_lock_state(goal, wake_str=wake, tz_name=tz)
+
+
+def _enrich_goals(
+    goals: list[dict],
+    *,
+    wake_str: Optional[str] = None,
+    tz_name: Optional[str] = None,
+) -> list[dict]:
+    return [
+        _enrich_goal_lock_state(g, wake_str=wake_str, tz_name=tz_name) for g in goals
+    ]
 
 
 @api_router.get("/goals")
 async def list_goals(user_id: str = Depends(get_user_or_legacy)):
     goals = await db.goals.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
-    goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
-    return {"goals": _enrich_goals(goals)}
+    # Rule (2026-05-23) — sort goals by how OFTEN they get completed:
+    # most-active first. We use `current_value` as the activity proxy
+    # (it increments every time the user logs progress / ticks a
+    # day-on-the-habit). Completed goals drop to the bottom (separate
+    # bucket) so the active board stays clean. Recomputes on every
+    # GET so the order updates "for each new day" automatically.
+    active = [g for g in goals if not g.get("completed")]
+    done = [g for g in goals if g.get("completed")]
+    active.sort(
+        key=lambda g: (int(g.get("current_value", 0) or 0), g.get("created_at", "")),
+        reverse=True,
+    )
+    done.sort(key=lambda g: g.get("completed_at", "") or g.get("created_at", ""), reverse=True)
+    wake = await _wake_for_user(user_id)
+    tz = await _tz_for_user(user_id)
+    return {"goals": _enrich_goals(active + done, wake_str=wake, tz_name=tz)}
 
 
 @api_router.post("/goals")
 async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legacy)):
-    # Cap users to 5 active long-term goals at any time. Completed goals
+    # Cap users to 8 active long-term goals at any time. Completed goals
     # don't count toward the limit so users always have room to add more
     # once they finish older ones.
-    MAX_ACTIVE_GOALS = 5
+    MAX_ACTIVE_GOALS = 8
+    # Per user-spec 2026-05-23: separately cap MONTHLY-unit goals at 2.
+    # Months goals are heavy commitments (30-day cycles, top XP cap)
+    # so we prevent users from stockpiling them.
+    MAX_ACTIVE_MONTHLY_GOALS = 2
+    # Per user-spec 2026-05-24: cap DAILY-unit goals at 5. Daily goals
+    # are quick to complete and could otherwise fill the whole 8-slot
+    # quota leaving no room for longer-horizon Weekly/Monthly goals.
+    MAX_ACTIVE_DAILY_GOALS = 5
     is_admin = await _is_admin_user(user_id)
     active_count = await db.goals.count_documents({"user_id": user_id, "completed": False})
     if active_count >= MAX_ACTIVE_GOALS and not is_admin:
@@ -1908,6 +2075,42 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
             },
         )
     unit_norm = (body.unit or "days").lower()
+    if unit_norm == "months" and not is_admin:
+        monthly_active = await db.goals.count_documents({
+            "user_id": user_id, "completed": False, "unit": "months",
+        })
+        if monthly_active >= MAX_ACTIVE_MONTHLY_GOALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "monthly_goal_limit_reached",
+                    "message": (
+                        f"You can have up to {MAX_ACTIVE_MONTHLY_GOALS} Monthly "
+                        "goals at once. Finish or delete one before adding a new "
+                        "Monthly goal — Weekly or Daily goals don't count."
+                    ),
+                    "limit": MAX_ACTIVE_MONTHLY_GOALS,
+                    "unit": "months",
+                },
+            )
+    if unit_norm == "days" and not is_admin:
+        daily_active = await db.goals.count_documents({
+            "user_id": user_id, "completed": False, "unit": "days",
+        })
+        if daily_active >= MAX_ACTIVE_DAILY_GOALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "daily_goal_limit_reached",
+                    "message": (
+                        f"You can have up to {MAX_ACTIVE_DAILY_GOALS} Daily "
+                        "goals at once. Finish or delete one before adding a "
+                        "new Daily goal — Weekly or Monthly goals don't count."
+                    ),
+                    "limit": MAX_ACTIVE_DAILY_GOALS,
+                    "unit": "days",
+                },
+            )
     xp_reward = body.xp_reward if is_admin else _clamp_goal_xp(unit_norm, body.xp_reward)
     goal = {
         "id": str(uuid.uuid4()),
@@ -1928,6 +2131,10 @@ async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legac
     prof = await db.profile.find_one({"_id": user_id})
     await check_and_unlock_achievements(prof)
     goal.pop("_id", None)
+    # Surface is_locked + next_tick_available_at on the create response
+    # so the UI can show the countdown pill immediately for a freshly-
+    # created Monthly/Weekly goal (lock starts from `created_at`).
+    goal = await _enrich_goal_lock_state_for_user(goal, user_id)
     return goal
 
 
@@ -1936,11 +2143,89 @@ async def update_goal(goal_id: str, body: GoalUpdate, user_id: str = Depends(get
     update = {k: v for k, v in body.dict().items() if v is not None}
     if not update:
         raise HTTPException(400, "No fields to update")
+
+    # Load the existing goal so we can decide whether the time-frame is
+    # being changed AND validate user-facing caps.
+    existing = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Goal not found")
+    is_admin = await _is_admin_user(user_id)
+
+    # ── Unit normalisation + timeframe-change side-effects ─────────────
+    if "unit" in update:
+        new_unit = (update["unit"] or "days").lower()
+        update["unit"] = new_unit
+        old_unit = (existing.get("unit") or "days").lower()
+
+        # Enforce MAX_ACTIVE_MONTHLY_GOALS=2 cap when switching INTO months
+        # (admins exempt). Don't count the goal being edited itself.
+        if new_unit == "months" and not is_admin and old_unit != "months":
+            monthly_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "months",
+                "id": {"$ne": goal_id},
+            })
+            if monthly_active >= 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "monthly_goal_limit_reached",
+                        "message": (
+                            "You can have up to 2 Monthly goals at once. "
+                            "Finish or delete one before switching this goal "
+                            "to Monthly."
+                        ),
+                        "limit": 2,
+                        "unit": "months",
+                    },
+                )
+
+        # Mirror the cap for DAILY goals when switching INTO days
+        # (admins exempt; don't count the goal being edited).
+        if new_unit == "days" and not is_admin and old_unit != "days":
+            daily_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "days",
+                "id": {"$ne": goal_id},
+            })
+            if daily_active >= 5:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "daily_goal_limit_reached",
+                        "message": (
+                            "You can have up to 5 Daily goals at once. "
+                            "Finish or delete one before switching this goal "
+                            "to Daily."
+                        ),
+                        "limit": 5,
+                        "unit": "days",
+                    },
+                )
+
+        # Per user-spec (2026-05-23) — if the time-frame is actually CHANGING,
+        # reset the cycle countdown so the new frame starts "now". Title /
+        # description / target / focus_area / xp_reward edits that keep the
+        # same `unit` do NOT touch the countdown.
+        if new_unit != old_unit:
+            update["created_at"] = now_iso()
+            # Clearing last_completed_at lets the cycle-lockout helper fall
+            # back to the new `created_at` for the first-tick window.
+            update["last_completed_at"] = None
+            update["timeframe_reset_at"] = now_iso()
+
+    # ── XP clamp on edit ──────────────────────────────────────────────
+    # When the user supplies a new xp_reward or changes the unit, re-clamp
+    # against the per-unit cap (admins bypass).
+    if not is_admin and ("xp_reward" in update or "unit" in update):
+        effective_unit = update.get("unit", existing.get("unit") or "days")
+        proposed_xp = update.get("xp_reward", existing.get("xp_reward"))
+        if proposed_xp is not None:
+            update["xp_reward"] = _clamp_goal_xp(effective_unit, int(proposed_xp))
+
     res = await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     if res.matched_count == 0:
         raise HTTPException(404, "Goal not found")
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
-    return goal
+    return await _enrich_goal_lock_state_for_user(goal, user_id) if goal else goal
 
 
 @api_router.post("/goals/{goal_id}/progress")
@@ -1955,14 +2240,25 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     # message. The unit-aware logic lives in `_is_goal_locked`.
     requested_value = max(0, min(body.current_value, goal["target_value"]))
     incrementing = requested_value > int(goal.get("current_value", 0))
+    # Fetch wake/tz ONCE (daily-lock needs them; we also reuse for the
+    # final enrichment response below).
+    wake_str = await _wake_for_user(user_id)
+    tz_name = await _tz_for_user(user_id)
     if incrementing:
-        locked, next_at = _is_goal_locked(goal)
+        locked, next_at = _is_goal_locked(goal, wake_str=wake_str, tz_name=tz_name)
         if locked and next_at is not None:
+            unit_lower = (goal.get("unit") or "cycle").lower()
+            if unit_lower == "days":
+                msg = "This daily goal is already ticked today. Comes back at your morning reset."
+                err_code = "daily_locked"
+            else:
+                msg = f"This goal is locked until the next {unit_lower.rstrip('s')} cycle."
+                err_code = "cycle_locked"
             raise HTTPException(
                 status_code=429,
                 detail={
-                    "error": "cycle_locked",
-                    "message": f"This goal is locked until the next {(goal.get('unit') or 'cycle').rstrip('s')} cycle.",
+                    "error": err_code,
+                    "message": msg,
                     "next_tick_available_at": next_at.isoformat(),
                     "unit": goal.get("unit"),
                 },
@@ -1973,9 +2269,16 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     if incrementing:
         update["last_ticked_at"] = now_iso()
     elif requested_value < int(goal.get("current_value", 0)):
-        # User un-ticked: clear the lockout so they can re-tick immediately
-        # (matches the "until it's clicked again" UX).
-        update["last_ticked_at"] = None
+        # User un-ticked.
+        # XP-cheat fix (2026-05-24): for DAILY goals we deliberately
+        # preserve `last_ticked_at` so the user can't un-tick + re-tick
+        # within the same day to oscillate (and also keeps the streak/
+        # achievement/chart counters honest). The XP refund still
+        # happens below. For weeks/months the cycle-lock anchor is
+        # `last_completed_at` (NOT last_ticked_at), so clearing
+        # last_ticked_at here is safe and matches the legacy UX.
+        if (goal.get("unit") or "").lower() != "days":
+            update["last_ticked_at"] = None
 
     # ── Per-step XP for DAILY goals ──
     # Daily goals (unit == "days") award 30 XP per +1 step up to (but not
@@ -2000,23 +2303,62 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
                 {"_id": user_id},
                 {"$inc": {"total_xp": step_xp_delta}},
             )
-            # Tick a daily goal forward → log XP to charts so the bar /
-            # line graphs reflect the new XP that was just earned. We
-            # only log POSITIVE deltas — un-ticking refunds XP but
-            # shouldn't go on the chart as a negative bar (the chart
-            # shows earnings, not refunds).
             if step_xp_delta > 0:
+                # Tick a daily goal forward → log XP to charts so the bar
+                # / line graphs reflect the new XP that was just earned.
+                # Tag with goal_id + kind='goal_step' so the un-tick path
+                # below can find and delete these exact rows (mirrors the
+                # goal_complete refund logic).
                 await _log_xp_to_charts(
                     user_id, step_xp_delta,
                     source="goal_step",
                     focus_area=goal.get("focus_area") or "mindset",
+                    goal_id=goal_id,
+                    kind="goal_step",
                 )
+            else:
+                # Un-tick: insert a NEGATIVE goal_step adjustment row so
+                # the chart subtracts exactly |step_xp_delta| from the
+                # day's earned total. (We use a negative row instead of
+                # deleting existing rows because /progress writes ONE
+                # cumulative row per call — deleting it would over-
+                # subtract on a partial un-tick like 5→2 where the
+                # original row carried +150 but we only want -90.) The
+                # /stats/weekly + /stats/monthly aggregators sum
+                # goal_step rows without the max(0,…) clamp so this
+                # nets cleanly to the user's true total_xp.
+                try:
+                    await db.task_logs.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "user_id": user_id,
+                        "task_id": f"_xp:goal_step_refund:{uuid.uuid4()}",
+                        "task_title": "goal_step_refund",
+                        "date": today_str(),
+                        "focus_area": (
+                            goal.get("focus_area")
+                            if (goal.get("focus_area") in FOCUS_AREAS)
+                            else "mindset"
+                        ),
+                        "xp_awarded": int(step_xp_delta),  # negative
+                        "xp_multiplier": 1.0,
+                        "completed_at": now_iso(),
+                        "_source": "goal_step",
+                        "goal_id": goal_id,
+                        "kind": "goal_step",
+                    })
+                except Exception:
+                    logger.exception("[goal-step-refund] negative row insert failed")
 
     awarded_xp = 0
     refunded_xp = 0
     if completed and not goal.get("completed"):
         update["completed_at"] = now_iso()
         awarded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
+        # Persist the EXACT XP we awarded on this completion so a future
+        # un-tick refunds the right amount even if the goal's xp_reward
+        # has been edited since (per user's "scoped by goal_id" spec).
+        update["xp_awarded_on_complete"] = awarded_xp
+        update["last_completed_at"] = update["completed_at"]
         await db.profile.update_one(
             {"_id": user_id},
             {"$inc": {"goals_completed": 1, "total_xp": awarded_xp}},
@@ -2027,21 +2369,56 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
             user_id, awarded_xp,
             source="goal_complete",
             focus_area=goal.get("focus_area") or "mindset",
+            goal_id=goal_id,
+            kind="goal_complete",
         )
         prof = await db.profile.find_one({"_id": user_id})
         await check_and_unlock_achievements(prof)
     elif goal.get("completed") and not completed:
-        # User reduced progress below target after the goal had already been
-        # marked complete → revoke the previously-awarded XP.
-        refunded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
+        # User reduced progress below target after the goal had already
+        # been marked complete → revoke the previously-awarded XP using
+        # the EXACT amount we awarded on completion (scoped by goal_id
+        # per user spec). Fall back to xp_reward only if older goals
+        # don't have the field populated.
+        refunded_xp = int(
+            goal.get("xp_awarded_on_complete")
+            or goal.get("xp_reward")
+            or GOAL_XP_DEFAULT
+        )
         update["completed_at"] = None
+        update["xp_awarded_on_complete"] = None
+        # ── XP-cheat fix (2026-05-23) ─────────────────────────────────
+        # We DELIBERATELY DO NOT clear `last_completed_at` here.
+        # Weekly/monthly goals must stay LOCKED for the full cycle
+        # (1 week / 30 days) measured from the original completion
+        # timestamp — regardless of whether the user un-ticks. Otherwise
+        # the user could exploit: tick → +XP → untick → -XP refund →
+        # re-tick within the same cycle → +XP again, oscillating to
+        # game streak/achievement counters and chart entries. Per
+        # user request (issue: "Goal cooldown breaks at Level 10"),
+        # the cycle-lock now persists through un-ticks for ALL levels.
+        # (The user can still un-tick to give up the XP, but they
+        # forfeit re-ticking until the cycle expires.)
         await db.profile.update_one(
             {"_id": user_id},
             {"$inc": {"goals_completed": -1, "total_xp": -refunded_xp}},
         )
+        # Mirror on the charts: delete the previously-inserted
+        # goal_complete row(s) for this goal so the green segment
+        # disappears for the day it was logged. Scoped strictly by
+        # (user_id, goal_id, kind='goal_complete') so other rows from
+        # other goals stay intact.
+        try:
+            await db.task_logs.delete_many({
+                "user_id": user_id,
+                "goal_id": goal_id,
+                "kind": "goal_complete",
+            })
+        except Exception:
+            logger.exception("[goal-uncomplete] chart row cleanup failed")
     await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
-    goal = _enrich_goal_lock_state(goal)
+    goal = _enrich_goal_lock_state(goal, wake_str=wake_str, tz_name=tz_name)
     if awarded_xp:
         goal["awarded_xp"] = awarded_xp
     if refunded_xp:
@@ -2064,6 +2441,112 @@ async def delete_goal(goal_id: str, user_id: str = Depends(get_user_or_legacy)):
     if res.deleted_count == 0:
         raise HTTPException(404, "Goal not found")
     return {"deleted": True}
+
+
+@api_router.post("/goals/{goal_id}/restart")
+async def restart_goal(goal_id: str, user_id: str = Depends(get_user_or_legacy)):
+    """Restart a previously-completed goal: zero progress, new cycle, same
+    title/target/unit/xp_reward/focus_area. The XP already earned for the
+    original completion is NOT revoked.
+
+    Re-checks the active-goal caps (overall 8, monthly 2, daily 5) before
+    re-activating — a "restart" turns a completed goal back into an active
+    one, so the caps apply just like creating a new goal.
+    """
+    goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    if not goal:
+        raise HTTPException(404, "Goal not found")
+    if not goal.get("completed"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "goal_not_completed",
+                "message": "Only completed goals can be restarted.",
+            },
+        )
+
+    is_admin = await _is_admin_user(user_id)
+    MAX_ACTIVE_GOALS = 8
+    MAX_ACTIVE_MONTHLY_GOALS = 2
+    MAX_ACTIVE_DAILY_GOALS = 5
+    unit_norm = (goal.get("unit") or "days").lower()
+
+    # Overall cap.
+    if not is_admin:
+        active_count = await db.goals.count_documents({
+            "user_id": user_id, "completed": False, "id": {"$ne": goal_id},
+        })
+        if active_count >= MAX_ACTIVE_GOALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "goal_limit_reached",
+                    "message": (
+                        f"You can have up to {MAX_ACTIVE_GOALS} active goals "
+                        "at once. Finish or delete one before restarting this one."
+                    ),
+                    "limit": MAX_ACTIVE_GOALS,
+                },
+            )
+        if unit_norm == "months":
+            monthly_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "months",
+                "id": {"$ne": goal_id},
+            })
+            if monthly_active >= MAX_ACTIVE_MONTHLY_GOALS:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "monthly_goal_limit_reached",
+                        "message": (
+                            f"You can have up to {MAX_ACTIVE_MONTHLY_GOALS} Monthly "
+                            "goals at once. Finish or delete one before restarting "
+                            "this Monthly goal."
+                        ),
+                        "limit": MAX_ACTIVE_MONTHLY_GOALS,
+                        "unit": "months",
+                    },
+                )
+        if unit_norm == "days":
+            daily_active = await db.goals.count_documents({
+                "user_id": user_id, "completed": False, "unit": "days",
+                "id": {"$ne": goal_id},
+            })
+            if daily_active >= MAX_ACTIVE_DAILY_GOALS:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "daily_goal_limit_reached",
+                        "message": (
+                            f"You can have up to {MAX_ACTIVE_DAILY_GOALS} Daily "
+                            "goals at once. Finish or delete one before restarting "
+                            "this Daily goal."
+                        ),
+                        "limit": MAX_ACTIVE_DAILY_GOALS,
+                        "unit": "days",
+                    },
+                )
+
+    # Reset to a fresh cycle. We preserve title/description/focus_area/unit/
+    # target_value/xp_reward + the user's original `id` so the user feels
+    # they're restarting "the same goal" — not making a clone.
+    reset = {
+        "current_value": 0,
+        "completed": False,
+        "completed_at": None,
+        "last_completed_at": None,
+        "last_ticked_at": None,
+        "xp_awarded_on_complete": None,
+        # New cycle from "now" — drives the first-tick lock window for
+        # weekly/monthly goals and the daily morning-reset reference.
+        "created_at": now_iso(),
+        "restarted_at": now_iso(),
+    }
+    await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": reset})
+    goal = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
+    return await _enrich_goal_lock_state_for_user(goal, user_id) if goal else goal
+
+
 
 
 # --------- Achievements ---------
@@ -2125,18 +2608,64 @@ async def stats_weekly(user_id: str = Depends(get_user_or_legacy)):
         dt = (g.get("created_at") or "")[:10]
         if dt:
             gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
+    # Pre-aggregate XP penalties (Creator-only feature) so the bar/line
+    # charts can render a BLACK overlay segment on penalty days. Stored
+    # as positive ints in `xp_penalties.amount`; we surface as `penalty_xp`.
+    pen_cur = db.xp_penalties.find(
+        {"player_id": user_id},
+        {"_id": 0, "date": 1, "amount": 1},
+    )
+    penalty_by_day: dict[str, int] = {}
+    async for p in pen_cur:
+        dt = p.get("date")
+        if dt:
+            penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
+    # Pre-aggregate goal-completion XP so we can render a GREEN chart
+    # segment for "XP earned from completing long-term goals" on top of
+    # the cyan task-XP and gold gifted-XP bars.
+    goal_cur = db.task_logs.find(
+        {"user_id": user_id, "kind": "goal_complete"},
+        {"_id": 0, "date": 1, "xp_awarded": 1},
+    )
+    goal_by_day: dict[str, int] = {}
+    async for g in goal_cur:
+        dt = g.get("date")
+        if dt:
+            goal_by_day[dt] = goal_by_day.get(dt, 0) + int(g.get("xp_awarded", 0) or 0)
     for i in range(6, -1, -1):
         d = today_d - timedelta(days=i)
         d_str = d.isoformat()
         logs = await db.task_logs.find({"user_id": user_id, "date": d_str}, {"_id": 0}).to_list(1000)
-        xp = sum(entry["xp_awarded"] for entry in logs)
+        # Sum task XP for the chart's "earned" segment.
+        # • penalty / goal_complete rows are excluded (rendered as their
+        #   own segments).
+        # • For ALL other rows we clamp xp_awarded to ≥0 to defend against
+        #   accidental negative rows EXCEPT `kind=='goal_step'`, which is
+        #   the goal-tick path that LEGITIMATELY emits a negative row on
+        #   un-tick (so the bar/line graph shrinks). Those rows MUST be
+        #   summed verbatim so the displayed earned XP nets cleanly to
+        #   the user's true daily total.
+        xp = 0
+        for entry in logs:
+            k = entry.get("kind")
+            if k in ("goal_complete", "penalty"):
+                continue
+            raw = int(entry.get("xp_awarded") or 0)
+            xp += raw if k == "goal_step" else max(0, raw)
         gifted_xp = int(gifted_by_day.get(d_str, 0))
+        penalty_xp = int(penalty_by_day.get(d_str, 0))
+        goal_xp = int(goal_by_day.get(d_str, 0))
         days.append({
             "date": d_str,
             "day": d.strftime("%a"),
             "xp": xp,
             "gifted_xp": gifted_xp,
-            "tasks": len(logs),
+            "penalty_xp": penalty_xp,
+            "goal_xp": goal_xp,
+            "tasks": len([
+                e for e in logs
+                if e.get("kind") not in ("penalty", "goal_complete")
+            ]),
         })
     return {"days": days}
 
@@ -2161,6 +2690,27 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
         dt = (g.get("created_at") or "")[:10]
         if dt:
             gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
+    # Pre-aggregate XP penalties so monthly chart can show the black
+    # overlay for any penalty days within the 30-day window.
+    pen_cur = db.xp_penalties.find(
+        {"player_id": user_id},
+        {"_id": 0, "date": 1, "amount": 1},
+    )
+    penalty_by_day: dict[str, int] = {}
+    async for p in pen_cur:
+        dt = p.get("date")
+        if dt:
+            penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
+    # Pre-aggregate goal-completion XP for the GREEN segment.
+    goal_cur = db.task_logs.find(
+        {"user_id": user_id, "kind": "goal_complete"},
+        {"_id": 0, "date": 1, "xp_awarded": 1},
+    )
+    goal_by_day: dict[str, int] = {}
+    async for g in goal_cur:
+        dt = g.get("date")
+        if dt:
+            goal_by_day[dt] = goal_by_day.get(dt, 0) + int(g.get("xp_awarded", 0) or 0)
     # 30-day window — covers a calendar month at the visual level even
     # though we don't anchor on the 1st.
     for i in range(29, -1, -1):
@@ -2169,14 +2719,33 @@ async def stats_monthly(user_id: str = Depends(get_user_or_legacy)):
         logs = await db.task_logs.find(
             {"user_id": user_id, "date": d_str}, {"_id": 0}
         ).to_list(1000)
-        xp = sum(entry["xp_awarded"] for entry in logs)
+        # Sum task XP for the chart's "earned" segment.
+        # • penalty / goal_complete rows are excluded (rendered as their
+        #   own segments).
+        # • For ALL other rows we clamp xp_awarded to ≥0 EXCEPT
+        #   `kind=='goal_step'`, which legitimately emits a negative row
+        #   on un-tick so the chart shrinks (see /goals/{id}/progress).
+        xp = 0
+        for entry in logs:
+            k = entry.get("kind")
+            if k in ("goal_complete", "penalty"):
+                continue
+            raw = int(entry.get("xp_awarded") or 0)
+            xp += raw if k == "goal_step" else max(0, raw)
         gifted_xp = int(gifted_by_day.get(d_str, 0))
+        penalty_xp = int(penalty_by_day.get(d_str, 0))
+        goal_xp = int(goal_by_day.get(d_str, 0))
         days.append({
             "date": d_str,
             "day": d.strftime("%-d"),  # day-of-month for compact axis
             "xp": xp,
             "gifted_xp": gifted_xp,
-            "tasks": len(logs),
+            "penalty_xp": penalty_xp,
+            "goal_xp": goal_xp,
+            "tasks": len([
+                e for e in logs
+                if e.get("kind") not in ("penalty", "goal_complete")
+            ]),
         })
     return {"days": days}
 
@@ -2221,6 +2790,29 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
         if dt:
             gifted_by_day[dt] = gifted_by_day.get(dt, 0) + int(g.get("amount", 0) or 0)
 
+    # Pre-aggregate XP penalties (Creator-only feature) so admin chart
+    # can show the BLACK overlay on penalty days for this player.
+    pen_cur = db.xp_penalties.find(
+        {"player_id": player_id},
+        {"_id": 0, "date": 1, "amount": 1},
+    )
+    penalty_by_day: dict[str, int] = {}
+    async for p in pen_cur:
+        dt = p.get("date")
+        if dt:
+            penalty_by_day[dt] = penalty_by_day.get(dt, 0) + int(p.get("amount", 0) or 0)
+    # Pre-aggregate goal-completion XP per day so the admin chart also
+    # surfaces the GREEN goal-XP segment for the player being inspected.
+    goal_cur = db.task_logs.find(
+        {"user_id": player_id, "kind": "goal_complete"},
+        {"_id": 0, "date": 1, "xp_awarded": 1},
+    )
+    goal_by_day: dict[str, int] = {}
+    async for g in goal_cur:
+        dt = g.get("date")
+        if dt:
+            goal_by_day[dt] = goal_by_day.get(dt, 0) + int(g.get("xp_awarded", 0) or 0)
+
     async def _bucket(days_back: int, label_fmt: str) -> list[dict]:
         out: list[dict] = []
         for i in range(days_back - 1, -1, -1):
@@ -2229,13 +2821,22 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
             logs = await db.task_logs.find(
                 {"user_id": player_id, "date": d_str}, {"_id": 0}
             ).to_list(1000)
-            xp = sum(entry["xp_awarded"] for entry in logs)
+            xp = sum(
+                max(0, int(entry.get("xp_awarded") or 0))
+                for entry in logs
+                if entry.get("kind") != "goal_complete"
+            )
             out.append({
                 "date": d_str,
                 "day": d.strftime(label_fmt),
                 "xp": xp,
                 "gifted_xp": int(gifted_by_day.get(d_str, 0)),
-                "tasks": len(logs),
+                "penalty_xp": int(penalty_by_day.get(d_str, 0)),
+                "goal_xp": int(goal_by_day.get(d_str, 0)),
+                "tasks": len([
+                    e for e in logs
+                    if e.get("kind") not in ("penalty", "goal_complete")
+                ]),
             })
         return out
 
@@ -3176,7 +3777,7 @@ def _serialize_silence_state(prof: dict) -> Optional[dict]:
     }
 
 
-def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = False) -> dict:
+def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = False, live_extras: Optional[dict] = None) -> dict:
     """Public-facing trimmed profile for player cards / detail views.
 
     Special-case for the Creator/Admin: when OTHERS view this player,
@@ -3190,12 +3791,22 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
         dot next to their name in the admin's view of every list.
     These fields are omitted entirely for non-admin viewers so a regular
     user CANNOT discover that a player was previously suspended.
+
+    `live_extras` (optional) supplies freshly-computed values that override
+    the static profile snapshot — used by /friends/profile/{id} so the
+    public profile card always shows up-to-the-second XP/level/streak/
+    goal-count/quest-count even when the cached counters drift.
     """
     total_xp = int(prof.get("total_xp", 0) or 0)
     user_id = prof.get("_id") or prof.get("user_id")
     is_admin = _is_admin_email(prof.get("_email_cache"))
     viewing_self = status == "self"
     show_unlimited = is_admin and not viewing_self
+
+    # Derive a fresh level from total_xp on every read so a recent
+    # XP gift or penalty surfaces immediately (the cached `level`
+    # field can lag).
+    derived_level = level_from_xp(max(0, total_xp))
 
     base = {
         "user_id": user_id,
@@ -3208,12 +3819,15 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
             if (is_admin and not viewing_self)
             else (prof.get("full_name") or prof.get("name") or "Anonymous")
         ),
-        "level": int(prof.get("level", 1) or 1),
+        "level": int(prof.get("level", derived_level) or derived_level),
         "total_xp": total_xp,
         "current_streak": int(prof.get("current_streak", 0) or 0),
-        "best_streak": int(prof.get("best_streak", 0) or 0),
+        "best_streak": int(prof.get("best_streak", 0) or prof.get("longest_streak", 0) or 0),
         "goals_completed": int(prof.get("goals_completed", 0) or 0),
         "tasks_completed": int(prof.get("tasks_completed", 0) or 0),
+        # Live goal counts — overwritten by live_extras when supplied.
+        "active_goals_count": int(prof.get("active_goals_count", 0) or 0),
+        "total_goals_count": int(prof.get("total_goals_count", 0) or 0),
         "bio": prof.get("bio") or "",
         "avatar_base64": prof.get("avatar_base64"),
         "friend_status": status,  # none | pending_outgoing | pending_incoming | friends | self
@@ -3223,7 +3837,17 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
         # app / hit our API. Refreshed (throttled to once-per-minute) by
         # `_touch_last_seen` inside `get_user_or_legacy`.
         "last_seen_at": prof.get("last_seen_at"),
+        "joined_at": prof.get("created_at"),
     }
+    # Apply live-recomputed extras AFTER the snapshot has been built so
+    # they take precedence over any stale counters.
+    if live_extras:
+        for k, v in live_extras.items():
+            if v is not None:
+                base[k] = v
+        # Recompute level from (possibly) updated XP.
+        if "total_xp" in live_extras:
+            base["level"] = level_from_xp(max(0, int(live_extras["total_xp"])))
     if show_unlimited:
         base.update({
             "level": 999,         # special sentinel, frontend renders ∞
@@ -3232,6 +3856,8 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
             "best_streak": -1,
             "goals_completed": -1,
             "tasks_completed": -1,
+            "active_goals_count": -1,
+            "total_goals_count": -1,
             "bio": "",            # cleared as requested
         })
     if viewer_is_admin and not is_admin:
@@ -3347,7 +3973,39 @@ async def player_profile(other_id: str, user_id: str = Depends(get_user_or_legac
     rel = await _find_relationship(user_id, other_id)
     status = "self" if other_id == user_id else _relationship_status(rel, user_id)
     viewer_is_admin = await _is_admin_user(user_id)
-    return _serialize_player(prof, status, viewer_is_admin=viewer_is_admin)
+    # Compute LIVE-fresh stats by counting straight from the canonical
+    # collections. This guarantees the public profile card always shows
+    # up-to-the-second values even if the cached counters on the profile
+    # doc drift (e.g. due to a manual edit or a missed increment).
+    live_extras: dict = {}
+    try:
+        # Quest/task completions = positive-XP rows in task_logs.
+        completed_tasks = await db.task_logs.count_documents(
+            {"user_id": other_id, "xp_awarded": {"$gt": 0}}
+        )
+        # Goal counts (active + total).
+        active_goals = await db.goals.count_documents(
+            {"user_id": other_id, "completed": {"$ne": True}}
+        )
+        total_goals = await db.goals.count_documents({"user_id": other_id})
+        completed_goals = await db.goals.count_documents(
+            {"user_id": other_id, "completed": True}
+        )
+        live_extras = {
+            "tasks_completed": int(completed_tasks),
+            "active_goals_count": int(active_goals),
+            "total_goals_count": int(total_goals),
+            "goals_completed": int(completed_goals),
+            # XP and streak come from the profile doc which is updated
+            # synchronously on every task complete + penalty — those are
+            # already live, so we just forward the freshest read.
+            "total_xp": int(prof.get("total_xp", 0) or 0),
+            "current_streak": int(prof.get("current_streak", 0) or 0),
+            "best_streak": int(prof.get("best_streak", 0) or prof.get("longest_streak", 0) or 0),
+        }
+    except Exception:
+        logger.exception("[friends/profile] live_extras failed for %s", other_id)
+    return _serialize_player(prof, status, viewer_is_admin=viewer_is_admin, live_extras=live_extras)
 
 
 @api_router.get("/friends/profile/{other_id}/details")
@@ -3674,7 +4332,21 @@ async def boosts_activate(body: BoostActivatePayload, user_id: str = Depends(get
     prof = await db.profile.find_one({"_id": user_id})
     if not prof:
         raise HTTPException(404, "Profile not found")
-    if not prof.get("boosts_unlocked"):
+
+    # Locate the inventory entry up-front so we can apply the relaxed
+    # gift-bypass: if the user is activating a GIFTED inventory entry
+    # we let them through even when boosts_unlocked is False (the gift
+    # shouldn't depend on the shop being unlocked — per user spec).
+    inv: list = prof.get("boost_inventory") or []
+    pending_entry = None
+    if body.inventory_id:
+        for it in inv:
+            if it.get("id") == body.inventory_id:
+                pending_entry = it
+                break
+    is_gift_activation = bool(pending_entry and pending_entry.get("source") in ("gift", "admin_gift"))
+
+    if not prof.get("boosts_unlocked") and not is_gift_activation:
         raise HTTPException(403, detail={
             "error": "boosts_locked",
             "message": "Enter the unlock code first to access XP boosts.",
@@ -3879,6 +4551,9 @@ async def _log_xp_to_charts(
     amount: int,
     source: str,
     focus_area: str = "mindset",
+    *,
+    goal_id: Optional[str] = None,
+    kind: Optional[str] = None,
 ) -> None:
     """Write an XP row that the Progress-tab charts read.
 
@@ -3901,6 +4576,11 @@ async def _log_xp_to_charts(
     collection (rendered as the gold stacked segment), and double-
     logging them would inflate the daily totals.
 
+    `goal_id` + `kind` are optional metadata used by the goal-uncomplete
+    flow to reverse a previously-awarded log row (delete by goal_id +
+    kind='goal_complete'), and by the chart endpoints to split the
+    per-day total into the GREEN goal-XP segment.
+
     Never raises — chart logging is non-critical and must not block the
     XP grant if Mongo is hot.
     """
@@ -3912,7 +4592,7 @@ async def _log_xp_to_charts(
         # doesn't get a garbage bucket.
         if focus_area not in FOCUS_AREAS:
             focus_area = "mindset"
-        await db.task_logs.insert_one({
+        row = {
             "id": str(uuid.uuid4()),
             "user_id": user_id,
             # Synthetic task_id so this row can never be confused with a
@@ -3925,7 +4605,15 @@ async def _log_xp_to_charts(
             "xp_multiplier": 1.0,
             "completed_at": now_iso(),
             "_source": source,  # tag for analytics; not read by chart
-        })
+        }
+        # Tag goal-XP rows so (a) the chart endpoints can split out a
+        # GREEN goal-XP segment and (b) the un-tick flow can find and
+        # delete the row by (user_id, goal_id, kind='goal_complete').
+        if goal_id:
+            row["goal_id"] = goal_id
+        if kind:
+            row["kind"] = kind
+        await db.task_logs.insert_one(row)
     except Exception as e:
         logger.warning("[xp-chart-log] failed for source=%s: %s", source, e)
 
@@ -4046,6 +4734,12 @@ async def friends_leaderboard(
     for uid in member_ids:
         prof = await db.profile.find_one({"_id": uid})
         if not prof:
+            continue
+        # Rule-1: hide brand-new accounts (total_xp == 0, i.e. "under
+        # Level 1") from the public Leaderboard. The VIEWER themselves
+        # is always shown even if they're at 0 XP — otherwise the
+        # screen would render empty for first-timers and feel broken.
+        if int(prof.get("total_xp", 0) or 0) <= 0 and uid != user_id:
             continue
         # Use each player's OWN tz so their Mon-Sat window is relative to them
         their_tz = int(prof.get("tz_offset_minutes", tz) or tz)
@@ -4330,8 +5024,27 @@ class SpotRandomTogglePayload(BaseModel):
 
 @api_router.get("/spot/object")
 async def spot_get_object(user_id: str = Depends(get_user_or_legacy)):
-    """Return a fresh random object for the user to find."""
-    obj = random.choice(SPOT_OBJECTS)
+    """Return the user's next Spot the Object target.
+
+    Uses the global non-repeat queue (challenge_queue.next_item): the
+    same object will never repeat until the entire SPOT_OBJECTS pool
+    has been shown to this player. After every object has been used,
+    the queue auto-reshuffles for the next cycle. Per-user queue stored
+    in `challenge_queues` keyed by 'user:{uid}:spot_solo'."""
+    try:
+        from challenge_queue import next_item as _cq_next
+        picks = await _cq_next(
+            db,
+            scope="user",
+            key=user_id,
+            pool_id="spot_solo",
+            full_pool=SPOT_OBJECTS,
+            count=1,
+        )
+        obj = picks[0] if picks else random.choice(SPOT_OBJECTS)
+    except Exception:
+        logger.exception("[spot_get_object] queue failed, falling back to random")
+        obj = random.choice(SPOT_OBJECTS)
     return {"object": obj, "challenge_id": str(uuid.uuid4())}
 
 
@@ -4902,8 +5615,11 @@ async def spot_comment(entry_id: str, body: SpotCommentPayload, user_id: str = D
     return {"comments": (e2 or {}).get("comments", [])}
 
 
-@api_router.get("/spot/{entry_id}")
-async def spot_entry_detail(entry_id: str, user_id: str = Depends(get_user_or_legacy)):
+@api_router.get("/spot/photo/{entry_id}")
+async def spot_entry_detail(
+    entry_id: str,
+    user_id: str = Depends(get_user_or_legacy),
+):
     e = await db.spot_completions.find_one({"id": entry_id}, {"_id": 0})
     if not e:
         raise HTTPException(404, "Photo not found")
@@ -5777,14 +6493,27 @@ async def messages_send(body: MessageSendPayload, user_id: str = Depends(get_use
     sender_name = sender_prof.get("full_name") or sender_prof.get("name") or "A friend"
     if sender_is_admin:
         sender_name = ADMIN_PUBLIC_DISPLAY_NAME
-    recipient_tokens = await db.push_tokens.find({"user_id": body.to_user_id}).to_list(10)
-    for tok_doc in recipient_tokens:
-        await _send_expo_push(
-            tok_doc.get("token", ""),
-            f"💬 {sender_name}",
-            (refined or "📷 Sent you a photo")[:200],
-            {"type": "message", "from_user_id": user_id, "message_id": msg["id"]},
-        )
+    # Check recipient's chat_preferences for the sender. If muted OR blocked,
+    # skip the push. (Badge suppression for "blocked" happens server-side in
+    # /messages/unread-summary + /messages/threads.) Admin pushes still go
+    # through — Creator/Admin can't be muted/blocked by design.
+    suppress_push = False
+    if not sender_is_admin and _chat_pref_for_pair is not None:
+        try:
+            recipient_pref = await _chat_pref_for_pair(body.to_user_id, user_id)
+            if recipient_pref.get("muted") or recipient_pref.get("blocked"):
+                suppress_push = True
+        except Exception:
+            logger.exception("[messages] chat_pref lookup failed")
+    if not suppress_push:
+        recipient_tokens = await db.push_tokens.find({"user_id": body.to_user_id}).to_list(10)
+        for tok_doc in recipient_tokens:
+            await _send_expo_push(
+                tok_doc.get("token", ""),
+                f"💬 {sender_name}",
+                (refined or "📷 Sent you a photo")[:200],
+                {"type": "message", "from_user_id": user_id, "message_id": msg["id"]},
+            )
     return {"message": _serialize_message(msg)}
 
 
@@ -5811,10 +6540,21 @@ async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
         if other and other != user_id:
             friend_ids.add(other)
     rows = []
+    # Pre-fetch which friend_ids the caller has soft-blocked so we can
+    # zero out their unread counts here (the blocker can still see the
+    # thread + read history, just no red badge).
+    blocked_set: set[str] = set()
+    if _chat_blocked_for is not None:
+        try:
+            blocked_set = await _chat_blocked_for(user_id)
+        except Exception:
+            logger.exception("[messages] blocked filter (threads) failed")
     for fid in friend_ids:
         thread_id = _thread_key(user_id, fid)
         last = await db.messages.find_one({"thread_id": thread_id}, sort=[("created_at", -1)])
         unread = await db.messages.count_documents({"thread_id": thread_id, "to_user_id": user_id, "read_at": None})
+        if fid in blocked_set:
+            unread = 0
         prof = await db.profile.find_one({"_id": fid}) or {}
         u = await db.users.find_one({"_id": fid}, {"email": 1}) or {}
         is_admin = _is_admin_email(u.get("email"))
@@ -5825,6 +6565,7 @@ async def messages_threads(user_id: str = Depends(get_user_or_legacy)):
             "last_message": _serialize_message(last) if last else None,
             "unread_count": int(unread),
             "is_admin_thread": bool(is_admin),
+            "blocked": bool(fid in blocked_set),
         })
     rows.sort(key=lambda r: (r["last_message"] or {}).get("created_at") or "", reverse=True)
     return {"threads": rows}
@@ -5870,6 +6611,16 @@ async def messages_unread_summary(user_id: str = Depends(get_user_or_legacy)):
     summary = {}
     async for row in db.messages.aggregate(pipeline):
         summary[row["_id"]] = int(row["unread"])
+    # Soft-block: messages still arrive but their unread count is NOT
+    # surfaced as a red badge to the blocker. The blocker can still
+    # open the thread and read/reply normally.
+    if _chat_blocked_for is not None:
+        try:
+            blocked = await _chat_blocked_for(user_id)
+            for fid in blocked:
+                summary.pop(fid, None)
+        except Exception:
+            logger.exception("[messages] blocked filter failed")
     return {"unread_by_friend": summary, "total_unread": sum(summary.values())}
 
 
@@ -6382,12 +7133,44 @@ def _today_index(n: int, offset: int = 0) -> int:
 @api_router.get("/confidence/daily")
 async def confidence_daily(user_id: str = Depends(get_user_or_legacy)):
     """Return today's challenge for each non-AI track + the user's
-    completion status for today. The frontend uses this to paint the
-    landing page of the mini-app."""
-    social = CONFIDENCE_SOCIAL_CHALLENGES[_today_index(len(CONFIDENCE_SOCIAL_CHALLENGES))]
-    physical = CONFIDENCE_PHYSICAL_CHALLENGES[_today_index(len(CONFIDENCE_PHYSICAL_CHALLENGES), 3)]
-    gratitude = CONFIDENCE_GRATITUDE_PROMPTS[_today_index(len(CONFIDENCE_GRATITUDE_PROMPTS), 7)]
+    completion status for today.
+
+    Rule-4 — challenges are randomised PER USER ACCOUNT via
+    `challenge_queue.next_item`. Each track has its own queue. The pick
+    is memoised for the UTC day so the same user keeps seeing the same
+    challenge for that day; on the next UTC day the queue advances."""
     today = datetime.utcnow().date().isoformat()
+
+    # Per-user, per-day, per-track memoisation. The queue itself only
+    # advances when we mint a NEW pick — so refreshing the page within
+    # the same day is idempotent.
+    async def _pick(track: str, pool: list[dict]) -> dict:
+        pool_ids = [str(i) for i in range(len(pool))]
+        memo_id = f"{user_id}:{today}:{track}"
+        memo = await db.confidence_today_picks.find_one({"_id": memo_id})
+        if memo:
+            idx = int(memo.get("idx", 0))
+            return pool[idx % len(pool)]
+        try:
+            from challenge_queue import next_item as _cq_next
+            picks = await _cq_next(
+                db, scope="user", key=user_id,
+                pool_id=f"confidence_{track}", full_pool=pool_ids, count=1,
+            )
+            idx = int(picks[0]) if picks else 0
+        except Exception:
+            logger.exception("[confidence.daily] queue failed, falling back to legacy")
+            idx = _today_index(len(pool))
+        await db.confidence_today_picks.update_one(
+            {"_id": memo_id},
+            {"$set": {"user_id": user_id, "date": today, "track": track, "idx": idx}},
+            upsert=True,
+        )
+        return pool[idx % len(pool)]
+
+    social = await _pick("social", CONFIDENCE_SOCIAL_CHALLENGES)
+    physical = await _pick("physical", CONFIDENCE_PHYSICAL_CHALLENGES)
+    gratitude = await _pick("gratitude", CONFIDENCE_GRATITUDE_PROMPTS)
     done = await db.confidence_completions.find(
         {"user_id": user_id, "date": today},
         {"_id": 0, "track": 1},
@@ -7187,14 +7970,16 @@ async def admin_gift_boost(body: AdminGiftBoostBody, user_id: str = Depends(get_
             "activated": False,
         }
 
-    # Make sure boosts feature is unlocked for the recipient so they can
-    # actually activate the gifted boost without entering an unlock code.
+    # Surface the gifted boost in the recipient's inventory WITHOUT
+    # unlocking the entire Points+ shop (per user-fix 2026-05-18: a
+    # gifted multiplier should be the ONLY one the recipient gains —
+    # they shouldn't get free access to buy/claim every other boost).
+    # The /boosts/activate endpoint has a parallel relaxation that
+    # accepts gift-source inventory entries even when boosts_unlocked
+    # is False.
     await db.profile.update_one(
         {"_id": body.user_id},
-        {
-            "$set": {"boosts_unlocked": True, "boosts_unlocked_at": now_iso()},
-            "$push": {"boost_inventory": entry},
-        },
+        {"$push": {"boost_inventory": entry}},
         upsert=True,
     )
     sender_prof = await db.profile.find_one({"_id": user_id}) or {}
@@ -7446,7 +8231,7 @@ async def library_catalog(user_id: str = Depends(get_user_or_legacy)):
 #   }
 # Composite uniqueness: (user_id, app_id). We enforce it via upsert.
 
-LIBRARY_APP_IDS = ["sleep", "challenges", "spot", "confidence"]
+LIBRARY_APP_IDS = ["sleep", "challenges", "spot", "confidence", "treasure"]
 APP_PRETTY = {
     "sleep": "Improve Sleeping",
     "challenges": "Challenge Tasks",
@@ -7714,8 +8499,8 @@ async def library_ratings_post(
 # Effective price = price * (1 - discount_percent/100) if discount_active else price.
 # Discount considered active when now() ∈ [starts_at, ends_at].
 
-DEFAULT_PRICE_CURRENCY = "USD"
-SUPPORTED_PRICE_CURRENCIES = ["USD", "EUR", "GBP", "AUD", "CAD", "JPY", "INR", "RON", "CHF", "BRL"]
+DEFAULT_PRICE_CURRENCY = "AUD"
+SUPPORTED_PRICE_CURRENCIES = ["AUD", "USD", "EUR", "GBP", "CAD", "JPY", "INR", "RON", "CHF", "BRL"]
 
 # Boost IDs that the Creator can price in Points+ section (Progress tab).
 BOOST_IDS = ["triple_day", "double_week", "double_month"]
@@ -7793,7 +8578,39 @@ async def library_pricing_get(user_id: str = Depends(get_user_or_legacy)):
     purchased_set = {p.get("app_id") for p in purchased_rows}
     out = {}
     for aid in LIBRARY_APP_IDS:
-        out[aid] = _pricing_doc_to_pub(by_app.get(aid), aid, aid in purchased_set)
+        pricing = _pricing_doc_to_pub(by_app.get(aid), aid, aid in purchased_set)
+        # Per-player price override (Creator-set, applies only to this caller).
+        # Beats both the solo % discount and the duo offer — when present,
+        # `effective_price` becomes the override and a marker field is
+        # exposed so the UI can render an "Exclusive price" pill.
+        if _admin_price_override_for is not None:
+            try:
+                ov = await _admin_price_override_for(user_id, aid)
+                if ov:
+                    pricing["effective_price"] = ov["override_price"]
+                    pricing["currency"] = ov["currency"]
+                    pricing["discount_active"] = False
+                    pricing["override_price"] = ov["override_price"]
+                    pricing["override_currency"] = ov["currency"]
+                    pricing["has_override"] = True
+                else:
+                    pricing["has_override"] = False
+            except Exception:
+                logger.exception("[price-override] enrich failed for %s", aid)
+                pricing["has_override"] = False
+        else:
+            pricing["has_override"] = False
+        # Enrich each entry with the active Duo Referral Offer (if any)
+        # so the Library+ card can render the "🎟 $X w/ N friends" badge.
+        if _duo_active_offer is not None:
+            try:
+                pricing["duo_offer"] = await _duo_active_offer(aid)
+            except Exception:
+                logger.exception("[duo_discounts] enrich offer failed for %s", aid)
+                pricing["duo_offer"] = None
+        else:
+            pricing["duo_offer"] = None
+        out[aid] = pricing
     return {"pricing": out, "currencies": SUPPORTED_PRICE_CURRENCIES}
 
 
@@ -7971,6 +8788,7 @@ def _stripe_amount(price: float, currency: str) -> int:
 async def _stripe_record_purchase(
     user_id: str, app_id: str, session_id: str,
     payment_intent: str | None, amount: int, currency: str,
+    duo_group_id: str | None = None,
 ):
     """Idempotent purchase record from Stripe events."""
     if not user_id or not app_id:
@@ -7985,10 +8803,12 @@ async def _stripe_record_purchase(
     if existing:
         # Backfill stripe_session_id if record was created via /library/purchase fallback.
         if not existing.get("stripe_session_id"):
+            patch = {"stripe_session_id": session_id, "stripe_payment_intent": payment_intent}
+            if duo_group_id and not existing.get("duo_group_id"):
+                patch["duo_group_id"] = duo_group_id
+                patch["source"] = "duo"
             await db.library_purchases.update_one(
-                {"_id": existing["_id"]},
-                {"$set": {"stripe_session_id": session_id,
-                          "stripe_payment_intent": payment_intent}},
+                {"_id": existing["_id"]}, {"$set": patch},
             )
         return False
     await db.library_purchases.insert_one({
@@ -8000,9 +8820,11 @@ async def _stripe_record_purchase(
         "paid_currency": currency.upper(),
         "stripe_session_id": session_id,
         "stripe_payment_intent": payment_intent,
-        "source": "stripe",
+        "source": "duo" if duo_group_id else "stripe",
+        "duo_group_id": duo_group_id or None,
     })
-    logger.info("[stripe] purchase recorded user=%s app=%s session=%s", user_id, app_id, session_id)
+    logger.info("[stripe] purchase recorded user=%s app=%s session=%s duo=%s",
+                user_id, app_id, session_id, duo_group_id or "-")
     return True
 
 
@@ -8042,8 +8864,25 @@ async def stripe_create_payment_intent(
         owns = await db.library_purchases.find_one({"user_id": user_id, "app_id": item_id})
         if owns:
             raise HTTPException(409, "You already own this mini-app.")
-    currency = pub["currency"]
-    amount = _stripe_amount(pub["effective_price"], currency)
+    # Duo Referral Discount path — if the body includes a duo_group_id, we
+    # override the price with the GROUP's snapshotted discounted_price.
+    # The validate helper enforces: caller is a member, group is FULL, not
+    # expired, hasn't paid yet. Server-side authoritative — user can't tamper.
+    duo_group_id = (body.get("duo_group_id") or "").strip() if kind == "library" else ""
+    duo_group_doc = None
+    if duo_group_id:
+        if _duo_validate_payment is None:
+            raise HTTPException(503, "Duo discounts unavailable.")
+        duo_price, duo_currency, duo_group_doc = await _duo_validate_payment(
+            user_id, item_id, duo_group_id
+        )
+        currency = duo_currency
+        amount = _stripe_amount(duo_price, currency)
+        effective_price = duo_price
+    else:
+        currency = pub["currency"]
+        amount = _stripe_amount(pub["effective_price"], currency)
+        effective_price = pub["effective_price"]
 
     user_doc = await db.users.find_one({"_id": user_id}) or {}
     prof_doc = await db.profile.find_one({"_id": user_id}) or {}
@@ -8077,9 +8916,11 @@ async def stripe_create_payment_intent(
                 "app_id": item_id if kind == "library" else "",
                 "boost_id": item_id if kind == "boost" else "",
                 "currency": currency,
-                "price": str(pub["effective_price"]),
+                "price": str(effective_price),
+                "duo_group_id": duo_group_id,
             },
-            description=f"{pretty} — {'Library+' if kind == 'library' else 'Points+ Boost'}",
+            description=f"{pretty} — {'Library+' if kind == 'library' else 'Points+ Boost'}"
+                        + (" (Duo)" if duo_group_id else ""),
         )
     except Exception as e:
         logger.error("[stripe] create payment intent failed: %s", e)
@@ -8093,10 +8934,11 @@ async def stripe_create_payment_intent(
         "publishable_key": pk,
         "amount": amount,
         "currency": currency,
-        "effective_price": pub["effective_price"],
+        "effective_price": effective_price,
         "app_id": item_id,
         "kind": kind,
         "payment_intent_id": intent.id,
+        "duo_group_id": duo_group_id or None,
     }
 
 
@@ -8200,6 +9042,15 @@ async def stripe_webhook(request: Request):
     etype = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
     obj = (event.get("data", {}).get("object") if isinstance(event, dict)
            else event["data"]["object"])
+    # When the Stripe SDK's `construct_event` is used (signed flow), `obj`
+    # comes back as a stripe.StripeObject. Its `.get(…)` resolves through
+    # __getattr__ → KeyError → AttributeError. Coerce to plain dict so the
+    # rest of this handler can use ordinary `obj.get(...)` lookups.
+    if obj is not None and not isinstance(obj, dict):
+        try:
+            obj = obj.to_dict_recursive() if hasattr(obj, "to_dict_recursive") else dict(obj)
+        except Exception:
+            obj = json.loads(str(obj))
     if etype == "checkout.session.completed":
         if obj.get("payment_status") == "paid" or obj.get("status") == "complete":
             md = obj.get("metadata") or {}
@@ -8238,6 +9089,7 @@ async def stripe_webhook(request: Request):
                     )
                     logger.info("[stripe] boost granted user=%s boost=%s pi=%s", user, boost_id, pi_id)
         else:
+            duo_gid = md.get("duo_group_id") or None
             await _stripe_record_purchase(
                 user_id=md.get("user_id", ""),
                 app_id=md.get("app_id", ""),
@@ -8245,7 +9097,15 @@ async def stripe_webhook(request: Request):
                 payment_intent=obj.get("id"),
                 amount=obj.get("amount_received", 0) or obj.get("amount", 0) or 0,
                 currency=(obj.get("currency") or "USD").upper(),
+                duo_group_id=duo_gid,
             )
+            # Also bookkeep the duo group: mark this member paid + flip
+            # group to 'completed' if all members have paid.
+            if duo_gid and _duo_record_payment is not None:
+                try:
+                    await _duo_record_payment(md.get("user_id", ""), duo_gid, obj.get("id", ""))
+                except Exception:
+                    logger.exception("[duo] record_duo_payment failed")
     return {"received": True, "type": etype}
 
 
@@ -8753,7 +9613,7 @@ async def _start_notification_scheduler():
     if _init_notif_scheduler is None:
         return
     try:
-        _init_notif_scheduler(
+        sched = _init_notif_scheduler(
             db=db,
             send_push=_push_send_bool_wrapper,
             pick_motivation=_server_pick_motivation,
@@ -8761,6 +9621,23 @@ async def _start_notification_scheduler():
             # so the spot-surprise tick can skip pushes during sleep.
             is_in_silence=_is_in_silence_window,
         )
+        # Hook the Phase 2 Spot Groups auto-challenge tick into the same
+        # scheduler so we don't spin up a second one.
+        try:
+            from spot_groups_scheduler import spot_groups_auto_tick as _sg_tick
+            if sched is not None:
+                sched.add_job(
+                    _sg_tick,
+                    "interval",
+                    minutes=1,
+                    id="spot_groups_auto_tick",
+                    max_instances=1,
+                    coalesce=True,
+                    replace_existing=True,
+                )
+                logger.info("[spot_groups_scheduler] tick registered (1m)")
+        except Exception:
+            logger.exception("[spot_groups_scheduler] tick registration failed")
     except Exception as e:
         logger.warning("[scheduler] start failed: %s", e)
 
@@ -8997,3 +9874,182 @@ async def focus_session_complete(
 # Final include for any endpoints declared AFTER the previous includes —
 # specifically the /admin/scheduler/* diagnostic endpoints above.
 app.include_router(api_router)
+
+
+# ═══════════════ XP Penalty system (Creator-only) ═══════════════
+# Wires the penalty router as a separate module to keep server.py from
+# growing further. Endpoints exposed under /api/admin/players/{id}/penalty
+# and /api/penalties/* — see penalties.py for the full contract.
+try:
+    from penalties import init_penalties as _init_penalties, attach_routes as _attach_penalty_routes  # noqa: E402
+    _init_penalties(
+        db=db,
+        is_admin_user=_is_admin_user,
+        get_user_or_legacy=get_user_or_legacy,
+        now_iso=now_iso,
+        send_expo_push=_send_expo_push,
+        serialize_profile=serialize_profile,
+        level_from_xp=level_from_xp,
+    )
+    _attach_penalty_routes(app, get_user_or_legacy)
+    logger.info("[penalty] routes attached")
+except Exception:
+    logger.exception("[penalty] failed to attach routes")
+
+# ═══════════════ Chat preferences (per-friend colors, mute, block) ═══════════════
+# Wires the chat preferences router (see chat_preferences.py).
+try:
+    from chat_preferences import (
+        init_chat_preferences as _init_chat_prefs,
+        attach_routes as _attach_chat_pref_routes,
+        get_pref_for_pair as _chat_pref_for_pair,
+        list_blocked_for as _chat_blocked_for,
+    )
+    _init_chat_prefs(db=db, get_user_or_legacy=get_user_or_legacy, now_iso=now_iso)
+    _attach_chat_pref_routes(app, get_user_or_legacy)
+    logger.info("[chat_preferences] routes attached")
+except Exception:
+    logger.exception("[chat_preferences] failed to attach routes")
+    _chat_pref_for_pair = None  # type: ignore
+    _chat_blocked_for = None  # type: ignore
+
+# ═══════════════ Duo Referral Discounts (Library+ group-buy) ═══════════════
+# Wires the duo discounts router (see duo_discounts.py).
+try:
+    from duo_discounts import (
+        init_duo_discounts as _init_duo,
+        attach_routes as _attach_duo_routes,
+        get_active_offer as _duo_active_offer,
+        validate_duo_for_payment as _duo_validate_payment,
+        record_duo_payment as _duo_record_payment,
+    )
+    _init_duo(
+        db=db,
+        is_admin_user=_is_admin_user,
+        now_iso=now_iso,
+        library_app_ids=LIBRARY_APP_IDS,
+        supported_currencies=list(_STRIPE_MINOR_UNITS.keys()),
+        default_currency=DEFAULT_PRICE_CURRENCY,
+    )
+    _attach_duo_routes(app, get_user_or_legacy)
+    logger.info("[duo_discounts] routes attached")
+except Exception:
+    logger.exception("[duo_discounts] failed to attach routes")
+    _duo_active_offer = None  # type: ignore
+    _duo_validate_payment = None  # type: ignore
+    _duo_record_payment = None  # type: ignore
+
+# ═══════════════ Admin Player Tools (per-player overrides, delete, inactive) ═══════════════
+try:
+    from admin_player_tools import (
+        init_admin_player_tools as _init_admin_tools,
+        attach_routes as _attach_admin_tool_routes,
+        get_price_override_for as _admin_price_override_for,
+    )
+    _init_admin_tools(
+        db=db,
+        is_admin_user=_is_admin_user,
+        now_iso=now_iso,
+        library_app_ids=LIBRARY_APP_IDS,
+        supported_currencies=list(_STRIPE_MINOR_UNITS.keys()),
+        default_currency=DEFAULT_PRICE_CURRENCY,
+    )
+    _attach_admin_tool_routes(app, get_user_or_legacy)
+    logger.info("[admin_player_tools] routes attached")
+except Exception:
+    logger.exception("[admin_player_tools] failed to attach routes")
+    _admin_price_override_for = None  # type: ignore
+
+# ═══════════════ Buried Treasure (daily solo hunt mini-app) ═══════════════
+try:
+    from buried_treasure import (
+        init_buried_treasure as _init_bt,
+        attach_routes as _attach_bt_routes,
+    )
+    _init_bt(
+        db=db,
+        is_admin_user=_is_admin_user,
+        now_iso=now_iso,
+        admin_emails=list(ADMIN_EMAILS),
+        send_push=_send_expo_push,
+        friend_ids_fn=_friend_ids,
+    )
+    _attach_bt_routes(app, get_user_or_legacy)
+    logger.info("[buried_treasure] routes attached")
+except Exception:
+    logger.exception("[buried_treasure] failed to attach routes")
+
+# ── Guest-mode migration (POST /api/guest/migrate) ──────────────────
+try:
+    from guest_migration import (
+        init_guest_migration as _init_gm,
+        attach_routes as _attach_gm_routes,
+    )
+    _init_gm(db=db, real_user_dep=get_current_user)
+    _attach_gm_routes(app)
+    logger.info("[guest_migration] routes attached")
+except Exception:
+    logger.exception("[guest_migration] failed to attach routes")
+
+# ── Spot the Object — Permanent Groups (v1.0.29 Phase 1) ────────────
+async def _spot_push_to_user(user_id: str, title: str, body: str, data: dict | None = None):
+    """Phase 4 helper for spot_groups — fetch the user's push tokens
+    and fire `_send_expo_push` to each. Best-effort; failures logged.
+    Returns the number of pushes attempted (not necessarily delivered)."""
+    sent = 0
+    try:
+        tokens = await db.push_tokens.find({"user_id": user_id}).to_list(10)
+    except Exception as e:
+        logger.warning("[spot-push.tokens] %s: %s", user_id, e)
+        return 0
+    for tdoc in tokens:
+        tok = tdoc.get("token")
+        if not tok:
+            continue
+        try:
+            await _send_expo_push(tok, title, body, data or {})
+            sent += 1
+        except Exception as e:
+            logger.warning("[spot-push.send] %s: %s", user_id, e)
+    return sent
+
+
+try:
+    from spot_groups import (
+        init_spot_groups as _init_sg,
+        attach_routes as _attach_sg_routes,
+    )
+    _init_sg(
+        db=db, now_iso=now_iso, friend_ids_fn=_friend_ids,
+        availability_fn=_spot_groups_availability,
+        push_to_user_fn=_spot_push_to_user,
+    )
+    _attach_sg_routes(app, get_user_or_legacy)
+    logger.info("[spot_groups] routes attached")
+except Exception:
+    logger.exception("[spot_groups] failed to attach routes")
+
+# ── Spot the Object — Phase 2: Auto-Challenge Scheduler ─────────────
+# Fires 3 random daily anchors to every auto_challenge_on group. The
+# tick is hooked into the same APScheduler that runs the motivation /
+# spot-surprise / streak-warning ticks (see notif_scheduler.py).
+try:
+    from spot_groups_scheduler import (
+        init_spot_groups_scheduler as _init_sg_sched,
+        attach_routes as _attach_sg_sched_routes,
+    )
+    # Pull the daylight helper from notif_scheduler (already configured
+    # with astral + the user's profile.timezone).
+    from notif_scheduler import _user_daylight_today as _ns_user_daylight_today
+    _init_sg_sched(
+        db=db,
+        send_push=_push_send_bool_wrapper,
+        is_admin=_is_admin_user,
+        user_daylight_today=_ns_user_daylight_today,
+        spot_objects=SPOT_OBJECTS,
+        availability_fn=_spot_groups_availability,
+    )
+    _attach_sg_sched_routes(app, get_user_or_legacy, get_current_user)
+    logger.info("[spot_groups_scheduler] routes attached")
+except Exception:
+    logger.exception("[spot_groups_scheduler] failed to attach routes")
