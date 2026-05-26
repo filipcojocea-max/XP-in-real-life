@@ -901,48 +901,66 @@ function DoneView({
         </TouchableOpacity>
       </View>
 
-      {months.map((m) => (
-        <View key={m.key} style={styles.monthCard}>
-          <Text style={styles.monthLabel}>{m.label}</Text>
-          <View style={styles.monthHeaderRow}>
-            {WEEK_LABELS_MON.map((w) => (
-              <Text key={w} style={styles.monthHeadCell}>{w}</Text>
+      {months.map((m) => {
+        // Build padded cell list: blanks for days-before-1, then each day.
+        // Render as explicit rows of 7 so Sunday can never wrap off the
+        // grid due to floating-point % width rounding on Android.
+        const cells: Array<{ key: string; iso: string | null }> = [];
+        for (let i = 0; i < m.firstWeekday; i++) cells.push({ key: `b-${m.key}-${i}`, iso: null });
+        m.days.forEach((d) => cells.push({ key: d, iso: d }));
+        const rows: Array<typeof cells> = [];
+        for (let i = 0; i < cells.length; i += 7) rows.push(cells.slice(i, i + 7));
+
+        return (
+          <View key={m.key} style={styles.monthCard}>
+            <Text style={styles.monthLabel}>{m.label}</Text>
+            <View style={styles.monthHeaderRow}>
+              {WEEK_LABELS_MON.map((w) => (
+                <Text key={w} style={styles.monthHeadCell}>{w}</Text>
+              ))}
+            </View>
+            {rows.map((row, ri) => (
+              <View key={`r-${m.key}-${ri}`} style={styles.monthGridRow}>
+                {row.map((cell) => {
+                  if (!cell.iso) {
+                    return <View key={cell.key} style={styles.monthCell} />;
+                  }
+                  const d = cell.iso;
+                  const s = shiftFor(d);
+                  const def = s ? schedule.shifts[s] : null;
+                  const isToday = d === todayIso;
+                  const isOverride = !!schedule.manual_overrides?.[d];
+                  const isPast = d < todayIso;
+                  return (
+                    <TouchableOpacity
+                      key={d}
+                      style={[
+                        styles.monthCell,
+                        def && { borderColor: def.color, backgroundColor: def.color + '14' },
+                        isToday && styles.monthCellToday,
+                        isPast && { opacity: 0.55 },
+                      ]}
+                      onPress={() => !isPast && onTapDay(d)}
+                      activeOpacity={isPast ? 1 : 0.7}
+                      testID={`mcal-${d}`}
+                    >
+                      <Text style={[styles.monthCellDay, isToday && { color: colors.cyan, fontWeight: '900' }]}>
+                        {d.slice(8)}
+                      </Text>
+                      {def ? <Text style={styles.monthCellEmoji}>{def.icon}</Text> : null}
+                      {isOverride ? <View style={styles.overrideDot} /> : null}
+                    </TouchableOpacity>
+                  );
+                })}
+                {/* Pad short final row so cells stay aligned to the 7-col grid. */}
+                {row.length < 7 && Array.from({ length: 7 - row.length }).map((_, i) => (
+                  <View key={`pad-${m.key}-${ri}-${i}`} style={styles.monthCell} />
+                ))}
+              </View>
             ))}
           </View>
-          <View style={styles.monthGrid}>
-            {Array.from({ length: m.firstWeekday }).map((_, i) => (
-              <View key={`b-${i}`} style={styles.monthCell} />
-            ))}
-            {m.days.map((d) => {
-              const s = shiftFor(d);
-              const def = s ? schedule.shifts[s] : null;
-              const isToday = d === todayIso;
-              const isOverride = !!schedule.manual_overrides?.[d];
-              const isPast = d < todayIso;
-              return (
-                <TouchableOpacity
-                  key={d}
-                  style={[
-                    styles.monthCell,
-                    def && { borderColor: def.color, backgroundColor: def.color + '14' },
-                    isToday && styles.monthCellToday,
-                    isPast && { opacity: 0.55 },
-                  ]}
-                  onPress={() => !isPast && onTapDay(d)}
-                  activeOpacity={isPast ? 1 : 0.7}
-                  testID={`mcal-${d}`}
-                >
-                  <Text style={[styles.monthCellDay, isToday && { color: colors.cyan, fontWeight: '900' }]}>
-                    {d.slice(8)}
-                  </Text>
-                  {def ? <Text style={styles.monthCellEmoji}>{def.icon}</Text> : null}
-                  {isOverride ? <View style={styles.overrideDot} /> : null}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-      ))}
+        );
+      })}
     </ScrollView>
   );
 }
@@ -1371,8 +1389,9 @@ const styles = StyleSheet.create({
   monthHeaderRow: { flexDirection: 'row', marginBottom: 4 },
   monthHeadCell: { flex: 1, color: colors.textMuted, fontSize: 9, fontWeight: '800', textAlign: 'center' },
   monthGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  monthGridRow: { flexDirection: 'row' },
   monthCell: {
-    width: `${100 / 7}%`, aspectRatio: 1, padding: 1.5,
+    flex: 1, aspectRatio: 1, padding: 1.5,
     alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: 'transparent',
     borderRadius: radii.sm,
   },
