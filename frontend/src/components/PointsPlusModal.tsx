@@ -103,7 +103,10 @@ export default function PointsPlusModal({
   onProfileUpdate: (p: Profile) => void;
 }) {
   const [tab, setTab] = useState<TabKey>('topup');
-  const [unlocked, setUnlocked] = useState(!!profile?.boosts_unlocked);
+  // Points+ bonus list is now open to every user — no unlock code
+  // required. We keep the `unlocked` flag (always true) so the existing
+  // gated UI branches simply render the unlocked path.
+  const [unlocked, setUnlocked] = useState(true);
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [claimingType, setClaimingType] = useState<BoostType | null>(null);
@@ -169,7 +172,8 @@ export default function PointsPlusModal({
   }, [visible]);
 
   useEffect(() => {
-    setUnlocked(!!profile?.boosts_unlocked);
+    // Always unlocked — Points+ no longer requires an access code.
+    setUnlocked(true);
   }, [profile?.boosts_unlocked, visible]);
 
   const inventory = profile?.boost_inventory || [];

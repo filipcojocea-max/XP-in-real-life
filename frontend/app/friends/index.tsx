@@ -1330,7 +1330,7 @@ function FriendDetailsSection({ userId }: { userId: string }) {
   const [data, setData] = useState<FriendProfileDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [openSection, setOpenSection] = useState<'apps' | 'tasks' | 'goals' | null>('apps');
+  const [openSection, setOpenSection] = useState<'apps' | 'tasks' | 'goals' | null>(null);
 
   useEffect(() => {
     let cancelled = false;

@@ -29,6 +29,7 @@ type BoostPreset =
 
 const PRESETS: BoostPreset[] = [
   { kind: 'preset', type: 'triple_day', label: '3x for 1 day', multiplier: 3, duration: 1 },
+  { kind: 'preset', type: 'double_day', label: '2x for 1 day', multiplier: 2, duration: 1 },
   { kind: 'preset', type: 'double_week', label: '2x for 7 days', multiplier: 2, duration: 7 },
   { kind: 'preset', type: 'double_month', label: '2x for 30 days', multiplier: 2, duration: 30 },
   { kind: 'custom' },

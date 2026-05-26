@@ -802,6 +802,7 @@ BOOST_UNLOCK_CODE = "XP270905W20"
 
 BOOST_DEFS = {
     "triple_day":   {"multiplier": 3, "duration_days": 1,  "label": "Triple points today"},
+    "double_day":   {"multiplier": 2, "duration_days": 1,  "label": "Double points for 1 day"},
     "double_week":  {"multiplier": 2, "duration_days": 7,  "label": "Double points for 7 days"},
     "double_month": {"multiplier": 2, "duration_days": 30, "label": "Double points for 1 month"},
 }

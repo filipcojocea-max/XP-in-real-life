@@ -6,11 +6,16 @@ export default function Card({
   children,
   style,
   accent,
+  golden,
   testID,
 }: {
   children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   accent?: string;
+  /** When true, renders with a thicker golden outline — used to mark
+   *  Creator account cards on the Profile screen so every tab/option
+   *  box gets the Premium+ yellow ring. */
+  golden?: boolean;
   testID?: string;
 }) {
   return (
@@ -19,6 +24,7 @@ export default function Card({
       style={[
         styles.card,
         accent ? { borderColor: accent + '55' } : null,
+        golden ? styles.cardGolden : null,
         style,
       ]}
     >
@@ -36,6 +42,10 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: spacing.md,
     overflow: 'hidden',
+  },
+  cardGolden: {
+    borderWidth: 2,
+    borderColor: '#FFD700',
   },
   accentBar: {
     position: 'absolute',

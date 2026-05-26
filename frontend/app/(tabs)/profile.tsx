@@ -199,7 +199,7 @@ export default function ProfileScreen() {
 
         {/* Bio */}
         {profile.bio ? (
-          <Card style={styles.bioCard} testID="profile-bio">
+          <Card style={styles.bioCard} testID="profile-bio" golden={profile.is_admin}>
             <View style={styles.bioHeader}>
               <Ionicons name="sparkles" size={14} color={colors.cyan} />
               <Text style={styles.bioLabel}>Character Bio</Text>
@@ -210,32 +210,32 @@ export default function ProfileScreen() {
 
         {/* Stats grid */}
         <View style={styles.grid}>
-          <Card style={styles.statCard}>
+          <Card style={styles.statCard} golden={profile.is_admin}>
             <Ionicons name="flash" size={22} color={colors.amber} />
             <Text style={styles.statVal}>{profile.total_xp}</Text>
             <Text style={styles.statLbl}>Total XP</Text>
           </Card>
-          <Card style={styles.statCard}>
+          <Card style={styles.statCard} golden={profile.is_admin}>
             <Ionicons name="flame" size={22} color={colors.pink} />
             <Text style={styles.statVal}>{profile.current_streak}</Text>
             <Text style={styles.statLbl}>Current Streak</Text>
           </Card>
-          <Card style={styles.statCard}>
+          <Card style={styles.statCard} golden={profile.is_admin}>
             <Ionicons name="trophy" size={22} color={colors.amber} />
             <Text style={styles.statVal}>{profile.longest_streak}</Text>
             <Text style={styles.statLbl}>Best Streak</Text>
           </Card>
-          <Card style={styles.statCard}>
+          <Card style={styles.statCard} golden={profile.is_admin}>
             <Ionicons name="checkmark-done" size={22} color={colors.green} />
             <Text style={styles.statVal}>{profile.tasks_completed}</Text>
             <Text style={styles.statLbl}>Quests Done</Text>
           </Card>
-          <Card style={styles.statCard}>
+          <Card style={styles.statCard} golden={profile.is_admin}>
             <Ionicons name="flag" size={22} color={colors.cyan} />
             <Text style={styles.statVal}>{profile.goals_completed}/{profile.goals_created}</Text>
             <Text style={styles.statLbl}>Goals</Text>
           </Card>
-          <Card style={styles.statCard}>
+          <Card style={styles.statCard} golden={profile.is_admin}>
             <Ionicons name="medal" size={22} color={colors.purple} />
             <Text style={styles.statVal}>{profile.achievements_unlocked.length}</Text>
             <Text style={styles.statLbl}>Badges</Text>
@@ -293,7 +293,7 @@ export default function ProfileScreen() {
         {/* Actions */}
         <TouchableOpacity
           testID="profile-edit-btn"
-          style={styles.actionRow}
+          style={[styles.actionRow, profile.is_admin && styles.actionRowGolden]}
           onPress={() => router.push('/onboarding')}
         >
           <View style={[styles.actionIcon, { backgroundColor: colors.green + '22', borderColor: colors.green + '55' }]}>
@@ -312,7 +312,7 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           testID="profile-focus-btn"
-          style={styles.actionRow}
+          style={[styles.actionRow, profile.is_admin && styles.actionRowGolden]}
           onPress={() => router.push('/focus')}
         >
           <View style={[styles.actionIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
@@ -325,7 +325,7 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
-        <TouchableOpacity testID="profile-reset-btn" style={styles.actionRow} onPress={reset}>
+        <TouchableOpacity testID="profile-reset-btn" style={[styles.actionRow, profile.is_admin && styles.actionRowGolden]} onPress={reset}>
           <View style={[styles.actionIcon, { backgroundColor: colors.red + '22', borderColor: colors.red + '55' }]}>
             <Ionicons name="refresh" size={18} color={colors.red} />
           </View>
@@ -343,7 +343,7 @@ export default function ProfileScreen() {
         {/* Send Feedback to the Creator — pings the admin notification bell */}
         <TouchableOpacity
           testID="profile-feedback-btn"
-          style={styles.actionRow}
+          style={[styles.actionRow, profile.is_admin && styles.actionRowGolden]}
           onPress={() => router.push('/feedback' as any)}
         >
           <View style={[styles.actionIcon, { backgroundColor: '#FFD70022', borderColor: '#FFD70066' }]}>
@@ -359,7 +359,7 @@ export default function ProfileScreen() {
         {/* Friends+ — social discovery */}
         <TouchableOpacity
           testID="profile-friends-btn"
-          style={styles.actionRow}
+          style={[styles.actionRow, profile.is_admin && styles.actionRowGolden]}
           onPress={() => router.push('/friends' as any)}
         >
           <View style={[styles.actionIcon, { backgroundColor: colors.cyan + '22', borderColor: colors.cyan + '55' }]}>
@@ -391,7 +391,7 @@ export default function ProfileScreen() {
           {isAnonymous ? (
             <TouchableOpacity
               testID="profile-create-account-btn"
-              style={[styles.actionRow, { marginTop: 0 }]}
+              style={[styles.actionRow, { marginTop: 0 }, profile.is_admin && styles.actionRowGolden]}
               onPress={() => router.push('/auth/login' as any)}
             >
               <View style={[styles.actionIcon, { backgroundColor: colors.green + '22', borderColor: colors.green + '55' }]}>
@@ -406,7 +406,7 @@ export default function ProfileScreen() {
           ) : (
             <TouchableOpacity
               testID="profile-signout-btn"
-              style={[styles.actionRow, { marginTop: 0 }, signingOut && { opacity: 0.6 }]}
+              style={[styles.actionRow, { marginTop: 0 }, signingOut && { opacity: 0.6 }, profile.is_admin && styles.actionRowGolden]}
               onPress={handleSignOut}
               disabled={signingOut}
               activeOpacity={0.7}
@@ -511,6 +511,10 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: colors.surfaceGlass,
     marginTop: spacing.md,
+  },
+  actionRowGolden: {
+    borderWidth: 2,
+    borderColor: '#FFD700',
   },
   actionIcon: {
     width: 40,
