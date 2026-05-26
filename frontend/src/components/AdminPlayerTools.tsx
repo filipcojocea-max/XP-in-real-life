@@ -66,12 +66,26 @@ export function PlayerPriceOverridesModal({
       ]);
       setPublicPricing(pp.pricing as Record<string, LibraryAppPricing>);
       setOverrides(ov.overrides || {});
-      // Seed drafts from existing overrides (or empty).
+      // Seed each input with the player's CURRENT effective price so
+      // the Creator sees the live value (and any active discount) the
+      // moment the sheet opens. Priority:
+      //   1. existing override price (if one is already set)
+      //   2. public effective price (after any catalog-wide discount)
+      //   3. raw public price
+      //   4. empty if the app has no published pricing yet
       const seed: Record<string, string> = {};
       APP_LIST.forEach((a) => {
-        seed[a.id] = ov.overrides[a.id]?.override_price != null
-          ? String(ov.overrides[a.id].override_price)
-          : '';
+        const ovRow = ov.overrides[a.id];
+        const pub = (pp.pricing as Record<string, LibraryAppPricing>)[a.id] as any;
+        const current =
+          ovRow?.override_price != null
+            ? ovRow.override_price
+            : pub?.effective_price != null
+            ? pub.effective_price
+            : pub?.price != null
+            ? pub.price
+            : null;
+        seed[a.id] = current != null ? String(current) : '';
       });
       setDrafts(seed);
     } catch (e: any) {

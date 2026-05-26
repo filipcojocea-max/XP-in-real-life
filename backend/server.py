@@ -721,7 +721,7 @@ async def get_or_create_profile_for(user_id: str, full_name: str = "Hero") -> di
             "onboarding_tz_done": False,            # forces existing users to re-answer
             # Spot-the-Object mini-app
             "spot_points": 0,
-            "spot_random_enabled": False,
+            "spot_random_enabled": True,
             "created_at": now_iso(),
         }
         await db.profile.insert_one(prof)
@@ -7685,7 +7685,7 @@ async def _seed_admin_account():
                 "onboarding_tz_done": True,
                 "onboarding_complete": True,
                 "spot_points": 0,
-                "spot_random_enabled": False,
+                "spot_random_enabled": True,
                 "boosts_unlocked": True,
                 "boost_inventory": [],
                 "created_at": now,
@@ -7725,6 +7725,45 @@ async def _backfill_onboarding_tz_done_flag():
                 f"{result.modified_count} legacy profile(s)."
             )
     except Exception as e:
+        logger.exception("[migrate] onboarding_tz_done backfill failed: %s", e)
+
+
+@app.on_event("startup")
+async def _backfill_spot_random_enabled_default():
+    """One-time idempotent migration: turn on Spot-the-Object random
+    daily notifications for every profile. Previously the default was
+    False (opt-in), and we're flipping the rollout to opt-out so every
+    player receives the 3 daily Spot pings as requested by the Creator.
+    Users can still toggle the setting off again from their profile —
+    on the next startup we won't re-enable it because they'll have set
+    `spot_random_enabled_user_pinned: True` (set whenever the toggle
+    endpoint is hit). Cheap to run on every startup; idempotent."""
+    try:
+        # 1) Fill any profile that has the field missing/null.
+        await db.profile.update_many(
+            {"$or": [
+                {"spot_random_enabled": {"$exists": False}},
+                {"spot_random_enabled": None},
+            ]},
+            {"$set": {"spot_random_enabled": True}},
+        )
+        # 2) Promote legacy `False` defaults to `True` for users who
+        #    never explicitly pinned their choice via the toggle API.
+        result = await db.profile.update_many(
+            {
+                "spot_random_enabled": False,
+                "spot_random_enabled_user_pinned": {"$ne": True},
+            },
+            {"$set": {"spot_random_enabled": True}},
+        )
+        if result.modified_count:
+            logger.info(
+                "[backfill] spot_random_enabled flipped True on %d legacy profiles",
+                result.modified_count,
+            )
+    except Exception:
+        logger.exception("[backfill] spot_random_enabled flip failed")
+
         logger.warning(f"[migrate] backfill onboarding_tz_done failed: {e}")
 
 
