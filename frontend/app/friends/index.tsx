@@ -720,33 +720,10 @@ function formatLastSeen(iso: string): string {
 }
 
 function PlayerAvatar({ player }: { player: Player }) {
-  const adminView = !!player.is_admin_view || !!player.is_admin;
-  // In list views we show a Level Shield as the fallback "avatar" so the
-  // player's progression shines through at a glance — much more
-  // expressive than a single letter. The actual user-uploaded photo is
-  // still revealed when they tap into the profile detail modal.
-  if (player.avatar_base64) {
-    // Circular photo avatar — golden ring for admin when viewed by others.
-    const wrapStyle = adminView
-      ? { borderWidth: 2, borderColor: '#FFD700', borderRadius: 26, padding: 1 }
-      : undefined;
-    return (
-      <View style={wrapStyle as any}>
-        <Image source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }} style={styles.avatar} />
-      </View>
-    );
-  }
-  // Admin profiles always render as a golden Lv999 shield even if no
-  // photo is set — keeps the Creator's visual identity consistent across
-  // search, friends list, requests AND the admin's own self-row. We
-  // route every shield through the centralized `getDynamicShieldLevel`
-  // bridge so future tier rules live in ONE place.
-  // CRITICAL: the shield renders as a FREE-STANDING SVG (no circular
-  // clip). Previously we nested the shield inside a 44×44 `borderRadius:
-  // 22` container with `overflow: 'hidden'`, which clipped the shield
-  // points and produced an "empty yellow circle" for the admin (whose
-  // shield is 18 % larger than a regular shield) and a bland blue blob
-  // for regular Heroes. The fix: render the shield without clipping.
+  // Privacy rule: list views (Players / Friends / Leaderboard) ALWAYS
+  // render the Level Shield — the user-uploaded photo is never shown in
+  // a public list. The real avatar is only revealed inside the profile
+  // detail modal, and only to accepted friends.
   const shieldLevel = getDynamicShieldLevel({
     level: player.level,
     total_xp: (player as any).total_xp,
@@ -888,15 +865,17 @@ function PlayerProfileModal({
             </View>
           ) : (
             <View style={[styles.modalAvatarWrap]}>
-              {player.avatar_base64 ? (
+              {player.avatar_base64 && (player.friend_status === 'friends' || player.friend_status === 'self') ? (
                 <Image
                   source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }}
                   style={styles.bigAvatar}
                 />
               ) : (
-                // Big shield fallback in the player detail modal — uses
-                // the same dynamic bridge so non-admin friends evolve from
-                // blue → yellow → gold as their XP grows.
+                // Privacy rule: the user-uploaded photo is ONLY revealed
+                // when the viewer is an accepted friend (or it's their own
+                // profile). For everyone else — strangers, pending
+                // requests, blocked — we show the dynamic Level Shield
+                // (blue → yellow → gold as XP grows).
                 <View style={[styles.bigAvatar, styles.avatarFallback, { borderWidth: 0, backgroundColor: 'transparent' }]}>
                   <PremiumShield
                     level={getDynamicShieldLevel({

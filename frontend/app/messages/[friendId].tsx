@@ -21,6 +21,7 @@ import {
   ActivityIndicator,
   Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -86,6 +87,7 @@ export default function MessageThread() {
   const [sending, setSending] = useState(false);
   const [meId, setMeId] = useState<string | null>(null);
   const [pickedImage, setPickedImage] = useState<string | null>(null);
+  const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
   const [imageChecking, setImageChecking] = useState(false);
   const [prefs, setPrefs] = useState<ChatPreferences>(() => defaultPrefs(fid));
   const [friendName, setFriendName] = useState<string>('Chat');
@@ -311,7 +313,7 @@ export default function MessageThread() {
               return (
                 <View
                   key={m.id}
-                  style={[styles.bubbleRow, !mine ? { justifyContent: 'flex-end' } : null]}
+                  style={[styles.bubbleRow, mine ? { justifyContent: 'flex-end' } : null]}
                 >
                   <View
                     style={[
@@ -322,10 +324,16 @@ export default function MessageThread() {
                     ]}
                   >
                     {m.image_base64 ? (
-                      <Image
-                        source={{ uri: `data:image/jpeg;base64,${m.image_base64}` }}
-                        style={styles.bubbleImg}
-                      />
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => setFullscreenImage(m.image_base64 || null)}
+                        testID={`msg-img-${m.id}`}
+                      >
+                        <Image
+                          source={{ uri: `data:image/jpeg;base64,${m.image_base64}` }}
+                          style={styles.bubbleImg}
+                        />
+                      </TouchableOpacity>
                     ) : null}
                     {m.text ? (
                       <Text style={[styles.bubbleText, { color: textColor }]}>{m.text}</Text>
@@ -427,6 +435,32 @@ export default function MessageThread() {
         onClose={() => setSettingsOpen(false)}
         onPatch={onPatchPrefs}
       />
+
+      {/* Fullscreen image viewer — tap any photo in a bubble to open. */}
+      <Modal
+        visible={!!fullscreenImage}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setFullscreenImage(null)}
+      >
+        <View style={styles.fsBackdrop}>
+          <TouchableOpacity
+            style={styles.fsClose}
+            onPress={() => setFullscreenImage(null)}
+            hitSlop={16}
+            testID="msg-fullscreen-close"
+          >
+            <Ionicons name="close" size={28} color="#fff" />
+          </TouchableOpacity>
+          {fullscreenImage ? (
+            <Image
+              source={{ uri: `data:image/jpeg;base64,${fullscreenImage}` }}
+              style={styles.fsImage}
+              resizeMode="contain"
+            />
+          ) : null}
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -452,12 +486,21 @@ const styles = StyleSheet.create({
   emptyChat: { color: colors.textMuted, fontSize: 13, textAlign: 'center', padding: 24 },
   bubbleRow: { flexDirection: 'row', marginBottom: 4 },
   bubble: { maxWidth: '78%', borderRadius: 14, padding: 10, gap: 6 },
-  // My messages now render on the LEFT — squared-off corner is bottom-left
-  // so it points down towards me. Their bubbles mirror it on the right.
-  bubbleMine: { borderBottomLeftRadius: 4 },
-  bubbleTheirs: { borderBottomRightRadius: 4 },
+  // Standard chat layout: MY messages render on the RIGHT with the
+  // squared-off corner on the bottom-right (pointing down toward me).
+  // Their messages render on the LEFT mirroring it.
+  bubbleMine: { borderBottomRightRadius: 4 },
+  bubbleTheirs: { borderBottomLeftRadius: 4 },
   bubbleText: { fontSize: 14, lineHeight: 19 },
   bubbleImg: { width: 200, height: 200, borderRadius: 10 },
+  fsBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', alignItems: 'center', justifyContent: 'center' },
+  fsImage: { width: '100%', height: '100%' },
+  fsClose: {
+    position: 'absolute', top: 44, right: 16, zIndex: 10,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center', justifyContent: 'center',
+  },
   refineCard: {
     marginHorizontal: spacing.md,
     marginBottom: 6,

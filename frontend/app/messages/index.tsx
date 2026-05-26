@@ -103,13 +103,11 @@ function ThreadRow({ thread, onPress }: { thread: DMThread; onPress: () => void 
   return (
     <TouchableOpacity activeOpacity={0.85} style={styles.row} onPress={onPress} testID={`thread-${thread.friend_id}`}>
       <View style={{ position: 'relative' }}>
-        {thread.friend_avatar_base64 ? (
-          <Image source={{ uri: `data:image/jpeg;base64,${thread.friend_avatar_base64}` }} style={styles.avatar} />
-        ) : (
-          <View style={[styles.avatar, styles.avatarFallback]}>
-            <Text style={styles.avatarLetter}>{(thread.friend_name || '?').slice(0, 1).toUpperCase()}</Text>
-          </View>
-        )}
+        {/* Privacy rule: list views always show the shield, never the
+            user-uploaded photo (matches Players / Friends / Leaderboard). */}
+        <View style={[styles.avatar, styles.avatarFallback]}>
+          <Ionicons name="shield" size={26} color={colors.cyan} />
+        </View>
         {thread.unread_count > 0 && (
           <View style={styles.unreadDot} testID={`unread-${thread.friend_id}`}>
             <Text style={styles.unreadDotText}>{thread.unread_count > 9 ? '9+' : thread.unread_count}</Text>

@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   Image,
+  Modal,
   Platform,
   Switch,
 } from 'react-native';
@@ -140,6 +141,7 @@ export default function ProfileScreen() {
             <Text style={styles.title}>Profile</Text>
           </View>
           {profile.is_admin && <AdminNotificationBell />}
+          <NotificationBell />
         </View>
 
         <View style={styles.avatarWrap}>
@@ -729,6 +731,197 @@ const bellStyles = StyleSheet.create({
     borderColor: colors.bg,
   },
   badgeText: { color: '#fff', fontSize: 10, fontWeight: '900' },
+});
+
+/**
+ * NotificationBell — public bell icon shown on the Profile screen for
+ * EVERY user. Aggregates: unread DM messages, pending gifts, pending
+ * penalty acknowledgements. A red dot appears when any of those have a
+ * count > 0. Tapping opens a modal with a unified feed showing new items
+ * at the top and a deep-link to the relevant screen.
+ */
+type NotifItem = {
+  key: string;
+  kind: 'message' | 'gift' | 'penalty';
+  title: string;
+  body: string;
+  ts: string;
+  unread: boolean;
+  onTap?: () => void;
+};
+
+function NotificationBell() {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<NotifItem[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  const load = useCallback(async () => {
+    try {
+      const results = await Promise.allSettled([
+        api.messagesThreads().catch(() => null),
+        api.giftsPending().catch(() => null),
+        api.penaltiesPending().catch(() => null),
+      ]);
+      const list: NotifItem[] = [];
+      let unread = 0;
+      const msg: any = results[0].status === 'fulfilled' ? results[0].value : null;
+      const gifts: any = results[1].status === 'fulfilled' ? results[1].value : null;
+      const pens: any = results[2].status === 'fulfilled' ? results[2].value : null;
+      if (msg && Array.isArray(msg.threads)) {
+        msg.threads.forEach((t: any) => {
+          if ((t.unread_count || 0) > 0) {
+            unread += 1;
+            list.push({
+              key: `m-${t.friend_id}`,
+              kind: 'message',
+              title: t.friend_name || 'New message',
+              body: `${t.unread_count} new message${t.unread_count > 1 ? 's' : ''}`,
+              ts: t.last_message_at || '',
+              unread: true,
+              onTap: () => router.push(`/messages/${t.friend_id}`),
+            });
+          }
+        });
+      }
+      if (gifts && Array.isArray(gifts.gifts)) {
+        gifts.gifts.forEach((g: any) => {
+          unread += 1;
+          list.push({
+            key: `g-${g.id}`,
+            kind: 'gift',
+            title: 'Gift received',
+            body: g.message || `${g.xp || 0} XP from ${g.from_name || 'a friend'}`,
+            ts: g.created_at || '',
+            unread: true,
+          });
+        });
+      }
+      if (pens && Array.isArray(pens.penalties)) {
+        pens.penalties.forEach((p: any) => {
+          unread += 1;
+          list.push({
+            key: `p-${p.id}`,
+            kind: 'penalty',
+            title: 'XP change',
+            body: p.reason || `${p.xp || 0} XP`,
+            ts: p.created_at || '',
+            unread: true,
+          });
+        });
+      }
+      list.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+      setItems(list);
+      setUnreadCount(unread);
+    } catch {}
+  }, [router]);
+
+  useFocusEffect(
+    useCallback(() => {
+      load();
+      const id = setInterval(load, 8000);
+      return () => clearInterval(id);
+    }, [load]),
+  );
+
+  const iconFor = (k: NotifItem['kind']) =>
+    k === 'message' ? 'chatbubble' : k === 'gift' ? 'gift' : 'flash';
+  const colorFor = (k: NotifItem['kind']) =>
+    k === 'message' ? colors.cyan : k === 'gift' ? colors.amber : colors.red;
+
+  return (
+    <>
+      <TouchableOpacity
+        onPress={() => setOpen(true)}
+        style={publicBellStyles.btn}
+        hitSlop={8}
+        testID="notif-bell"
+        activeOpacity={0.7}
+      >
+        <Ionicons name="notifications" size={22} color={colors.cyan} />
+        {unreadCount > 0 && (
+          <View style={publicBellStyles.dot} testID="notif-bell-dot" />
+        )}
+      </TouchableOpacity>
+
+      <Modal visible={open} animationType="slide" transparent onRequestClose={() => setOpen(false)}>
+        <View style={publicBellStyles.backdrop}>
+          <View style={publicBellStyles.sheet}>
+            <View style={publicBellStyles.sheetHead}>
+              <Text style={publicBellStyles.sheetTitle}>Notifications</Text>
+              <TouchableOpacity onPress={() => setOpen(false)} hitSlop={12} testID="notif-close">
+                <Ionicons name="close" size={26} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={{ maxHeight: 480 }}>
+              {items.length === 0 ? (
+                <View style={{ padding: 32, alignItems: 'center' }}>
+                  <Ionicons name="notifications-off-outline" size={36} color={colors.textMuted} />
+                  <Text style={{ color: colors.textMuted, marginTop: 8 }}>You're all caught up</Text>
+                </View>
+              ) : (
+                items.map((n) => (
+                  <TouchableOpacity
+                    key={n.key}
+                    style={publicBellStyles.row}
+                    onPress={() => { n.onTap?.(); setOpen(false); }}
+                    activeOpacity={0.7}
+                    testID={`notif-row-${n.key}`}
+                  >
+                    <View style={[publicBellStyles.rowIcon, { backgroundColor: colorFor(n.kind) + '22' }]}>
+                      <Ionicons name={iconFor(n.kind) as any} size={18} color={colorFor(n.kind)} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={publicBellStyles.rowTitle}>{n.title}</Text>
+                      <Text style={publicBellStyles.rowBody} numberOfLines={2}>{n.body}</Text>
+                    </View>
+                    {n.unread ? <View style={publicBellStyles.unreadPip} /> : null}
+                  </TouchableOpacity>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
+const publicBellStyles = StyleSheet.create({
+  btn: {
+    position: 'relative',
+    width: 40, height: 40, borderRadius: 20,
+    marginLeft: 8,
+    backgroundColor: colors.cyan + '22',
+    borderWidth: 1, borderColor: colors.cyan + '66',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  dot: {
+    position: 'absolute', top: 6, right: 6,
+    width: 10, height: 10, borderRadius: 5,
+    backgroundColor: colors.red,
+    borderWidth: 2, borderColor: colors.bg,
+  },
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: colors.bg,
+    borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: 32,
+    borderTopWidth: 1, borderColor: colors.border,
+  },
+  sheetHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  sheetTitle: { color: colors.text, fontSize: 18, fontWeight: '900' },
+  row: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 12, borderBottomWidth: 1, borderColor: colors.border,
+  },
+  rowIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  rowTitle: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  rowBody: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  unreadPip: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.red },
 });
 
 
