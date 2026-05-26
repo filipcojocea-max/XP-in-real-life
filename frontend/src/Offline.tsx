@@ -172,6 +172,19 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
       if (!active) return;
       queueRef.current = hydrated;
       setQueue(hydrated);
+      // Sync the initial online state from NetInfo immediately on boot
+      // so the first render of OfflineBanner / api.req() reflects real
+      // device state (instead of the `true` default which causes
+      // requests to hang waiting for the first network event when the
+      // user is actually offline).
+      try {
+        const s = await NetInfo.fetch();
+        const online = s.isConnected !== false && s.isInternetReachable !== false;
+        _isOnline = online;
+        if (active) setIsOnline(online);
+      } catch {
+        /* leave default */
+      }
     })();
     const unsub = NetInfo.addEventListener((s: NetInfoState) => {
       // Treat `null` (still checking) as online to avoid false banners
@@ -321,69 +334,51 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
 // <OfflineBanner /> — thin pill on top of every screen when needed.
 // ────────────────────────────────────────────────────────────────────
 export function OfflineBanner() {
-  const { isOnline, pendingCount, isReplaying, flush } = useOffline();
+  const { isOnline, pendingCount, isReplaying } = useOffline();
   if (isOnline && pendingCount === 0) return null;
 
-  // While replaying we show a "syncing" pill in green; while offline
-  // we show a slate-grey pill; while online with leftover items we
-  // show an amber "pending" pill (tap to retry).
-  const variant = !isOnline ? 'offline' : isReplaying ? 'syncing' : 'pending';
-  const color =
-    variant === 'syncing' ? colors.green
-    : variant === 'pending' ? colors.amber
-    : '#94a3b8';
-  const label =
-    variant === 'syncing'
-      ? `Syncing ${pendingCount} action${pendingCount === 1 ? '' : 's'}…`
-      : variant === 'pending'
-      ? `${pendingCount} pending — tap to retry`
-      : pendingCount > 0
-      ? `You're offline · ${pendingCount} pending`
-      : `You're offline`;
-  const icon =
-    variant === 'syncing' ? 'sync' : variant === 'pending' ? 'time' : 'cloud-offline';
+  const isOffline = !isOnline;
+  const text = isOffline
+    ? 'OFFLINE — will sync automatically when internet returns'
+    : isReplaying
+    ? `Syncing ${pendingCount} change${pendingCount === 1 ? '' : 's'}…`
+    : `${pendingCount} pending — will sync automatically`;
 
-  const onTap = () => {
-    if (variant === 'pending') flush();
-  };
+  // Full-width strip pinned to the top of the screen. `pointerEvents:
+  // 'none'` means the strip is purely informational — taps fall through
+  // to the buttons / UI elements underneath, so the banner never blocks
+  // interaction. Red while offline, amber while pending, green while
+  // syncing.
+  const bg = isOffline ? '#dc2626' : isReplaying ? colors.green : colors.amber;
 
   return (
-    <TouchableOpacity
-      onPress={onTap}
-      activeOpacity={variant === 'pending' ? 0.7 : 1}
-      style={[
-        bannerStyles.wrap,
-        { backgroundColor: color + '22', borderColor: color + '88' },
-      ]}
+    <View
+      pointerEvents="none"
+      style={[bannerStyles.strip, { backgroundColor: bg }]}
       testID="offline-banner"
     >
-      {variant === 'syncing' ? (
-        <ActivityIndicator size="small" color={color} />
-      ) : (
-        <Ionicons name={icon as any} size={14} color={color} />
-      )}
-      <Text style={[bannerStyles.text, { color }]} numberOfLines={1}>{label}</Text>
-    </TouchableOpacity>
+      <Text style={bannerStyles.text} numberOfLines={1}>{text}</Text>
+    </View>
   );
 }
 
 const bannerStyles = StyleSheet.create({
-  wrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
+  strip: {
+    // Full-width strip docked to the top of the safe-area. We render
+    // this from inside the root layout so it sits above every screen.
+    // `pointerEvents: 'none'` is set on the View itself so taps pass
+    // through to the underlying UI — the banner is never a click trap.
+    width: '100%',
     paddingVertical: 6,
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    alignSelf: 'center',
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
-    maxWidth: '92%',
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   text: {
+    color: '#fff',
     fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.3,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textAlign: 'center',
   },
 });

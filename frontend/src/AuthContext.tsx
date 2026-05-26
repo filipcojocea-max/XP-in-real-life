@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+import { preWarmOfflineCache } from './api';
 
 const TOKEN_KEY = 'xp_token';
 const USER_KEY = 'xp_user';
@@ -156,6 +157,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setToken(t);
           setUser(JSON.parse(u));
           if (pend) setPendingMigrationAnonId(pend);
+          // Already-signed-in user re-opening the app — refresh the
+          // offline cache so screens they haven't tapped into yet still
+          // have a snapshot for the next offline launch.
+          preWarmOfflineCache().catch(() => undefined);
         } else if (a) {
           currentAnonId = a;
           setAnonymousId(a);
@@ -194,6 +199,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setToken(newToken);
     setUser(newUser);
     setAnonymousId(null);
+    // Fire-and-forget: prime the AsyncStorage cache with a fresh
+    // snapshot of every major read endpoint so the next time the user
+    // opens the app offline, every primary screen has data to render
+    // instead of a blank state. Failures are swallowed inside the
+    // helper — this never blocks login.
+    preWarmOfflineCache().catch(() => undefined);
   }, []);
 
   const clearPendingMigration = useCallback(async () => {

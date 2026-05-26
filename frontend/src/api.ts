@@ -61,7 +61,7 @@ const HARD_BLOCK_OFFLINE: RegExp[] = [
 const QUEUEABLE_OFFLINE: { pattern: RegExp; label: string }[] = [
   // Goals — create / update / complete / un-tick
   { pattern: /^\/goals(\/|$)/, label: 'Goal' },
-  // Tasks — create / complete / delete
+  // Tasks / Quests — create / complete / delete / tick off
   { pattern: /^\/tasks(\/|$)/, label: 'Task' },
   // DMs (message send + image attach)
   { pattern: /^\/messages\/[^/]+\/send/, label: 'Message' },
@@ -72,10 +72,40 @@ const QUEUEABLE_OFFLINE: { pattern: RegExp; label: string }[] = [
   { pattern: /^\/bt\/match\//, label: 'Treasure match' },
   { pattern: /^\/bt\/feed\//, label: 'Treasure feed' },
   { pattern: /^\/bt\/report/, label: 'Report' },
+  { pattern: /^\/bt\/chest\/find/, label: 'Daily chest' },
+  { pattern: /^\/bt\/(no-go-zones|settings|location)/, label: 'Treasure setting' },
   // Friends — send/accept/decline requests
   { pattern: /^\/friends\/(request|accept|decline|block|unblock)/, label: 'Friend request' },
   // Chat preferences
   { pattern: /^\/chat\/preferences/, label: 'Chat setting' },
+  // Profile edits (name, bio, avatar, day-anchor, timezone)
+  { pattern: /^\/profile(\/|$)/, label: 'Profile edit' },
+  { pattern: /^\/day-anchor/, label: 'Day-anchor' },
+  // Schedule — shifts / overrides / manual day pin
+  { pattern: /^\/schedule(\/|$)/, label: 'Schedule edit' },
+  // Challenges — start / complete / log
+  { pattern: /^\/challenges\//, label: 'Challenge action' },
+  // Sleep — log / wake / nap / sleep-anchor
+  { pattern: /^\/sleep\//, label: 'Sleep log' },
+  // Confidence / Dress / Image / Mood logs
+  { pattern: /^\/confidence\//, label: 'Confidence log' },
+  { pattern: /^\/dress\//, label: 'Dress log' },
+  // Focus Mode — session start/stop, blocked-app rules
+  { pattern: /^\/focus\//, label: 'Focus session' },
+  // Library — ratings, app pin/unpin (NOT purchases)
+  { pattern: /^\/library\/(rate|pin|unpin|favorite)/, label: 'Library setting' },
+  // Gifts — claim / acknowledge
+  { pattern: /^\/gifts\/(ack|claim)/, label: 'Gift action' },
+  // Notifications — mark read
+  { pattern: /^\/notifications\/.*\/read/, label: 'Notif read' },
+  // Penalties acknowledgement
+  { pattern: /^\/penalties\/.*\/ack/, label: 'Penalty ack' },
+  // Feedback
+  { pattern: /^\/feedback(\/|$)/, label: 'Feedback' },
+  // Goal-lock check-ins
+  { pattern: /^\/goal-lock\//, label: 'Goal-lock' },
+  // Onboarding answers
+  { pattern: /^\/onboarding\//, label: 'Onboarding' },
 ];
 
 // Lazy import from Offline.tsx to avoid a circular load order on boot.
@@ -144,21 +174,71 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   // still browse the app (tasks, goals, profile, feed, etc.).
   // Cache TTL is informational only — we always serve the cached row
   // when there's no network.
+  // Now covers the primary read endpoint for every major screen so a
+  // user who has loaded the app even once while online can re-open it
+  // offline and still see their content. Cached payloads are served
+  // when offline, refreshed on every successful online fetch.
   const CACHEABLE_GET = (
     !isMutation && (
       path === '/profile' ||
       path === '/tasks' ||
       path === '/goals' ||
       path === '/stats/daily' ||
+      path === '/stats/weekly' ||
+      path === '/stats/monthly' ||
       path === '/levels' ||
+      path === '/levels/all' ||
       path === '/library/pricing' ||
       path === '/library/ratings' ||
+      path === '/library/catalog' ||
       path === '/spot/feed' ||
+      path === '/spot/finds' ||
       path === '/bt/chest/today' ||
       path === '/bt/finds' ||
+      path === '/bt/feed' ||
+      path === '/bt/matches' ||
+      path === '/bt/settings' ||
+      path === '/bt/location' ||
+      path === '/bt/no-go-zones' ||
       path === '/friends' ||
       path === '/friends/requests' ||
-      path.startsWith('/messages/')
+      path === '/friends/leaderboard' ||
+      path === '/players' ||
+      path === '/players/search' ||
+      path === '/challenges' ||
+      path === '/challenges/today' ||
+      path === '/challenges/active' ||
+      path === '/sleep/summary' ||
+      path === '/sleep/history' ||
+      path === '/sleep/settings' ||
+      path === '/confidence/summary' ||
+      path === '/confidence/log' ||
+      path === '/focus/sessions' ||
+      path === '/focus/settings' ||
+      path === '/schedule' ||
+      path === '/schedule/today' ||
+      path === '/day-anchor' ||
+      path === '/onboarding/status' ||
+      path === '/gifts/pending' ||
+      path === '/gifts/history' ||
+      path === '/penalties/pending' ||
+      path === '/penalties/history' ||
+      path === '/chat/preferences' ||
+      path === '/feedback/me' ||
+      path === '/goal-lock' ||
+      path === '/notifications' ||
+      path === '/library/me' ||
+      path === '/admin/price-overrides' ||
+      path === '/active-boost' ||
+      path === '/boost/inventory' ||
+      path.startsWith('/messages/') ||
+      path.startsWith('/friends/profile/') ||
+      path.startsWith('/library/app/') ||
+      path.startsWith('/challenges/') ||
+      path.startsWith('/sleep/') ||
+      path.startsWith('/spot/match/') ||
+      path.startsWith('/spot/groups/') ||
+      path.startsWith('/admin/price-overrides/')
     )
   );
   const cacheKey = CACHEABLE_GET ? `@xp.api_cache:${path}` : null;
@@ -244,6 +324,73 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   }
   return data;
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Offline cache pre-warm
+// ────────────────────────────────────────────────────────────────────
+// Fire-and-forget background fetch of every major read endpoint right
+// after the user signs in (or boots already-authenticated). This
+// guarantees the AsyncStorage cache contains a fresh snapshot so the
+// very next offline launch can render every primary screen without
+// blank states — even features the user hasn't tapped into yet.
+const PREWARM_PATHS: string[] = [
+  '/profile',
+  '/tasks',
+  '/goals',
+  '/stats/daily',
+  '/levels',
+  '/library/pricing',
+  '/library/ratings',
+  '/library/catalog',
+  '/library/me',
+  '/friends',
+  '/friends/requests',
+  '/friends/leaderboard',
+  '/challenges',
+  '/challenges/today',
+  '/challenges/active',
+  '/sleep/summary',
+  '/sleep/history',
+  '/sleep/settings',
+  '/confidence/summary',
+  '/focus/sessions',
+  '/focus/settings',
+  '/schedule',
+  '/schedule/today',
+  '/day-anchor',
+  '/bt/chest/today',
+  '/bt/finds',
+  '/bt/feed',
+  '/bt/matches',
+  '/bt/settings',
+  '/bt/no-go-zones',
+  '/spot/feed',
+  '/spot/finds',
+  '/gifts/pending',
+  '/penalties/pending',
+  '/chat/preferences',
+  '/feedback/me',
+  '/active-boost',
+  '/boost/inventory',
+  '/messages/threads',
+];
+
+let _prewarmInFlight = false;
+export async function preWarmOfflineCache(): Promise<void> {
+  if (_prewarmInFlight) return;
+  if (!isOnlineNow()) return; // no point pre-warming while offline
+  _prewarmInFlight = true;
+  try {
+    // Run in parallel but swallow any individual failure — pre-warm
+    // is a best-effort background sweep, never blocks the user.
+    await Promise.allSettled(
+      PREWARM_PATHS.map((p) => req<any>(p).catch(() => null)),
+    );
+  } finally {
+    _prewarmInFlight = false;
+  }
+}
+
 
 export type Profile = {
   name: string;
