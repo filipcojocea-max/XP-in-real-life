@@ -1,0 +1,38 @@
+{
+  "summary": "Backend regression suite for Buried Treasure mini-app (/api/bt/*). All 17 tests passed against the public preview URL using admin JWT. Validated location CRUD with input validation (lat range, radius bounds, missing fields), today's chest spawn, settings GET/POST, finds list, feed, matches list, no-go-zones full CRUD (create→list→delete→verify gone), and match invite malformed payload handling. Verified no MongoDB _id leakage in any response. Verified the bt-matches expiry scheduler started on backend startup (log line: '[bt-matches] expiry tick started (60s)').",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_buried_treasure.py",
+    "/app/test_reports/pytest/bt_results.xml"
+  ],
+  "action_items": [
+    "Frontend crash fix on real Android device cannot be validated from the testing container — must be verified by user after next EAS build (try/catch on Location APIs, Accuracy.Balanced, hasServicesEnabledAsync pre-check, Google Maps API key added to app.json are all in code per the request context).",
+    "Stripe tests intentionally skipped (Stripe disabled in this environment per request)."
+  ],
+  "critical_code_review_comments": [
+    "buried_treasure.py is ~1287 lines — consider splitting Friends-Mode (Relay Race) endpoints into a separate module for maintainability (file >700 lines threshold).",
+    "_match_expiry_loop is started via asyncio.get_event_loop() inside init_buried_treasure; this is deprecated in Py3.12+. Confirmed running from logs, but consider migrating to asyncio.create_task() inside a FastAPI startup event handler for robustness.",
+    "POST /api/bt/location accepts non-numeric tz_offset_minutes silently (falls back to 0). Acceptable, but consider rejecting with 400 for stricter API contracts."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_buried_treasure.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (17/17)",
+    "frontend": "not tested (per request)"
+  },
+  "seed_data_creation": "Set admin user's bt_locations doc to Sydney CBD (lat -33.8688, lng 151.2093, radius 1500m, label TEST_Sydney). Created+deleted one TEST_zone_* no-go zone. Briefly toggled daylight_only on/off (restored to false).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All /api/bt/* endpoints verified working with admin JWT (filip.cojocea122@gmail.com / XL98CZW5599). EXPO_PUBLIC_BACKEND_URL is the env key (not EXPO_BACKEND_URL). Use the pytest suite at /app/backend/tests/test_buried_treasure.py as a regression baseline. The bt-matches expiry tick is a separate asyncio.Task (not APScheduler) — verify via grep '[bt-matches]' in backend.err.log on startup. Friends-Mode (Relay Race) endpoints exist but require a real friend pair to exercise end-to-end; only the malformed-input branch was tested.",
+  "rca_of_issue": "Not applicable — backend regression check only. The reported crash is a frontend-only Android-native issue (expo-location + react-native-maps) that cannot reproduce in browser automation because MapShim.web.tsx renders a placeholder on web. Backend endpoints required by the post-permission map screen (GET /api/bt/location, GET /api/bt/settings, GET /api/bt/chest/today, GET /api/bt/no-go-zones) all return 200 with valid JSON, so once the frontend successfully reaches the screen on a real device after the EAS build, the backend will not block it."
+}

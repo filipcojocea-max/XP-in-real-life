@@ -160,18 +160,31 @@ export default function BuriedTreasureScreen() {
   // ── Live device position (always-on while screen is mounted) ──
   useEffect(() => {
     let sub: Location.LocationSubscription | null = null;
+    let cancelled = false;
     (async () => {
       // Don't ask again here — askPermission already handled the prompt
       // and surfaced the in-app modal if the user said no.
       if (locPerm !== 'granted') return;
-      const cur = await Location.getCurrentPositionAsync({});
-      setPos({ lat: cur.coords.latitude, lng: cur.coords.longitude });
-      sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 1500 },
-        (l) => setPos({ lat: l.coords.latitude, lng: l.coords.longitude }),
-      );
+      try {
+        const servicesOn = await Location.hasServicesEnabledAsync().catch(() => true);
+        if (!servicesOn) return;
+        const cur = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        if (cancelled) return;
+        setPos({ lat: cur.coords.latitude, lng: cur.coords.longitude });
+        sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.Balanced, distanceInterval: 2, timeInterval: 1500 },
+          (l) => setPos({ lat: l.coords.latitude, lng: l.coords.longitude }),
+        );
+      } catch (e) {
+        // GPS lock failed / location services off / accuracy mode disabled.
+        // Don't crash — the map will still mount with the saved hunt-area
+        // center and the user can interact normally.
+        console.warn('[treasure] live position failed:', e);
+      }
     })();
-    return () => { sub?.remove(); };
+    return () => { cancelled = true; sub?.remove(); };
   }, [locPerm]);
 
   const refresh = useCallback(async () => {
@@ -377,15 +390,40 @@ function OnboardLocation({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        showAlert('Permission needed', 'We need your location to set the hunt area.');
-        return;
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          showAlert('Permission needed', 'We need your location to set the hunt area.');
+          return;
+        }
+        const servicesOn = await Location.hasServicesEnabledAsync().catch(() => true);
+        if (!servicesOn) {
+          showAlert(
+            'Location is off',
+            'Turn on Location services in your device settings, then come back to set your hunt area.',
+          );
+          return;
+        }
+        const c = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        if (cancelled) return;
+        setCoords({ lat: c.coords.latitude, lng: c.coords.longitude });
+      } catch (e: any) {
+        // GPS lock timed out or accuracy mode rejected — don't crash, let
+        // the user fall back to "Continue without GPS" (drop pin manually).
+        console.warn('[treasure/onboard] location failed:', e);
+        if (!cancelled) {
+          showAlert(
+            'Could not get your location',
+            String(e?.message || 'GPS unavailable — make sure Location is enabled and you are outdoors or near a window, then try again.'),
+          );
+        }
       }
-      const c = await Location.getCurrentPositionAsync({});
-      setCoords({ lat: c.coords.latitude, lng: c.coords.longitude });
     })();
+    return () => { cancelled = true; };
   }, []);
 
   const onUse = useCallback(async () => {
