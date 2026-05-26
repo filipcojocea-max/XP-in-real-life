@@ -61,7 +61,7 @@ export function PlayerPriceOverridesModal({
     setLoading(true);
     try {
       const [pp, ov] = await Promise.all([
-        api.libraryPricingGet(),
+        api.libraryPricing(),
         api.adminPriceOverridesList(userId),
       ]);
       setPublicPricing(pp.pricing as Record<string, LibraryAppPricing>);
