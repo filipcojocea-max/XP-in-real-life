@@ -44,6 +44,7 @@ import {
 import type { ChatPreferences, DMMessage } from '../../src/api';
 import { ChatSettingsSheet } from '../../src/components/ChatSettingsSheet';
 import { useGuestGate } from '../../src/components/GuestGate';
+import { useAuth } from '../../src/AuthContext';
 
 const REFINE_DEBOUNCE_MS = 600;
 
@@ -85,7 +86,17 @@ export default function MessageThread() {
   const [severity, setSeverity] = useState<'none' | 'mild' | 'severe'>('none');
   const [refining, setRefining] = useState(false);
   const [sending, setSending] = useState(false);
-  const [meId, setMeId] = useState<string | null>(null);
+  const { user: authUser, anonymousId } = useAuth();
+  // CRITICAL: seed `meId` synchronously from AuthContext so the very
+  // first render correctly classifies each message as mine-vs-theirs.
+  // Previously this state started as `null` and only filled in after
+  // `/api/profile` returned — if that call ever swallowed an error
+  // (offline, hiccup, race) meId stayed null, every message classified
+  // as `theirs`, every bubble rendered on the LEFT with the received
+  // colour. That's the bug the user reported.
+  const [meId, setMeId] = useState<string | null>(
+    authUser?.id || anonymousId || null,
+  );
   const [pickedImage, setPickedImage] = useState<string | null>(null);
   const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
   const [imageChecking, setImageChecking] = useState(false);
@@ -103,7 +114,12 @@ export default function MessageThread() {
         api.getProfile().catch(() => null),
       ]);
       setMessages(r.messages || []);
+      // Refresh meId from the canonical /profile response (handles the
+      // case where the user just signed in and AuthContext hasn't
+      // re-rendered yet, or anonymousId got migrated to a real user_id).
       if (p?.user_id) setMeId(p.user_id);
+      else if (authUser?.id) setMeId(authUser.id);
+      else if (anonymousId) setMeId(anonymousId);
       // Mark all unread as read since the user is now looking at the thread.
       api.messagesRead(fid).catch(() => {});
     } catch (e: any) {
@@ -306,7 +322,12 @@ export default function MessageThread() {
               const mine = m.from_user_id === meId;
               const bubbleBg = mine ? prefs.sent_bubble_color : prefs.received_bubble_color;
               const textColor = mine ? prefs.sent_text_color : prefs.received_text_color;
-              // User preference: MY messages render on the LEFT, theirs on
+              // Standard chat layout: MY messages render on the RIGHT
+              // (flex-end), theirs on the LEFT (default flex-start).
+              // `meId` is now sourced from AuthContext synchronously so
+              // the classification is correct on the very first render —
+              // never falls back to "all on the left" if /profile is
+              // slow or fails.
               // the RIGHT — opposite of the iMessage/WhatsApp default. The
               // bubble's squared-off corner also flips so it always points
               // toward the sender side.
