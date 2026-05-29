@@ -40,14 +40,13 @@ import React, {
   useState,
 } from 'react';
 import {
-  ActivityIndicator,
+  Platform,
+  StatusBar,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing, radii } from './theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { showAlert } from './uiAlert';
 
 // ────────────────────────────────────────────────────────────────────
@@ -331,48 +330,50 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// <OfflineBanner /> — thin pill on top of every screen when needed.
+// <OfflineBanner /> — full-width red strip pinned to the top of the
+// screen while offline. Silent-sync mode: we deliberately do NOT
+// render anything when online, even if there are still pending queued
+// mutations. Per product spec 2026-05-29 the queue drains silently in
+// the background — the user only ever sees the red OFFLINE strip while
+// disconnected and a clean UI the moment connectivity returns.
 // ────────────────────────────────────────────────────────────────────
 export function OfflineBanner() {
-  const { isOnline, pendingCount, isReplaying } = useOffline();
-  if (isOnline && pendingCount === 0) return null;
+  const { isOnline } = useOffline();
+  const insets = useSafeAreaInsets();
+  if (isOnline) return null;
 
-  const isOffline = !isOnline;
-  const text = isOffline
-    ? 'OFFLINE — will sync automatically when internet returns'
-    : isReplaying
-    ? `Syncing ${pendingCount} change${pendingCount === 1 ? '' : 's'}…`
-    : `${pendingCount} pending — will sync automatically`;
+  // Push the strip below the device status bar so the text never sits
+  // under the OS clock / battery icons. On Android we fall back to
+  // StatusBar.currentHeight when the safe-area inset isn't populated.
+  const topPad = Math.max(
+    insets.top,
+    Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0,
+  );
 
-  // Full-width strip pinned to the top of the screen. `pointerEvents:
-  // 'none'` means the strip is purely informational — taps fall through
-  // to the buttons / UI elements underneath, so the banner never blocks
-  // interaction. Red while offline, amber while pending, green while
-  // syncing.
-  const bg = isOffline ? '#dc2626' : isReplaying ? colors.green : colors.amber;
-
+  // `pointerEvents: 'none'` means the strip is purely informational —
+  // taps fall through to the UI underneath so the banner never blocks
+  // interaction.
   return (
     <View
       pointerEvents="none"
-      style={[bannerStyles.strip, { backgroundColor: bg }]}
+      style={[bannerStyles.strip, { paddingTop: topPad + 6 }]}
       testID="offline-banner"
     >
-      <Text style={bannerStyles.text} numberOfLines={1}>{text}</Text>
+      <Text style={bannerStyles.text} numberOfLines={2}>
+        OFFLINE — will sync automatically when internet returns
+      </Text>
     </View>
   );
 }
 
 const bannerStyles = StyleSheet.create({
   strip: {
-    // Full-width strip docked to the top of the safe-area. We render
-    // this from inside the root layout so it sits above every screen.
-    // `pointerEvents: 'none'` is set on the View itself so taps pass
-    // through to the underlying UI — the banner is never a click trap.
     width: '100%',
-    paddingVertical: 6,
+    paddingBottom: 6,
     paddingHorizontal: 12,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#dc2626',
   },
   text: {
     color: '#fff',

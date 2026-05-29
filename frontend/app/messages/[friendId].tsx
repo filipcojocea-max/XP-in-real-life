@@ -99,6 +99,59 @@ export default function MessageThread() {
   );
   const [pickedImage, setPickedImage] = useState<string | null>(null);
   const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
+  // Reaction UI state — long-press a bubble to open the quick picker
+  // anchored above it; the "+more" tap opens the full picker modal.
+  const [reactionPickerFor, setReactionPickerFor] = useState<string | null>(null);
+  const [morePickerFor, setMorePickerFor] = useState<string | null>(null);
+
+  // Quick-pick row + "more" grid. Order matters: matches the request
+  // exactly (love, thumbs, laugh, sad, shocked).
+  const QUICK_REACTIONS = ['❤️', '👍', '😂', '😢', '😲'];
+  const MORE_REACTIONS = [
+    '❤️','👍','👎','😂','😢','😲','😍','😎','🥳','🔥','💯','🎉',
+    '🙌','👏','🙏','💪','✨','⭐','🌟','💖','💔','😡','🤔','😴',
+    '🤝','🫶','🤗','😅','😇','🥺','😤','🤯','🥹','😏','😬','🤩',
+  ];
+
+  const onToggleReaction = useCallback(
+    async (messageId: string, emoji: string) => {
+      // Close any open picker so the chip animates in without overlay.
+      setReactionPickerFor(null);
+      setMorePickerFor(null);
+      // Optimistic update so the chip appears immediately even before
+      // the server round-trip completes.
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          const reactions = { ...(m.reactions || {}) };
+          const userList = [...(reactions[emoji] || [])];
+          const meKey = meId || '';
+          if (userList.includes(meKey)) {
+            const next = userList.filter((u) => u !== meKey);
+            if (next.length) reactions[emoji] = next;
+            else delete reactions[emoji];
+          } else {
+            reactions[emoji] = [...userList, meKey];
+          }
+          return { ...m, reactions };
+        }),
+      );
+      try {
+        const r = await api.messageReact(messageId, emoji);
+        // Reconcile with the server's authoritative state.
+        setMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? { ...m, reactions: r.reactions } : m)),
+        );
+      } catch {
+        // Revert by reloading the thread on failure.
+        try {
+          const r = await api.messagesThread(fid);
+          setMessages(r.messages || []);
+        } catch { /* ignore */ }
+      }
+    },
+    [fid, meId],
+  );
   const [imageChecking, setImageChecking] = useState(false);
   const [prefs, setPrefs] = useState<ChatPreferences>(() => defaultPrefs(fid));
   const [friendName, setFriendName] = useState<string>('Chat');
@@ -336,28 +389,73 @@ export default function MessageThread() {
                   key={m.id}
                   style={[styles.bubbleRow, mine ? { justifyContent: 'flex-end' } : null]}
                 >
-                  <View
-                    style={[
-                      styles.bubble,
-                      mine ? styles.bubbleMine : styles.bubbleTheirs,
-                      { backgroundColor: bubbleBg },
-                      !mine && { borderColor: colors.border, borderWidth: 1 },
-                    ]}
-                  >
-                    {m.image_base64 ? (
-                      <TouchableOpacity
-                        activeOpacity={0.85}
-                        onPress={() => setFullscreenImage(m.image_base64 || null)}
-                        testID={`msg-img-${m.id}`}
+                  <View style={{ maxWidth: '78%' }}>
+                    <TouchableOpacity
+                      activeOpacity={0.9}
+                      onLongPress={() => setReactionPickerFor(m.id)}
+                      delayLongPress={250}
+                      testID={`msg-bubble-${m.id}`}
+                    >
+                      <View
+                        style={[
+                          styles.bubble,
+                          mine ? styles.bubbleMine : styles.bubbleTheirs,
+                          { backgroundColor: bubbleBg },
+                          !mine && { borderColor: colors.border, borderWidth: 1 },
+                          { maxWidth: '100%' },
+                        ]}
                       >
-                        <Image
-                          source={{ uri: `data:image/jpeg;base64,${m.image_base64}` }}
-                          style={styles.bubbleImg}
-                        />
-                      </TouchableOpacity>
-                    ) : null}
-                    {m.text ? (
-                      <Text style={[styles.bubbleText, { color: textColor }]}>{m.text}</Text>
+                        {m.image_base64 ? (
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={() => setFullscreenImage(m.image_base64 || null)}
+                            testID={`msg-img-${m.id}`}
+                          >
+                            <Image
+                              source={{ uri: `data:image/jpeg;base64,${m.image_base64}` }}
+                              style={styles.bubbleImg}
+                            />
+                          </TouchableOpacity>
+                        ) : null}
+                        {m.text ? (
+                          <Text style={[styles.bubbleText, { color: textColor }]}>{m.text}</Text>
+                        ) : null}
+                      </View>
+                    </TouchableOpacity>
+                    {/* Reaction chips — render whatever reactions exist
+                        on the message as a horizontal pill row directly
+                        beneath the bubble. Tap a chip to toggle your own
+                        reaction. The long-press picker is wired up via
+                        the bubble's onLongPress above. */}
+                    {m.reactions && Object.keys(m.reactions).length > 0 ? (
+                      <View
+                        style={[
+                          styles.reactionRow,
+                          mine ? { justifyContent: 'flex-end' } : { justifyContent: 'flex-start' },
+                        ]}
+                      >
+                        {Object.entries(m.reactions).map(([emoji, users]) => {
+                          const count = (users as string[]).length;
+                          const mineReacted = (users as string[]).includes(meId || '');
+                          return (
+                            <TouchableOpacity
+                              key={emoji}
+                              onPress={() => onToggleReaction(m.id, emoji)}
+                              activeOpacity={0.7}
+                              style={[
+                                styles.reactionChip,
+                                mineReacted ? styles.reactionChipMine : null,
+                              ]}
+                              testID={`msg-reaction-${m.id}-${emoji}`}
+                            >
+                              <Text style={styles.reactionEmoji}>{emoji}</Text>
+                              {count > 1 ? (
+                                <Text style={styles.reactionCount}>{count}</Text>
+                              ) : null}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
                     ) : null}
                   </View>
                 </View>
@@ -514,6 +612,31 @@ const styles = StyleSheet.create({
   bubbleTheirs: { borderBottomLeftRadius: 4 },
   bubbleText: { fontSize: 14, lineHeight: 19 },
   bubbleImg: { width: 200, height: 200, borderRadius: 10 },
+  // Reaction chips render directly under each bubble. They're a thin
+  // pill row that wraps if the user has stacked many distinct emoji.
+  reactionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 2,
+  },
+  reactionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  reactionChipMine: {
+    borderColor: colors.green,
+    backgroundColor: colors.green + '22',
+  },
+  reactionEmoji: { fontSize: 12 },
+  reactionCount: { color: colors.textMuted, fontSize: 10, fontWeight: '800' },
   fsBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', alignItems: 'center', justifyContent: 'center' },
   fsImage: { width: '100%', height: '100%' },
   fsClose: {

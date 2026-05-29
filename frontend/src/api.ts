@@ -63,9 +63,11 @@ const QUEUEABLE_OFFLINE: { pattern: RegExp; label: string }[] = [
   { pattern: /^\/goals(\/|$)/, label: 'Goal' },
   // Tasks / Quests — create / complete / delete / tick off
   { pattern: /^\/tasks(\/|$)/, label: 'Task' },
-  // DMs (message send + image attach)
-  { pattern: /^\/messages\/[^/]+\/send/, label: 'Message' },
-  { pattern: /^\/messages\/[^/]+\/read/, label: 'Read receipt' },
+  // NOTE: Direct Messages, message reactions, and Gifts are
+  // intentionally NOT queued. Per product spec 2026-05-29, those are
+  // real-time / sensitive surfaces — they must error with a clear
+  // "You're offline" message instead of silently queueing. The chat
+  // composer + gift modal handle that error themselves.
   // Spot — feed posts, likes, comments
   { pattern: /^\/spot\/(post|complete|like|comment|edit)/, label: 'Feed action' },
   // Buried Treasure — match invite/accept/reject/find/bury, feed likes
@@ -76,7 +78,7 @@ const QUEUEABLE_OFFLINE: { pattern: RegExp; label: string }[] = [
   { pattern: /^\/bt\/(no-go-zones|settings|location)/, label: 'Treasure setting' },
   // Friends — send/accept/decline requests
   { pattern: /^\/friends\/(request|accept|decline|block|unblock)/, label: 'Friend request' },
-  // Chat preferences
+  // Chat preferences (per-friend colors / mute / soft-block)
   { pattern: /^\/chat\/preferences/, label: 'Chat setting' },
   // Profile edits (name, bio, avatar, day-anchor, timezone)
   { pattern: /^\/profile(\/|$)/, label: 'Profile edit' },
@@ -94,8 +96,11 @@ const QUEUEABLE_OFFLINE: { pattern: RegExp; label: string }[] = [
   { pattern: /^\/focus\//, label: 'Focus session' },
   // Library — ratings, app pin/unpin (NOT purchases)
   { pattern: /^\/library\/(rate|pin|unpin|favorite)/, label: 'Library setting' },
-  // Gifts — claim / acknowledge
-  { pattern: /^\/gifts\/(ack|claim)/, label: 'Gift action' },
+  // NOTE: /gifts/ack and /gifts/claim are NOT queued — gifts are
+  // real-time sensitive (Creator XP / boost grants). When offline the
+  // Gift Received modal will silently swallow the ack error and let
+  // the user dismiss locally; the next /gifts/pending fetch on
+  // reconnect will resurface anything that was lost.
   // Notifications — mark read
   { pattern: /^\/notifications\/.*\/read/, label: 'Notif read' },
   // Penalties acknowledgement
@@ -165,7 +170,13 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
       });
       return { __queued: true } as any;
     }
-    throw new Error("You're offline — this action will sync when you reconnect.");
+    // Real-time / sensitive surface (chat send, message reactions, gift
+    // ack, etc.) — surface a clear offline error so the call site can
+    // toast the user. We deliberately do NOT queue these.
+    if (/^\/messages\//.test(path)) {
+      throw new Error("You're offline — can't send messages.");
+    }
+    throw new Error("You're offline — please reconnect to do this.");
   }
 
   // ── GET-cache (offline view) ────────────────────────────────────
@@ -1150,6 +1161,11 @@ export const api = {
   messagesThreads: () => req<{ threads: DMThread[] }>('/messages/threads'),
   messagesThread: (friend_id: string) =>
     req<{ messages: DMMessage[] }>(`/messages/thread/${friend_id}`),
+  messageReact: (message_id: string, emoji: string) =>
+    req<{ reactions: Record<string, string[]>; action: 'added' | 'removed' }>(
+      `/messages/${message_id}/react`,
+      { method: 'POST', body: JSON.stringify({ emoji }) },
+    ),
   messagesRead: (friend_id: string) =>
     req<{ updated: number }>('/messages/read', {
       method: 'POST',
@@ -2131,6 +2147,10 @@ export type DMMessage = {
   created_at: string;
   read_at: string | null;
   severity: DMSeverity;
+  /** Emoji reactions: `{ "👍": ["user_id_1", "user_id_2"], "❤️": [...] }`.
+   *  Each user can react with each distinct emoji at most once per
+   *  message (toggling re-press removes their reaction). */
+  reactions?: Record<string, string[]>;
 };
 export type DMThread = {
   friend_id: string;

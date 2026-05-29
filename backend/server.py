@@ -6410,7 +6410,64 @@ def _serialize_message(m: dict) -> dict:
         "created_at": m.get("created_at"),
         "read_at": m.get("read_at"),
         "severity": m.get("severity", "none"),
+        # Emoji reactions: { "<emoji>": ["<user_id>", ...] }. Each user
+        # can have AT MOST ONE active reaction per emoji per message
+        # (we de-dup on insert). Stored as a plain dict on the message
+        # doc so it's cheap to read and cheap to toggle.
+        "reactions": m.get("reactions") or {},
     }
+
+
+@api_router.post("/messages/{message_id}/react")
+async def messages_react(
+    message_id: str,
+    body: dict,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Toggle a single emoji reaction on a message. If the user has
+    already reacted with this exact emoji it's removed; otherwise it's
+    added. The caller can only react on threads they participate in."""
+    emoji = (body or {}).get("emoji") or ""
+    if not emoji or len(emoji) > 16:
+        raise HTTPException(400, "emoji required (≤16 chars)")
+    msg = await db.messages.find_one({"id": message_id})
+    if not msg:
+        raise HTTPException(404, "Message not found")
+    # Authorisation: caller must be one of the two participants.
+    if user_id not in (msg.get("from_user_id"), msg.get("to_user_id")):
+        raise HTTPException(403, "Not your thread.")
+    reactions = dict(msg.get("reactions") or {})
+    user_list = list(reactions.get(emoji) or [])
+    if user_id in user_list:
+        # Toggle off
+        user_list.remove(user_id)
+        action = "removed"
+    else:
+        user_list.append(user_id)
+        action = "added"
+    if user_list:
+        reactions[emoji] = user_list
+    else:
+        reactions.pop(emoji, None)
+    await db.messages.update_one(
+        {"id": message_id},
+        {"$set": {"reactions": reactions}},
+    )
+    # Light push to the other side so they see the reaction promptly
+    # (only on "added" — removals are silent to avoid notification spam).
+    if action == "added":
+        other = msg.get("to_user_id") if user_id == msg.get("from_user_id") else msg.get("from_user_id")
+        if other and other != user_id:
+            try:
+                await _push_to_user(
+                    other,
+                    title="New reaction",
+                    body=f"{emoji} on your message",
+                    data={"kind": "message_reaction", "message_id": message_id, "emoji": emoji},
+                )
+            except Exception:
+                logger.exception("[messages/react] push failed")
+    return {"reactions": reactions, "action": action}
 
 
 @api_router.post("/messages/refine")
