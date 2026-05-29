@@ -322,6 +322,22 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
       /* ignore */
     }
   }
+  // Badge celebration hook — many mutation endpoints (task/goal complete,
+  // streak rollups, level-ups) return `newly_unlocked_achievements: []`
+  // in the same payload. Emit those IDs so the globally-mounted
+  // <BadgePopup> can pop a celebratory modal with the badge's own
+  // encouraging text. Lazy-require to avoid the api ↔ badgeEvents
+  // circular import that would otherwise form on cold boot.
+  try {
+    const ids = (data as any)?.newly_unlocked_achievements;
+    if (Array.isArray(ids) && ids.length > 0) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { emitNewBadges } = require('./badgeEvents');
+      emitNewBadges(ids);
+    }
+  } catch {
+    /* never let a celebration crash a successful request */
+  }
   return data;
 }
 
@@ -546,6 +562,10 @@ export type Achievement = {
   type: string;
   threshold: number;
   unlocked: boolean;
+  /** Short, evocative message shown beneath the badge in the celebratory
+   *  popup the moment it's unlocked (e.g. "Starting a small fire" for
+   *  the 3-day streak badge). Set per-badge in backend ACHIEVEMENT_DEFS. */
+  encouraging_text?: string;
 };
 
 export type DailyStats = {

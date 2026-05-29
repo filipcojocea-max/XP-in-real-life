@@ -280,7 +280,24 @@ export default function ProfileScreen() {
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.anchorLabel}>MORNING START TIME</Text>
-                <Text style={styles.anchorValue}>{profile.day_start_time} (your new day begins here)</Text>
+                {/* When the Adaptive Work-Life Scheduler is ON, the
+                    static day_start_time is OVERRIDDEN by whichever
+                    shift the user is on today (start_time pulled from
+                    `_effective_day_start_for` on the backend). Surface
+                    that here so the user isn't confused about why their
+                    day rolls over at a different hour than this value. */}
+                {(profile as any).shift_schedule?.enabled ? (
+                  <>
+                    <Text style={[styles.anchorValue, { color: colors.cyan }]} testID="day-start-scheduler-override">
+                      Adaptive Scheduler · per-day
+                    </Text>
+                    <Text style={styles.anchorFoot}>
+                      Overrides the static {profile.day_start_time}. Day boundary follows your shift schedule — toggle off in the Scheduler to revert.
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={styles.anchorValue}>{profile.day_start_time} (your new day begins here)</Text>
+                )}
               </View>
               <Ionicons name="lock-closed" size={14} color={colors.textMuted} />
             </View>

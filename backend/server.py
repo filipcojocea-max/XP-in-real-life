@@ -397,20 +397,20 @@ LEVEL_THRESHOLDS = [0] + [_cum_xp_for_level(L) for L in range(2, MAX_LEVEL + 2)]
 LEVEL_THRESHOLDS[-1] = TOTAL_XP_CAP  # cap final threshold
 
 ACHIEVEMENT_DEFS = [
-    {"id": "first_task", "title": "First Step", "description": "Complete your first task", "icon": "footsteps", "type": "tasks_completed", "threshold": 1},
-    {"id": "task_10", "title": "Getting Started", "description": "Complete 10 tasks", "icon": "flash", "type": "tasks_completed", "threshold": 10},
-    {"id": "task_50", "title": "Dedicated", "description": "Complete 50 tasks", "icon": "trophy", "type": "tasks_completed", "threshold": 50},
-    {"id": "task_100", "title": "Centurion", "description": "Complete 100 tasks", "icon": "medal", "type": "tasks_completed", "threshold": 100},
-    {"id": "streak_3", "title": "On Fire", "description": "3-day streak", "icon": "flame", "type": "streak", "threshold": 3},
-    {"id": "streak_7", "title": "Week Warrior", "description": "7-day streak", "icon": "calendar", "type": "streak", "threshold": 7},
-    {"id": "streak_30", "title": "Unstoppable", "description": "30-day streak", "icon": "rocket", "type": "streak", "threshold": 30},
-    {"id": "level_5", "title": "Rising Star", "description": "Reach Level 5", "icon": "star", "type": "level", "threshold": 5},
-    {"id": "level_25", "title": "Quarter Way", "description": "Reach Level 25", "icon": "ribbon", "type": "level", "threshold": 25},
-    {"id": "level_50", "title": "Hero", "description": "Reach Level 50", "icon": "diamond", "type": "level", "threshold": 50},
-    {"id": "level_100", "title": "Champion", "description": "Reach Level 100", "icon": "trophy", "type": "level", "threshold": 100},
-    {"id": "level_200", "title": "Apex Legend", "description": "Reach max Level 200", "icon": "shield-checkmark", "type": "level", "threshold": 200},
-    {"id": "first_goal", "title": "Goal Setter", "description": "Create your first goal", "icon": "flag", "type": "goals_created", "threshold": 1},
-    {"id": "goal_done", "title": "Achiever", "description": "Complete a goal", "icon": "checkmark-done", "type": "goals_completed", "threshold": 1},
+    {"id": "first_task",  "title": "First Step",     "description": "Complete your first task", "icon": "footsteps",        "type": "tasks_completed", "threshold": 1,   "encouraging_text": "Every journey begins here"},
+    {"id": "task_10",     "title": "Getting Started","description": "Complete 10 tasks",        "icon": "flash",            "type": "tasks_completed", "threshold": 10,  "encouraging_text": "Momentum is building"},
+    {"id": "task_50",     "title": "Dedicated",      "description": "Complete 50 tasks",        "icon": "trophy",           "type": "tasks_completed", "threshold": 50,  "encouraging_text": "Discipline is paying off"},
+    {"id": "task_100",    "title": "Centurion",      "description": "Complete 100 tasks",       "icon": "medal",            "type": "tasks_completed", "threshold": 100, "encouraging_text": "You're becoming unstoppable"},
+    {"id": "streak_3",    "title": "On Fire",        "description": "3-day streak",             "icon": "flame",            "type": "streak",          "threshold": 3,   "encouraging_text": "Starting a small fire"},
+    {"id": "streak_7",    "title": "Week Warrior",   "description": "7-day streak",             "icon": "calendar",         "type": "streak",          "threshold": 7,   "encouraging_text": "One full week — habits are forming"},
+    {"id": "streak_30",   "title": "Unstoppable",    "description": "30-day streak",            "icon": "rocket",           "type": "streak",          "threshold": 30,  "encouraging_text": "A whole month — this is who you are now"},
+    {"id": "level_5",     "title": "Rising Star",    "description": "Reach Level 5",            "icon": "star",             "type": "level",           "threshold": 5,   "encouraging_text": "Just getting warmed up"},
+    {"id": "level_25",    "title": "Quarter Way",    "description": "Reach Level 25",           "icon": "ribbon",           "type": "level",           "threshold": 25,  "encouraging_text": "Quarter of the way to legendary"},
+    {"id": "level_50",    "title": "Hero",           "description": "Reach Level 50",           "icon": "diamond",          "type": "level",           "threshold": 50,  "encouraging_text": "Halfway there — keep climbing"},
+    {"id": "level_100",   "title": "Champion",       "description": "Reach Level 100",          "icon": "trophy",           "type": "level",           "threshold": 100, "encouraging_text": "Triple digits — true champion status"},
+    {"id": "level_200",   "title": "Apex Legend",    "description": "Reach max Level 200",      "icon": "shield-checkmark", "type": "level",           "threshold": 200, "encouraging_text": "You reached the summit"},
+    {"id": "first_goal",  "title": "Goal Setter",    "description": "Create your first goal",   "icon": "flag",             "type": "goals_created",   "threshold": 1,   "encouraging_text": "A goal written down is half-achieved"},
+    {"id": "goal_done",   "title": "Achiever",       "description": "Complete a goal",          "icon": "checkmark-done",   "type": "goals_completed", "threshold": 1,   "encouraging_text": "You set your sight and hit the mark"},
 ]
 
 

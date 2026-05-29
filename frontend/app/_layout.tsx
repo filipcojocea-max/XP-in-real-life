@@ -20,6 +20,7 @@ import { useLevelUpDetector } from '../src/hooks/useLevelUpDetector';
 import { StripeReturnHandler } from '../src/StripeReturnHandler';
 import { PenaltyHost } from '../src/PenaltyHost';
 import { OfflineProvider, OfflineBanner } from '../src/Offline';
+import { BadgePopup } from '../src/components/BadgePopup';
 import { GuestGateHost } from '../src/components/GuestGate';
 import { GuestProgressMigrationHost } from '../src/components/GuestProgressMigrationHost';
 
@@ -175,6 +176,10 @@ export default function RootLayout() {
             <View pointerEvents="box-none" style={{ alignItems: 'center', position: 'absolute', top: 0, left: 0, right: 0, zIndex: 9999 }}>
               <OfflineBanner />
             </View>
+            {/* Celebratory popup for newly-unlocked achievement badges.
+                Listens to the badgeEvents pub/sub which api.req() fires
+                whenever a mutation returns newly_unlocked_achievements. */}
+            <BadgePopup />
             <AuthGate>
             <Stack
               screenOptions={{
