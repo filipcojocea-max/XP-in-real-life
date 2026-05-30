@@ -1266,42 +1266,71 @@ export const api = {
       `/admin/players/inactive?bucket=${bucket}`,
     ),
 
-  // ─── Buried Treasure mini-app (Phase 1 — daily solo hunt) ──────
-  btLocationGet: () => req<{ location: BTLocation | null }>('/bt/location'),
-  btLocationSet: (lat: number, lng: number, radius_m: number, label?: string, tz_offset_minutes?: number) =>
-    req<{ saved: boolean }>('/bt/location', {
+  // ─── Buried Treasure mini-app (2026-05-30 spec — solo + groups) ──
+  // Bookkeeping: stamp the player's current GPS so the friend-area
+  // check on group invites has something to compare against.
+  btSaveLocation: (lat: number, lng: number) =>
+    req<{ ok: boolean }>('/bt/location', {
       method: 'POST',
-      body: JSON.stringify({ lat, lng, radius_m, label, tz_offset_minutes }),
+      body: JSON.stringify({ lat, lng }),
     }),
-  btChestToday: () => req<{ chest: BTChest }>('/bt/chest/today'),
-  btChestFind: (lat: number, lng: number, photoBase64?: string) =>
-    req<{ chest: BTChest; xp_awarded?: number; already_found?: boolean }>('/bt/chest/find', {
+  // Solo hunt loop
+  btSoloStart: (lat: number, lng: number, radius_m: number) =>
+    req<BTSoloHunt>('/bt/solo/start', {
       method: 'POST',
-      body: JSON.stringify({ lat, lng, photo_base64: photoBase64 }),
+      body: JSON.stringify({ lat, lng, radius_m }),
     }),
-  btFindsHistory: () => req<{ finds: BTFind[] }>('/bt/finds'),
-  btSettingsGet: () => req<{ settings: { daylight_only: boolean } }>('/bt/settings'),
-  btSettingsSet: (daylight_only: boolean) =>
-    req<{ saved: boolean }>('/bt/settings', {
+  btSoloCurrent: () => req<{ hunt: BTSoloHunt | null }>('/bt/solo/current'),
+  btSoloCompass: (lat: number, lng: number) =>
+    req<BTCompassReading>(`/bt/solo/compass?lat=${lat}&lng=${lng}`),
+  btSoloFind: (lat: number, lng: number, photo_base64: string) =>
+    req<BTFindResult>('/bt/solo/find', {
       method: 'POST',
-      body: JSON.stringify({ daylight_only }),
+      body: JSON.stringify({ lat, lng, photo_base64 }),
     }),
-  btZonesList: () => req<{ zones: BTNoGoZone[] }>('/bt/no-go-zones'),
-  btZoneCreate: (name: string, polygon: { lat: number; lng: number }[]) =>
-    req<{ id: string; created: boolean }>('/bt/no-go-zones', {
+  btSoloFinds: () => req<{ finds: BTSoloFind[]; count: number }>('/bt/solo/finds'),
+  // Friends — groups
+  btGroupCreate: (name: string, lat: number, lng: number, radius_m: number) =>
+    req<BTGroup>('/bt/groups/create', {
       method: 'POST',
-      body: JSON.stringify({ name, polygon }),
+      body: JSON.stringify({ name, lat, lng, radius_m }),
     }),
-  btZoneDelete: (zoneId: string) =>
-    req<{ deleted: number }>(`/bt/no-go-zones/${zoneId}`, { method: 'DELETE' }),
-  btReport: (
-    kind: 'location' | 'object',
-    message: string,
-    extra?: { lat?: number; lng?: number; photo_base64?: string },
+  btGroupInvite: (gid: string, friend_ids: string[]) =>
+    req<BTInviteResult>(`/bt/groups/${gid}/invite`, {
+      method: 'POST',
+      body: JSON.stringify({ friend_ids }),
+    }),
+  btGroupsMine: () => req<{ groups: BTGroup[] }>('/bt/groups/mine'),
+  btGroupsAvailable: () => req<{ groups: BTGroup[] }>('/bt/groups/available'),
+  btGroupAccept: (gid: string) =>
+    req<BTGroup>(`/bt/groups/${gid}/accept`, { method: 'POST' }),
+  btGroupReject: (gid: string) =>
+    req<BTGroup>(`/bt/groups/${gid}/reject`, { method: 'POST' }),
+  btGroupJoinByCode: (code: string) =>
+    req<BTGroup>('/bt/groups/join-by-code', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+  btGroupGet: (gid: string) => req<BTGroup>(`/bt/groups/${gid}`),
+  btGroupBury: (
+    gid: string,
+    lat: number,
+    lng: number,
+    photo_base64: string,
+    map_screenshot_base64: string,
   ) =>
-    req<{ id: string; sent_to_admin_count: number }>('/bt/report', {
+    req<BTGroup>(`/bt/groups/${gid}/bury`, {
       method: 'POST',
-      body: JSON.stringify({ kind, message, ...(extra || {}) }),
+      body: JSON.stringify({ lat, lng, photo_base64, map_screenshot_base64 }),
+    }),
+  btGroupCompass: (gid: string, lat: number, lng: number) =>
+    req<BTCompassReading & { creator_view?: boolean }>(
+      `/bt/groups/${gid}/compass?lat=${lat}&lng=${lng}`,
+    ),
+  btGroupFind: (gid: string, lat: number, lng: number, photo_base64: string) =>
+    req<BTFindResult & { group: BTGroup }>(`/bt/groups/${gid}/find`, {
+      method: 'POST',
+      body: JSON.stringify({ lat, lng, photo_base64 }),
     }),
   // Health Connect debug reporter — used by the Sleep / "Connect Samsung
   // Health" flow to ship native crashes + error messages to the server
@@ -2357,47 +2386,79 @@ export type InactivePlayerRow = {
   days_inactive: number;
 };
 
-// ─── Buried Treasure (Phase 1 — daily solo hunt) ────────────────
-export type BTLocation = {
+// ─── Buried Treasure (2026-05-30 rebuild — solo + groups) ──────────
+export type BTArea = {
   lat: number;
   lng: number;
   radius_m: number;
-  label?: string | null;
-  tz_offset_minutes?: number;
-  updated_at?: string;
 };
 
-export type BTChest = {
-  id: string;
-  date: string;
-  lat: number;
-  lng: number;
-  hint: string;
-  spawn_source: 'osm_park' | 'fallback_random';
-  osm_feature_name?: string | null;
-  status: 'hidden' | 'found' | 'expired';
-  found_at: string | null;
-  spawned_at: string;
-  expires_at: string;
-  daylight_only: boolean;
-  has_photo: boolean;
-};
-
-export type BTFind = {
-  id: string;
-  chest_id: string;
-  lat: number;
-  lng: number;
-  found_at: string;
-  has_photo: boolean;
-  photo_base64?: string | null;
-};
-
-export type BTNoGoZone = {
-  id: string;
-  name: string;
-  polygon: { lat: number; lng: number }[];
+export type BTSoloHunt = {
+  user_id: string;
+  area: BTArea;
   created_at: string;
+  status: 'active';
+};
+
+export type BTSoloFind = {
+  id: string;
+  lat: number;
+  lng: number;
+  photo_base64: string | null;
+  found_at: string;
+  xp_awarded: number;
+};
+
+export type BTCompassReading = {
+  distance_m: number;
+  bearing_deg: number;
+  in_find_ring: boolean;
+  find_ring_m: number;
+};
+
+export type BTFindResult = {
+  ok: boolean;
+  find_id: string;
+  xp_awarded: number;
+  new_total_xp: number;
+  distance_m: number;
+  next_chest_ready?: boolean;
+};
+
+export type BTGroupMember = {
+  user_id: string;
+  name: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  invited_at?: string;
+  responded_at?: string | null;
+  joined_via_code?: boolean;
+};
+
+export type BTGroup = {
+  id: string;
+  code: string;
+  name: string;
+  creator_id: string;
+  is_creator: boolean;
+  my_status: 'creator' | 'accepted' | 'pending' | 'rejected' | null;
+  status: 'lobby' | 'hunting' | 'finished';
+  area: BTArea;
+  members: BTGroupMember[];
+  chest: {
+    photo_base64: string | null;
+    map_screenshot_base64: string | null;
+    buried_at: string | null;
+  } | null;
+  found_by?: string | null;
+  found_at?: string | null;
+  created_at: string;
+};
+
+export type BTInviteResult = {
+  invited: { user_id: string; name: string }[];
+  rejected_too_far: { user_id: string; distance_km: number; reason: string }[];
+  rejected_other: { user_id: string; reason: string }[];
+  group: BTGroup;
 };
 
 export type ChatPreferencesPatch = {

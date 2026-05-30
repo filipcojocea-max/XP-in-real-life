@@ -1,0 +1,37 @@
+{
+  "summary": "Backend regression for the rewritten Buried Treasure feature. Built /app/backend/tests/test_buried_treasure_v2.py with 35 tests across SOLO, FRIENDS (groups), join-by-code, available-lobby, and old-endpoints-gone. Result: 34 PASSED / 1 SKIPPED (skip is intentional: the success path of /api/bt/solo/find cannot be exercised purely via public API since chest coordinates are deliberately hidden — the equivalent TestSoloFindDirect class resolves coords via motor and passes). Every spec'd behaviour is verified: radius clamping (100m..25km), chest concealment in responses, compass shape ({distance_m, bearing_deg, in_find_ring, find_ring_m=15}), 15 m proximity + photo enforcement, 100 XP award + auto-assign of next solo chest in same area, group 6-char code (uppercase A-Z minus ambiguous chars + 2-9), creator auto-accepted, 50 km friend-area check with rejected_too_far/rejected_other arrays, non-creator cannot invite (403), bury blocked until all invitees accept, creator-cannot-find-own-chest (403), winner flips group to 'finished' with found_by/found_at, compass+find blocked once finished, join-by-code uppercases input/rejects far users/404 on unknown/400 on short, groups/available lists lobby groups created by friends. Push-token wiring did not raise — push collection lookups completed without traceback during invite/accept/reject/bury/find calls (backend logs clean).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_buried_treasure_v2.py",
+    "/app/test_reports/pytest/bt_v2_results.xml"
+  ],
+  "action_items": [
+    "Optional: /app/backend/buried_treasure.py is 880 lines (>700-line guideline). Consider splitting into bt_solo.py + bt_groups.py + bt_shared.py if more flows are added."
+  ],
+  "critical_code_review_comments": [
+    "buried_treasure.py = 880 lines, slightly above the 700-line module budget. Functionally fine, but a future split would help readability.",
+    "Solo success-path cannot be tested through the public API alone because chest coords are intentionally hidden. The test suite covers it via a direct motor read to db.bt_solo — main agent should keep this constraint in mind if a future change adds a /debug/chest endpoint.",
+    "Old /api/bt/* endpoints (chest/today, finds, no-go-zones, settings, feed, matches) all return 404 cleanly — no leftover handlers, no tracebacks in backend logs."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_buried_treasure_v2.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (34/34 executed, 1 intentional skip replaced by direct-DB equivalent which also passed)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Two throwaway gmail.com test users registered per session (TEST_bt_*@gmail.com) and befriended to admin to exercise the 50 km friend-area logic. Test data is left in DB; main agent can purge by user_id prefix or email LIKE 'TEST_bt_%' if desired.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Use admin filip.cojocea122@gmail.com / XL98CZW5599. Public URL: https://emergent-mobile-app-4.preview.emergentagent.com. To re-run: pytest /app/backend/tests/test_buried_treasure_v2.py -v. The TestSoloFindDirect and TestGroups::test_member_find_success tests read chest coords directly from MongoDB (motor + /app/backend/.env MONGO_URL/DB_NAME) — if those env vars move, those two tests will skip but the rest still runs against the public URL.",
+  "rca_of_issue": "No bugs found — all 16 spec'd behaviours from the review request behaved exactly as described."
+}
