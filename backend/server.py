@@ -2773,7 +2773,10 @@ async def stats_by_area(user_id: str = Depends(get_user_or_legacy)):
 async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or_legacy)):
     if not await _is_admin_user(user_id):
         raise HTTPException(403, "Admin only.")
-    target = await db.profile.find_one({"_id": player_id}, {"_id": 1})
+    target = await db.profile.find_one(
+        {"_id": player_id},
+        {"_id": 1, "boost_inventory": 1},
+    )
     if not target:
         raise HTTPException(404, "Player not found.")
 
@@ -2814,6 +2817,93 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
         if dt:
             goal_by_day[dt] = goal_by_day.get(dt, 0) + int(g.get("xp_awarded", 0) or 0)
 
+    # ── Points+ History + Money Spent prep ──────────────────────────
+    # Build a per-day index of (1) which boost types were active and
+    # (2) how much was spent on multipliers that day. We do it once up
+    # front for the whole 30-day window so both weekly + monthly
+    # buckets are essentially free.
+    #
+    # Active-on-day rule: entry.activated_at.date() ≤ day ≤ entry.expires_at.date()
+    # Spend-on-day rule:  entry.acquired_at.date() == day AND source ∈ {purchase, stripe}
+    # Money:              prefer snapshotted entry.paid_amount; fall back
+    #                     to current boost_pricing.effective_price for
+    #                     legacy entries that don't have it yet.
+    inv: list = target.get("boost_inventory") or []
+    # Current pricing lookup (used as the historical-fallback for any
+    # entries that pre-date the paid_amount snapshot field).
+    pricing_rows = await db.boost_pricing.find({}, {"_id": 0}).to_list(20)
+    cur_price_by_type: dict[str, tuple[float, str]] = {}
+    for row in pricing_rows:
+        bid = (row.get("boost_id") or "").strip()
+        if not bid:
+            continue
+        pub = _pricing_doc_to_pub(row, bid, False)
+        cur_price_by_type[bid] = (
+            float(pub.get("effective_price") or 0.0),
+            pub.get("currency") or DEFAULT_PRICE_CURRENCY,
+        )
+
+    def _to_date(iso: str | None):
+        if not iso:
+            return None
+        try:
+            return datetime.fromisoformat(iso.replace("Z", "+00:00")).date()
+        except Exception:
+            try:
+                return datetime.fromisoformat(iso[:19]).date()
+            except Exception:
+                return None
+
+    boosts_active_by_day: dict[str, list[dict]] = {}
+    spend_by_day: dict[str, float] = {}
+    spend_currency: Optional[str] = None
+    for entry in inv:
+        btype = entry.get("type") or ""
+        # (1) Active-on-day rollup
+        if entry.get("activated"):
+            act_d = _to_date(entry.get("activated_at"))
+            exp_d = _to_date(entry.get("expires_at"))
+            if act_d and exp_d and exp_d >= act_d:
+                d = act_d
+                while d <= exp_d:
+                    boosts_active_by_day.setdefault(d.isoformat(), []).append({
+                        "type": btype,
+                        "multiplier": int(entry.get("multiplier") or 1),
+                        "duration_days": int(entry.get("duration_days") or 1),
+                        "label": entry.get("label") or "",
+                        "entry_id": entry.get("id"),
+                    })
+                    d += timedelta(days=1)
+        # (2) Spend-on-day rollup (purchase source only)
+        if entry.get("source") in ("purchase", "stripe"):
+            spend_d = _to_date(entry.get("acquired_at"))
+            if spend_d:
+                amt = entry.get("paid_amount")
+                cur = entry.get("paid_currency")
+                if amt is None and btype in cur_price_by_type:
+                    amt, cur = cur_price_by_type[btype]
+                try:
+                    amt_f = float(amt or 0.0)
+                except (TypeError, ValueError):
+                    amt_f = 0.0
+                if amt_f > 0:
+                    spend_by_day[spend_d.isoformat()] = (
+                        spend_by_day.get(spend_d.isoformat(), 0.0) + amt_f
+                    )
+                    # Pick the first non-empty currency we see and stick
+                    # with it. Boosts are priced in a single store
+                    # currency so this is correct in practice.
+                    if not spend_currency and cur:
+                        spend_currency = cur
+    if not spend_currency:
+        # Fall back to the currency of any current pricing row so the
+        # chart still has a sensible suffix even when the player has
+        # spent $0 so far.
+        for _, (_, cur) in cur_price_by_type.items():
+            spend_currency = cur
+            break
+        spend_currency = spend_currency or DEFAULT_PRICE_CURRENCY
+
     async def _bucket(days_back: int, label_fmt: str) -> list[dict]:
         out: list[dict] = []
         for i in range(days_back - 1, -1, -1):
@@ -2838,6 +2928,10 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
                     e for e in logs
                     if e.get("kind") not in ("penalty", "goal_complete")
                 ]),
+                # Points+ History — list of boosts active on this day.
+                "boosts_active": boosts_active_by_day.get(d_str, []),
+                # Money spent on multipliers acquired on this day.
+                "boost_spend": round(spend_by_day.get(d_str, 0.0), 2),
             })
         return out
 
@@ -2855,6 +2949,7 @@ async def admin_player_charts(player_id: str, user_id: str = Depends(get_user_or
         "weekly": {"days": weekly},
         "monthly": {"days": monthly},
         "by_area": by_area,
+        "boost_spend_currency": spend_currency,
     }
 
 
@@ -9391,10 +9486,31 @@ async def boost_pricing_discount(
 
 
 async def _grant_boost_to_inventory(user_id: str, boost_id: str, source: str = "stripe"):
-    """Adds a boost to the user's inventory (idempotent per Stripe txn)."""
+    """Adds a boost to the user's inventory (idempotent per Stripe txn).
+
+    For paid grants ('stripe' / 'purchase') we additionally snapshot the
+    *effective* price + currency at time of grant onto the inventory
+    entry (fields `paid_amount`, `paid_currency`). This is what powers
+    the per-day "Money Spent on Multipliers" chart on the Creator's
+    player drilldown — once snapshotted it stays accurate even if the
+    Creator later changes the price in /admin pricing.
+    """
     if boost_id not in BOOST_DEFS:
         return False
     entry = _make_inventory_entry(boost_id, source=source)
+    if source in ("stripe", "purchase"):
+        try:
+            pricing_doc = await db.boost_pricing.find_one(
+                {"boost_id": boost_id}, {"_id": 0}
+            )
+            pub = _pricing_doc_to_pub(pricing_doc, boost_id, False)
+            entry["paid_amount"] = float(pub.get("effective_price") or 0.0)
+            entry["paid_currency"] = pub.get("currency") or DEFAULT_PRICE_CURRENCY
+        except Exception:
+            # Pricing lookup is best-effort. If anything goes wrong we
+            # still want the grant to succeed — the chart will fall back
+            # to current-pricing approximation for this entry.
+            pass
     await db.profile.update_one(
         {"_id": user_id},
         {

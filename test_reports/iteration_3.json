@@ -1,0 +1,33 @@
+{
+  "summary": "Backend regression for the new Points+ History and Money-Spent-on-Multipliers charts on GET /api/admin/players/{player_id}/charts. Added /app/backend/tests/test_admin_player_charts.py with 9 pytest cases — all pass. Verified: 403 for non-admin, 404 for unknown player, original fields preserved (xp/gifted_xp/penalty_xp/goal_xp/tasks/by_area), new top-level boost_spend_currency, per-day boosts_active list with {type, multiplier, duration_days, label, entry_id}, multi-day timeline (double_week spans 7 consecutive days; double_day with activated_at=D-3 / expires_at=D shows on 4 days), boost_spend bucketed by acquired_at and summing ONLY source in (purchase, stripe), legacy purchase entries without paid_amount fallback to current boost_pricing.effective_price, and POST /api/boosts/purchase now snapshots paid_amount + paid_currency on the new boost_inventory entry. No regressions detected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_player_charts.py",
+    "/app/test_reports/pytest/admin_player_charts.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 10,269 lines — well past the 700-line guideline. Splitting routers into modules (admin, boosts, charts, auth) would help long-term maintainability, but it's a structural refactor not blocking this feature."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_player_charts.py"
+  ],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "not_tested"
+  },
+  "seed_data_creation": "Test seeds 5 controlled boost_inventory entries directly on the admin profile (tagged with TEST_charts_<uuid> so they are pulled out in teardown), and snapshots+restores boost_pricing rows for triple_day/double_day/double_week/double_month. Non-admin user is registered fresh via /api/auth/register with a randomized gmail.com email (the backend MX-validates domains so example.com is rejected — captured in the test fixture).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend MX-validates email domains on /api/auth/register — use real domains like gmail.com when creating throwaway accounts. Charts test seeds directly into MongoDB; the user_id under test is the admin's own profile to avoid spinning up a second activated player. boost_inventory entries are tagged with _test_tag for safe teardown. boost_pricing is snapshotted before mutation and fully restored at teardown.",
+  "rca_of_issue": "N/A — feature works as specified."
+}

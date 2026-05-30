@@ -833,12 +833,20 @@ export const api = {
   // Returns the same data shape used by the user's own /stats/weekly +
   // /stats/monthly + /stats/by-area endpoints, bundled together for the
   // "View Progress charts" drill-down on any player profile.
+  //
+  // Each day also carries:
+  //   • boosts_active — list of Points+ multipliers active on that day
+  //     (used to render the stacked "Points+ History" bar)
+  //   • boost_spend — money spent on multipliers acquired on that day
+  //     (used to render the "Money Spent on Multipliers" bar)
+  // `boost_spend_currency` is the ISO code shared across all spend bars.
   adminPlayerCharts: (playerId: string) =>
     req<{
       user_id: string;
-      weekly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
-      monthly: { days: { date: string; day: string; xp: number; gifted_xp: number; penalty_xp?: number; goal_xp?: number; tasks: number }[] };
+      weekly: { days: AdminPlayerChartDay[] };
+      monthly: { days: AdminPlayerChartDay[] };
       by_area: Record<string, number>;
+      boost_spend_currency: string;
     }>(`/admin/players/${playerId}/charts`),
 
   // ── XP Penalty (Creator-only) ────────────────────────────────────
@@ -1791,6 +1799,32 @@ export type AdminLeaderboardRow = Player & {
   rank: number;
   period_xp: number;
   created_at: string | null;
+};
+
+/** A single day on the Creator's player drilldown charts (weekly + monthly).
+ *
+ * The same row drives FOUR mini-charts that share the day-axis:
+ *   1. Daily XP bar (xp + gifted_xp + goal_xp − penalty_xp)
+ *   2. Monthly XP line
+ *   3. Points+ History — colored boost blocks (`boosts_active`)
+ *   4. Money Spent on Multipliers (`boost_spend`)
+ */
+export type AdminPlayerChartDay = {
+  date: string;             // YYYY-MM-DD
+  day: string;              // Display label (e.g. "Mon" or "29")
+  xp: number;
+  gifted_xp: number;
+  penalty_xp?: number;
+  goal_xp?: number;
+  tasks: number;
+  boosts_active: {
+    type: string;           // e.g. "triple_day" | "double_day" | "double_week" | "double_month"
+    multiplier: number;
+    duration_days: number;
+    label: string;
+    entry_id?: string;
+  }[];
+  boost_spend: number;      // money spent on multipliers ACQUIRED on this day
 };
 
 export type Player = {

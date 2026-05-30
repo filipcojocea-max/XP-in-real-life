@@ -261,11 +261,26 @@ export default function AdminPlayerScreen() {
           {chartsLoading ? (
             <ActivityIndicator color={colors.cyan} style={{ marginVertical: 20 }} />
           ) : charts ? (
-            chartView === 'week' ? (
-              <BarChart days={charts.weekly.days} />
-            ) : (
-              <LineChart days={charts.monthly.days} />
-            )
+            <>
+              {chartView === 'week' ? (
+                <BarChart days={charts.weekly.days} />
+              ) : (
+                <LineChart days={charts.monthly.days} />
+              )}
+              {/* Points+ History — colored multiplier bands, aligned
+                  day-by-day with the chart above. Same boost type across
+                  consecutive days renders as ONE connected block. */}
+              <PointsHistoryChart
+                days={chartView === 'week' ? charts.weekly.days : charts.monthly.days}
+              />
+              {/* Money Spent on Multipliers — small bar per day, sums
+                  paid_amount for purchases acquired on that day. Uses
+                  the player's local currency from boost_pricing. */}
+              <MoneySpentChart
+                days={chartView === 'week' ? charts.weekly.days : charts.monthly.days}
+                currency={charts.boost_spend_currency || 'USD'}
+              />
+            </>
           ) : (
             <Text style={[styles.subtitle, { textAlign: 'center', marginVertical: 10 }]}>No data</Text>
           )}
@@ -490,6 +505,231 @@ function LineChart({ days }: { days: { day: string; xp: number; penalty_xp?: num
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// <PointsHistoryChart /> — short stacked bar that shows which Points+
+// multipliers were active on each day. Same boost across consecutive
+// days renders as ONE long connected block (one "row" per boost type).
+//
+// Colors are fixed by boost type so the Creator can read the chart at
+// a glance without a legend:
+//    triple_day    → yellow
+//    double_day    → blue
+//    double_week   → purple
+//    double_month  → green
+// ─────────────────────────────────────────────────────────────────────
+const BOOST_COLORS: Record<string, string> = {
+  triple_day:   '#FACC15',  // yellow
+  double_day:   '#3B82F6',  // blue
+  double_week:  '#A855F7',  // purple
+  double_month: '#22C55E',  // green
+};
+// Render order — top row down. Longer-duration multipliers sit at the
+// bottom so the long green/purple bands form a "base" and the short
+// yellow/blue daily boosts stack on top of them.
+const BOOST_ROW_ORDER = ['triple_day', 'double_day', 'double_week', 'double_month'];
+const BOOST_LABELS: Record<string, string> = {
+  triple_day:   '3× / 1 day',
+  double_day:   '2× / 1 day',
+  double_week:  '2× / 7 days',
+  double_month: '2× / 1 month',
+};
+
+function PointsHistoryChart({ days }: { days: { day: string; boosts_active: { type: string }[] }[] }) {
+  // Compute which boost types appear at all in the window — we only
+  // render rows for those, so the chart isn't padded with empty bands.
+  const presentTypes = useMemo(() => {
+    const set = new Set<string>();
+    for (const d of days) for (const b of d.boosts_active || []) set.add(b.type);
+    // Stable ordering per BOOST_ROW_ORDER, then anything unknown last.
+    const ordered = BOOST_ROW_ORDER.filter((t) => set.has(t));
+    set.forEach((t) => { if (!ordered.includes(t)) ordered.push(t); });
+    return ordered;
+  }, [days]);
+
+  const ROW_H = 14;
+  const ROW_GAP = 4;
+  const pad = 18;
+  const chartH = Math.max(50, presentTypes.length * (ROW_H + ROW_GAP) + pad * 2);
+  const innerW = CHART_W - pad * 2;
+  const colW = innerW / Math.max(1, days.length);
+
+  if (presentTypes.length === 0) {
+    return (
+      <View style={{ marginTop: spacing.md }}>
+        <Text style={styles.subKicker}>POINTS+ HISTORY</Text>
+        <View style={styles.emptyMini}>
+          <Text style={styles.emptyMiniText}>No multipliers active in this window.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // For each boost type, collapse consecutive active days into spans
+  // so we draw ONE rectangle stretched across [startIdx..endIdx].
+  type Span = { start: number; end: number };
+  const spansByType: Record<string, Span[]> = {};
+  for (const t of presentTypes) {
+    const spans: Span[] = [];
+    let curStart = -1;
+    for (let i = 0; i < days.length; i++) {
+      const active = (days[i].boosts_active || []).some((b) => b.type === t);
+      if (active && curStart < 0) curStart = i;
+      if ((!active || i === days.length - 1) && curStart >= 0) {
+        const end = active ? i : i - 1;
+        spans.push({ start: curStart, end });
+        curStart = -1;
+      }
+    }
+    spansByType[t] = spans;
+  }
+
+  return (
+    <View style={{ marginTop: spacing.md }}>
+      <Text style={styles.subKicker}>POINTS+ HISTORY</Text>
+      <Svg width={CHART_W} height={chartH} style={styles.chartSvg}>
+        {presentTypes.map((t, rowIdx) => {
+          const y = pad + rowIdx * (ROW_H + ROW_GAP);
+          const color = BOOST_COLORS[t] || colors.cyan;
+          return (
+            <React.Fragment key={t}>
+              {/* Faint background track so empty days are visually clear */}
+              <Rect
+                x={pad}
+                y={y}
+                width={innerW}
+                height={ROW_H}
+                rx={3}
+                fill={color}
+                opacity={0.10}
+              />
+              {/* Connected spans — one rect per consecutive active run */}
+              {spansByType[t].map((s, idx) => {
+                const x = pad + s.start * colW + 1;
+                const w = (s.end - s.start + 1) * colW - 2;
+                return (
+                  <Rect
+                    key={`${t}-${idx}`}
+                    x={x}
+                    y={y}
+                    width={Math.max(2, w)}
+                    height={ROW_H}
+                    rx={3}
+                    fill={color}
+                    stroke={color}
+                    strokeWidth={1}
+                    opacity={0.95}
+                  />
+                );
+              })}
+              {/* Row label on the left margin */}
+              <SvgText
+                x={pad + 4}
+                y={y + ROW_H * 0.72}
+                fontSize={9}
+                fill="#fff"
+                fontWeight="800"
+              >
+                {BOOST_LABELS[t] || t}
+              </SvgText>
+            </React.Fragment>
+          );
+        })}
+        {/* Day labels — aligned with the chart above so the columns line up. */}
+        {days.map((d, i) => {
+          const x = pad + (i + 0.5) * colW;
+          return (
+            <SvgText
+              key={`l-${i}`}
+              x={x}
+              y={chartH - 4}
+              fontSize={9}
+              fill={colors.textMuted}
+              textAnchor="middle"
+            >
+              {d.day}
+            </SvgText>
+          );
+        })}
+      </Svg>
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// <MoneySpentChart /> — small bar chart of money the player spent on
+// Points+ multipliers, bucketed by acquisition date. Aligns 1:1 with
+// the day columns of the two charts above so the Creator can quickly
+// correlate "they bought 2x today" → "their XP spiked tomorrow".
+// ─────────────────────────────────────────────────────────────────────
+const CURRENCY_SYMBOL: Record<string, string> = {
+  USD: '$', AUD: 'A$', CAD: 'C$', EUR: '€', GBP: '£',
+  JPY: '¥', INR: '₹', RON: 'lei', CHF: 'CHF', BRL: 'R$',
+};
+
+function MoneySpentChart({
+  days,
+  currency,
+}: {
+  days: { day: string; boost_spend: number }[];
+  currency: string;
+}) {
+  const sym = CURRENCY_SYMBOL[currency?.toUpperCase()] || '';
+  const max = useMemo(
+    () => Math.max(1, ...days.map((d) => d.boost_spend || 0)),
+    [days],
+  );
+  const pad = 18;
+  const chartH = 90;
+  const innerW = CHART_W - pad * 2;
+  const innerH = chartH - pad * 2;
+  const colW = innerW / Math.max(1, days.length);
+  const bw = colW * 0.55;
+
+  const total = useMemo(
+    () => days.reduce((s, d) => s + (d.boost_spend || 0), 0),
+    [days],
+  );
+
+  const fmt = (n: number) => {
+    if (!n) return '0';
+    if (n >= 1000) return (Math.round(n * 10) / 10).toFixed(0);
+    return (Math.round(n * 100) / 100).toString();
+  };
+
+  return (
+    <View style={{ marginTop: spacing.md }}>
+      <Text style={styles.subKicker}>MONEY SPENT ON MULTIPLIERS</Text>
+      <Svg width={CHART_W} height={chartH} style={styles.chartSvg}>
+        <Line x1={pad} y1={pad + innerH} x2={pad + innerW} y2={pad + innerH} stroke={colors.border} strokeWidth={1} />
+        {days.map((d, i) => {
+          const spend = d.boost_spend || 0;
+          const x = pad + i * colW + (colW - bw) / 2;
+          const h = spend > 0 ? Math.max(2, (spend / max) * innerH) : 0;
+          const y = pad + innerH - h;
+          return (
+            <React.Fragment key={`m-${i}`}>
+              {h > 0 ? (
+                <Rect x={x} y={y} width={bw} height={h} rx={3} fill="#22D3EE" stroke="#0E7490" strokeWidth={1} />
+              ) : null}
+              <SvgText x={x + bw / 2} y={pad + innerH + 11} fontSize={9} fill={colors.textMuted} textAnchor="middle">
+                {d.day}
+              </SvgText>
+              {spend > 0 ? (
+                <SvgText x={x + bw / 2} y={y - 3} fontSize={9} fill="#22D3EE" fontWeight="800" textAnchor="middle">
+                  {sym}{fmt(spend)}
+                </SvgText>
+              ) : null}
+            </React.Fragment>
+          );
+        })}
+      </Svg>
+      <Text style={styles.chartCaption}>
+        Total: <Text style={{ color: '#22D3EE', fontWeight: '900' }}>{sym}{fmt(total)} {currency?.toUpperCase()}</Text>
+      </Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   header: {
@@ -554,6 +794,28 @@ const styles = StyleSheet.create({
   toggleTextActive: { color: colors.cyan, fontWeight: '900' },
   chartSvg: { alignSelf: 'center' },
   chartCaption: { color: colors.textMuted, fontSize: 10, textAlign: 'center', marginTop: 4 },
+  // Sub-headers for the secondary charts (Points+ History, Money Spent)
+  // stacked under the primary BarChart / LineChart inside the same card.
+  subKicker: {
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  emptyMini: {
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderStyle: 'dashed',
+    borderRadius: radii.md,
+  },
+  emptyMiniText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
   kicker: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.5, marginBottom: 8 },
   rowMeta: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', paddingVertical: 6, gap: 12 },
   rowMetaLabel: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
