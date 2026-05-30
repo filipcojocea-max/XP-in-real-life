@@ -148,7 +148,19 @@ export default function ProfileScreen() {
           <Ring size={150} stroke={8} progress={profile.xp_progress} color={profile.is_admin ? '#FFD700' : colors.amber}>
             <View style={[styles.avatar, profile.is_admin && { borderColor: '#FFD700', borderWidth: 3 }]}>
               {profile.avatar_base64 ? (
-                <Image source={{ uri: profile.avatar_base64 }} style={styles.avatarImg} />
+                <Image
+                  source={{
+                    // Backend now returns RAW base64 (the data: prefix
+                    // is stripped server-side via _normalize_avatar_b64
+                    // so friend / leaderboard / admin avatar consumers
+                    // can all use the same `data:image/jpeg;base64,…`
+                    // template without ending up with a double prefix).
+                    uri: String(profile.avatar_base64).startsWith('data:')
+                      ? String(profile.avatar_base64)
+                      : `data:image/jpeg;base64,${profile.avatar_base64}`,
+                  }}
+                  style={styles.avatarImg}
+                />
               ) : (
                 // Single source of truth for the user's progress emblem.
                 // For the admin/Creator → gold Lv999 shield. Otherwise →

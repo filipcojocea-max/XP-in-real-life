@@ -867,8 +867,20 @@ function PlayerProfileModal({
             <View style={[styles.modalAvatarWrap]}>
               {player.avatar_base64 && (player.friend_status === 'friends' || player.friend_status === 'self') ? (
                 <Image
-                  source={{ uri: `data:image/jpeg;base64,${player.avatar_base64}` }}
+                  source={{
+                    // The onboarding flow saves the avatar pre-prefixed
+                    // as "data:image/jpeg;base64,XXX" while the legacy
+                    // /profile/avatar endpoint accepts either. Normalize
+                    // here so a double-prefix never breaks the URI and
+                    // friends always see the photo (regression 2026-05-30:
+                    // friends were showing the shield because of the
+                    // double prefix).
+                    uri: String(player.avatar_base64).startsWith('data:')
+                      ? String(player.avatar_base64)
+                      : `data:image/jpeg;base64,${player.avatar_base64}`,
+                  }}
                   style={styles.bigAvatar}
+                  testID={`friend-avatar-${player.user_id}`}
                 />
               ) : (
                 // Privacy rule: the user-uploaded photo is ONLY revealed

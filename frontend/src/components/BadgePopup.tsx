@@ -81,13 +81,61 @@ export function BadgePopup() {
     ]).start();
   }, [current, scaleAnim, fadeAnim]);
 
+  // ── Long-press to dismiss (2026-05-30 spec) ──────────────────────
+  // The "Collect this badge" CTA now requires a deliberate 2-second
+  // hold to close the popup. This prevents accidental dismissals (e.g.
+  // tapping through a Continue button when scrolling rapidly through
+  // task completions) and gives the celebratory animation room to
+  // breathe. We also drop the backdrop tap-to-dismiss so the only way
+  // out is the explicit long-press on the CTA.
+  const HOLD_MS = 2000;
+  const [holdProgress, setHoldProgress] = useState(0);
+  const holdAnim = useRef(new Animated.Value(0)).current;
+
   const dismiss = useCallback(() => {
     Animated.timing(fadeAnim, {
       toValue: 0,
       duration: 180,
       useNativeDriver: true,
-    }).start(() => setCurrent(null));
-  }, [fadeAnim]);
+    }).start(() => {
+      setCurrent(null);
+      // Reset hold state for the next badge in the queue.
+      setHoldProgress(0);
+      holdAnim.setValue(0);
+    });
+  }, [fadeAnim, holdAnim]);
+
+  const onPressIn = useCallback(() => {
+    setHoldProgress(0.001);   // kick the bar into view immediately
+    holdAnim.setValue(0);
+    Animated.timing(holdAnim, {
+      toValue: 1,
+      duration: HOLD_MS,
+      useNativeDriver: false,
+    }).start(({ finished }) => {
+      if (finished) {
+        // 2 seconds elapsed without release → collect.
+        dismiss();
+      }
+    });
+  }, [holdAnim, dismiss]);
+
+  const onPressOut = useCallback(() => {
+    // Cancel the in-flight animation if the user lifts early.
+    holdAnim.stopAnimation((value: number) => {
+      if (value < 1) {
+        setHoldProgress(0);
+        holdAnim.setValue(0);
+      }
+    });
+  }, [holdAnim]);
+
+  // Track the animated value so we can render a progress bar inside
+  // the CTA. addListener fires up to 60 fps so this stays smooth.
+  useEffect(() => {
+    const id = holdAnim.addListener(({ value }) => setHoldProgress(value));
+    return () => holdAnim.removeListener(id);
+  }, [holdAnim]);
 
   if (!current) return null;
 
@@ -96,15 +144,13 @@ export function BadgePopup() {
       visible
       transparent
       animationType="none"
-      onRequestClose={dismiss}
+      onRequestClose={() => { /* hardware back is a no-op — must hold the CTA */ }}
       testID="badge-popup"
     >
       <Animated.View style={[styles.backdrop, { opacity: fadeAnim }]}>
-        <TouchableOpacity
-          style={StyleSheet.absoluteFill}
-          activeOpacity={1}
-          onPress={dismiss}
-        />
+        {/* Backdrop is intentionally NOT a TouchableOpacity any more.
+            Per 2026-05-30 spec the only way to close the popup is the
+            2-second hold on "Collect this badge". */}
         <Animated.View
           style={[
             styles.card,
@@ -122,13 +168,28 @@ export function BadgePopup() {
             {(current as any).encouraging_text || current.description}
           </Text>
           <Text style={styles.descSubtle}>{current.description}</Text>
+          {/* Hold-to-collect CTA. The fill bar inside the pill animates
+              from 0→100% over 2 s. Releasing early resets it. */}
           <TouchableOpacity
             style={styles.cta}
-            onPress={dismiss}
+            onPressIn={onPressIn}
+            onPressOut={onPressOut}
+            activeOpacity={0.85}
             testID="badge-popup-close"
+            delayPressIn={0}
           >
-            <Text style={styles.ctaText}>Continue</Text>
+            <View
+              pointerEvents="none"
+              style={[
+                styles.ctaFill,
+                { width: `${Math.min(100, Math.round(holdProgress * 100))}%` },
+              ]}
+            />
+            <Text style={styles.ctaText}>
+              {holdProgress > 0 ? 'Hold…' : 'Collect this badge'}
+            </Text>
           </TouchableOpacity>
+          <Text style={styles.ctaHint}>Press and hold for 2 seconds to collect</Text>
         </Animated.View>
       </Animated.View>
     </Modal>
@@ -203,12 +264,36 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFD700',
     borderRadius: radii.pill,
     paddingHorizontal: 36,
-    paddingVertical: 12,
+    paddingVertical: 14,
+    overflow: 'hidden',
+    position: 'relative',
+    minWidth: 220,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // The cyan progress strip that fills the CTA pill from left → right
+  // as the user holds the button. Rendered behind the label via absolute
+  // positioning; pointerEvents=none on the View so the press stays on
+  // the parent TouchableOpacity.
+  ctaFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#22C55E',
+    opacity: 0.55,
   },
   ctaText: {
     color: '#000',
     fontSize: 14,
     fontWeight: '900',
     letterSpacing: 0.8,
+  },
+  ctaHint: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontStyle: 'italic',
+    marginTop: 10,
+    textAlign: 'center',
   },
 });

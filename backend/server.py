@@ -759,7 +759,7 @@ def serialize_profile(prof: dict) -> dict:
         "onboarding_complete": prof.get("onboarding_complete", False),
         "onboarding": prof.get("onboarding", {}),
         "bio": prof.get("bio", ""),
-        "avatar_base64": prof.get("avatar_base64"),
+        "avatar_base64": _normalize_avatar_b64(prof.get("avatar_base64")),
         "wake_time": prof.get("wake_time", "07:00"),
         "morning_setup_done": prof.get("morning_setup_done", False),
         # Adaptive Work-Life Scheduler (overrides static day_start_time
@@ -1616,12 +1616,41 @@ async def update_onboarding(body: OnboardingData, user_id: str = Depends(get_use
     return serialize_profile(prof)
 
 
+def _normalize_avatar_b64(value):
+    """Strip the `data:image/...;base64,` prefix if present so every API
+    response returns plain raw base64. Some users uploaded their avatar
+    via the onboarding flow which (historically) saved the value with
+    the data-URL prefix included; other users uploaded via
+    /profile/avatar which accepted either format. This helper unifies
+    the two on read so every frontend consumer can do the same
+    `uri: data:image/jpeg;base64,${avatar_base64}` without ending up
+    with a malformed double-prefix that breaks <Image /> rendering.
+
+    Returns None if `value` is None/empty.
+    """
+    if not value:
+        return None
+    s = str(value)
+    if s.startswith("data:") and "," in s:
+        try:
+            return s.split(",", 1)[1] or None
+        except Exception:
+            return None
+    return s
+
+
 @api_router.post("/profile/avatar")
 async def set_avatar(body: AvatarData, user_id: str = Depends(get_user_or_legacy)):
     await get_or_create_profile_for(user_id)
+    # Normalize on write too — that way newly-uploaded avatars land in
+    # the database as raw base64 regardless of which client sent the
+    # data-URL prefix. Old documents are repaired lazily by the read
+    # path (_normalize_avatar_b64 inside _serialize_player /
+    # serialize_profile).
+    cleaned = _normalize_avatar_b64(body.avatar_base64)
     await db.profile.update_one(
         {"_id": user_id},
-        {"$set": {"avatar_base64": body.avatar_base64}},
+        {"$set": {"avatar_base64": cleaned}},
     )
     prof = await db.profile.find_one({"_id": user_id})
     return serialize_profile(prof)
@@ -3925,7 +3954,7 @@ def _serialize_player(prof: dict, status: str = "none", viewer_is_admin: bool = 
         "active_goals_count": int(prof.get("active_goals_count", 0) or 0),
         "total_goals_count": int(prof.get("total_goals_count", 0) or 0),
         "bio": prof.get("bio") or "",
-        "avatar_base64": prof.get("avatar_base64"),
+        "avatar_base64": _normalize_avatar_b64(prof.get("avatar_base64")),
         "friend_status": status,  # none | pending_outgoing | pending_incoming | friends | self
         "is_admin": bool(is_admin),
         "is_admin_view": bool(show_unlimited),  # frontend renders ∞ + golden when true
