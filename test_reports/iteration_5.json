@@ -1,0 +1,39 @@
+{
+  "summary": "Backend regression for Buried Treasure Steps 2 (Group Notification Toggle) + 3 (Smart Availability / Awake-Hours Filter). Built /app/backend/tests/test_bt_schedule_toggle.py with 16 focused pytest cases against the deployed public URL. Result: 16/16 PASSED. Every spec'd behaviour verified: /api/bt/schedule GET returns {schedule:{awake_start, awake_end, sleep_all_day, timezone, updated_at, is_default}, is_awake_now}; POST persists values + is_default flips to false; sleep_all_day=true forces is_awake_now=false even with a valid window saved; garbage HH:MM ('not-a-time') coerces silently to 08:00/23:00 defaults with 200 status (no 500); wrap-around windows (22:00->06:00) accepted; invalid IANA tz drops silently without rejecting save. Group toggle: POST /bt/groups/{id}/toggle returns {ok:true,enabled:bool}, persists into bt_group_prefs, surfaces in GET /bt/groups/prefs as a {group_id:enabled} map, round-trips ON->OFF->ON correctly; non-member returns 403; non-existent gid returns 404. is_active_now is server-computed and now serialized on every group payload from /bt/groups/mine and /bt/groups/available (verified isinstance bool); /bt/groups/available still returns 200 with the field present even when admin's schedule is sleep_all_day=true. Regression: /bt/settings, /bt/solo/current, /bt/groups/mine all still 200. Backend logs clean throughout the run — no tracebacks, no 500s. The previously-validated rewrite suite (test_buried_treasure_v2.py, 34 tests) remains untouched.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_schedule_toggle.py",
+    "/app/test_reports/pytest/bt_schedule_toggle.xml"
+  ],
+  "action_items": [
+    "Optional: /app/backend/buried_treasure.py is now ~1230 lines (well over the 700-line module budget). Strongly consider splitting into bt_solo.py + bt_groups.py + bt_schedule.py + bt_shared.py before adding more features.",
+    "Optional UX nit: /bt/schedule POST with `sleep_all_day=True` still persists the awake_start/awake_end values sent alongside it, so a later POST with sleep_all_day=False restores them. Confirm with PM whether that's intended (it currently is, and it's the friendliest behaviour)."
+  ],
+  "critical_code_review_comments": [
+    "Schedule validation is correctly defensive: _parse_hhmm returns None on bad input and the route coerces to (8,0)/(23,0) — never 500s on garbage. Good.",
+    "_is_group_active_now uses a per-member round-trip to bt_group_prefs + bt_player_schedule + profile.timezone — for a group with many accepted members this is O(N) DB calls per available-list render. Acceptable for current group sizes but flag if groups grow into the hundreds (consider a single batched $in lookup).",
+    "buried_treasure.py is now ~1230 lines — well above the 700-line guideline. Functionally fine, but a split is overdue.",
+    "GET /bt/schedule includes `updated_at` even when no doc exists (will be null); the `is_default` boolean is the canonical signal — frontend should use that, not the presence of `updated_at`."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_schedule_toggle.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "One throwaway gmail.com helper account registered (TEST_btst_*@gmail.com) to exercise the 403 non-member toggle path. Admin's bt_player_schedule doc is left in DB with awake_start=08:00, awake_end=23:00, sleep_all_day=false, tz=America/New_York — these are the defaults so no cleanup needed. Two TEST_tg_* and one TEST_avail_* lobby groups created by admin remain in bt_groups (status='lobby'); safe to leave or purge by name LIKE 'TEST_%'.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Use admin filip.cojocea122@gmail.com / XL98CZW5599. Public URL via EXPO_PUBLIC_BACKEND_URL. To re-run the Step 2+3 suite: pytest /app/backend/tests/test_bt_schedule_toggle.py -v. The earlier v2 suite (test_buried_treasure_v2.py, 34 tests) is still green and exercises SOLO + groups create/invite/bury/find/join-by-code. Schedule storage = bt_player_schedule {_id:user_id}; toggle storage = bt_group_prefs {_id:'<user_id>:<group_id>'}.",
+  "rca_of_issue": "No bugs found — all Step 2 + Step 3 behaviours from the review request behaved exactly as specified, including all five defensive edge cases (garbage HH:MM, wrap-around windows, sleep_all_day override, invalid timezone, non-member/unknown-id toggle)."
+}

@@ -209,6 +209,7 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
       path === '/bt/feed' ||
       path === '/bt/matches' ||
       path === '/bt/settings' ||
+      path === '/bt/schedule' ||
       path === '/bt/location' ||
       path === '/bt/no-go-zones' ||
       path === '/friends' ||
@@ -390,6 +391,7 @@ const PREWARM_PATHS: string[] = [
   '/bt/feed',
   '/bt/matches',
   '/bt/settings',
+  '/bt/schedule',
   '/bt/no-go-zones',
   '/spot/feed',
   '/spot/finds',
@@ -1292,6 +1294,41 @@ export const api = {
     }),
   btGroupPrefs: () =>
     req<{ prefs: Record<string, boolean> }>('/bt/groups/prefs'),
+  // ── Awake-hours schedule (Smart Availability Filter) ──────────────
+  // HH:MM strings + IANA timezone. `sleep_all_day=true` forces the
+  // user "inactive" 24/7 until they turn it back off.
+  btGetSchedule: () =>
+    req<{
+      schedule: {
+        awake_start: string;
+        awake_end: string;
+        sleep_all_day: boolean;
+        timezone: string;
+        updated_at?: string | null;
+        is_default?: boolean;
+      };
+      is_awake_now: boolean;
+    }>('/bt/schedule'),
+  btSaveSchedule: (
+    awake_start: string,
+    awake_end: string,
+    sleep_all_day: boolean,
+    timezone?: string,
+  ) =>
+    req<{
+      ok: boolean;
+      schedule: {
+        awake_start: string;
+        awake_end: string;
+        sleep_all_day: boolean;
+        timezone: string;
+        updated_at?: string | null;
+      };
+      is_awake_now: boolean;
+    }>('/bt/schedule', {
+      method: 'POST',
+      body: JSON.stringify({ awake_start, awake_end, sleep_all_day, timezone }),
+    }),
   // Solo hunt loop
   btSoloStart: (lat: number, lng: number, radius_m: number) =>
     req<BTSoloHunt>('/bt/solo/start', {
@@ -2470,6 +2507,13 @@ export type BTGroup = {
   found_by?: string | null;
   found_at?: string | null;
   created_at: string;
+  /**
+   * Smart Availability flag — true iff at least one accepted member
+   * is currently inside their awake window AND has notifications
+   * enabled for this group. Server-computed; absence means "unknown,
+   * assume active".
+   */
+  is_active_now?: boolean;
 };
 
 export type BTInviteResult = {

@@ -296,6 +296,12 @@ export default function TreasureHome() {
                      g.status === 'hunting' ? 'Hunting · ' : 'Finished · '}
                     {g.members.length} member{g.members.length === 1 ? '' : 's'}
                   </Text>
+                  {g.status !== 'finished' && g.is_active_now === false ? (
+                    <View style={styles.inactivePill}>
+                      <Ionicons name="moon" size={10} color="#FFB020" />
+                      <Text style={styles.inactivePillText}>INACTIVE · NO ONE AWAKE</Text>
+                    </View>
+                  ) : null}
                 </View>
                 <Text style={styles.groupCode}>{g.code}</Text>
               </TouchableOpacity>
@@ -369,4 +375,12 @@ const styles = StyleSheet.create({
   groupName: { color: colors.text, fontWeight: '800' },
   groupSub: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
   groupCode: { color: colors.cyan, fontWeight: '900', letterSpacing: 1, fontSize: 12 },
+  inactivePill: {
+    alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999,
+    borderWidth: 1, borderColor: '#FFB02055',
+    backgroundColor: '#FFB02022',
+    marginTop: 4,
+  },
+  inactivePillText: { color: '#FFB020', fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
 });

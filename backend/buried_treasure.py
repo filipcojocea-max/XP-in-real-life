@@ -80,6 +80,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+try:
+    # Python 3.9+ stdlib — every Emergent pod ships with this.
+    from zoneinfo import ZoneInfo  # type: ignore
+except Exception:  # pragma: no cover — extremely defensive
+    ZoneInfo = None  # type: ignore
+
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -163,6 +169,146 @@ def _random_point_in_circle(center_lat: float, center_lng: float, radius_m: floa
 
 def _gen_group_code() -> str:
     return "".join(random.choice(GROUP_CODE_ALPHABET) for _ in range(GROUP_CODE_LEN))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Awake-window helpers (Smart Availability Filter)
+# ─────────────────────────────────────────────────────────────────────
+# Per 2026-06-01 product spec, every player has a simple HH:MM "awake
+# window" stored alongside their IANA timezone. When the server picks
+# which groups receive a treasure (or which joinable lobbies a friend
+# can see in /bt/groups/available) it skips groups whose members are
+# all currently OUTSIDE their awake window — i.e. asleep.
+#
+# Storage: `bt_player_schedule` collection
+#   {_id: user_id, awake_start: "HH:MM", awake_end: "HH:MM",
+#    sleep_all_day: bool, timezone: "America/New_York",
+#    updated_at: iso}
+#
+# Defaults: 08:00 → 23:00 local time. `sleep_all_day=True` overrides
+# everything → always inactive.
+DEFAULT_AWAKE_START = "08:00"
+DEFAULT_AWAKE_END = "23:00"
+
+
+def _parse_hhmm(s: Optional[str]) -> Optional[tuple[int, int]]:
+    """Parse 'HH:MM' → (hour, minute). Returns None on malformed input."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        h_str, m_str = s.strip().split(":", 1)
+        h = int(h_str)
+        m = int(m_str)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+    except Exception:
+        pass
+    return None
+
+
+def _fmt_hhmm(t: tuple[int, int]) -> str:
+    return f"{t[0]:02d}:{t[1]:02d}"
+
+
+def _resolve_tz(tz_name: Optional[str]):
+    """Best-effort IANA → tzinfo. Falls back to UTC so callers never crash."""
+    if not tz_name or ZoneInfo is None:
+        return timezone.utc
+    try:
+        return ZoneInfo(tz_name.strip())
+    except Exception:
+        return timezone.utc
+
+
+def _is_in_window(now_minutes: int, start: tuple[int, int], end: tuple[int, int]) -> bool:
+    """Returns True iff `now_minutes` (minute-of-day) is inside the
+    [start, end) HH:MM window. Supports wrap-around windows (e.g. a
+    night-shift player set to 22:00 → 06:00)."""
+    s = start[0] * 60 + start[1]
+    e = end[0] * 60 + end[1]
+    if s == e:
+        # Degenerate window → treat as "always awake" so we don't
+        # silently lock the user out by a single typo.
+        return True
+    if s < e:
+        return s <= now_minutes < e
+    # Wrap-around (e.g. 22:00 → 06:00)
+    return now_minutes >= s or now_minutes < e
+
+
+async def _get_user_schedule(user_id: str) -> dict:
+    """Return the user's awake-hours doc, falling back to sensible
+    defaults when nothing is saved yet. Always non-None."""
+    doc = await _db.bt_player_schedule.find_one({"_id": user_id}) or {}
+    # Resolve timezone — explicit on schedule wins; profile.timezone
+    # is the fallback so existing users get a sane default without
+    # having to open the settings screen first.
+    tz_name = (doc.get("timezone") or "").strip()
+    if not tz_name:
+        prof = await _db.profile.find_one({"_id": user_id}, {"_id": 0, "timezone": 1})
+        tz_name = ((prof or {}).get("timezone") or "").strip() or "UTC"
+    return {
+        "user_id": user_id,
+        "awake_start": (doc.get("awake_start") or DEFAULT_AWAKE_START),
+        "awake_end": (doc.get("awake_end") or DEFAULT_AWAKE_END),
+        "sleep_all_day": bool(doc.get("sleep_all_day", False)),
+        "timezone": tz_name,
+        "updated_at": doc.get("updated_at"),
+        "_saved": bool(doc),
+    }
+
+
+async def _is_user_awake_now(user_id: str, *, now_utc: Optional[datetime] = None) -> bool:
+    """True iff the user is currently inside their saved awake window.
+    Users with no schedule saved default to 08:00–23:00 local time —
+    so they're treated as awake during normal daytime hours without
+    needing to opt in. `sleep_all_day=True` always returns False."""
+    sched = await _get_user_schedule(user_id)
+    if sched["sleep_all_day"]:
+        return False
+    start = _parse_hhmm(sched["awake_start"]) or (8, 0)
+    end = _parse_hhmm(sched["awake_end"]) or (23, 0)
+    tz = _resolve_tz(sched["timezone"])
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+    cur = now.hour * 60 + now.minute
+    return _is_in_window(cur, start, end)
+
+
+async def _is_group_active_now(doc: dict) -> bool:
+    """A group is "active" when at least one accepted member is
+    currently awake AND hasn't muted that group via the per-user
+    Group Toggle. Used as the filter for treasure selection /
+    /bt/groups/available.
+    """
+    if not doc:
+        return False
+    members = doc.get("members") or []
+    accepted = [m for m in members if m.get("status") == "accepted"]
+    if not accepted:
+        return False
+    gid = doc.get("_id")
+    for m in accepted:
+        uid = m.get("user_id")
+        if not uid:
+            continue
+        # Per-user group toggle — missing pref = ON.
+        pref = await _db.bt_group_prefs.find_one({"_id": f"{uid}:{gid}"})
+        notif_on = True if not pref else bool(pref.get("notifications_enabled", True))
+        if not notif_on:
+            continue
+        if await _is_user_awake_now(uid):
+            return True
+    return False
+
+
+async def _enrich_group(payload: dict, doc: dict) -> dict:
+    """Attach Smart-Availability metadata to a `_group_public` payload
+    so the frontend can render the "Inactive" badge without an extra
+    round-trip."""
+    if not payload:
+        return payload
+    payload["is_active_now"] = await _is_group_active_now(doc)
+    return payload
 
 
 def _validate_photo(b64: Optional[str], *, required: bool = True, field: str = "photo_base64"):
@@ -290,6 +436,23 @@ class GroupToggleBody(BaseModel):
     enabled: bool
 
 
+class ScheduleBody(BaseModel):
+    """Awake-hours schedule for Smart Availability Filter.
+
+    awake_start / awake_end are HH:MM strings in the user's local
+    timezone. `sleep_all_day=True` ignores both values and locks the
+    user out of treasure selection entirely until they turn it off.
+    `timezone` is optional — when omitted we fall back to the user's
+    profile timezone. Sending it lets the client stamp the device's
+    current IANA zone in one call (e.g. via
+    `Intl.DateTimeFormat().resolvedOptions().timeZone`).
+    """
+    awake_start: Optional[str] = None
+    awake_end: Optional[str] = None
+    sleep_all_day: bool = False
+    timezone: Optional[str] = None
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Public solo helpers
 # ─────────────────────────────────────────────────────────────────────
@@ -375,6 +538,69 @@ def attach_routes(app, get_user_or_legacy):
             upsert=True,
         )
         return {"ok": True}
+
+    # ── SCHEDULE (awake hours — Smart Availability Filter) ───────────
+    # Storage: bt_player_schedule. Default behaviour (no doc saved):
+    # the user is treated as awake 08:00–23:00 local time so the
+    # filter never silently locks people out.
+    @router.get("/bt/schedule")
+    async def get_schedule(user_id: str = Depends(get_user_or_legacy)):
+        sched = await _get_user_schedule(user_id)
+        return {
+            "schedule": {
+                "awake_start": sched["awake_start"],
+                "awake_end": sched["awake_end"],
+                "sleep_all_day": sched["sleep_all_day"],
+                "timezone": sched["timezone"],
+                "updated_at": sched["updated_at"],
+                "is_default": not sched["_saved"],
+            },
+            "is_awake_now": await _is_user_awake_now(user_id),
+        }
+
+    @router.post("/bt/schedule")
+    async def save_schedule(
+        body: ScheduleBody,
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        # Validate HH:MM — coerce to defaults if user sent garbage so
+        # the filter never breaks on bad input.
+        start = _parse_hhmm(body.awake_start) or _parse_hhmm(DEFAULT_AWAKE_START) or (8, 0)
+        end = _parse_hhmm(body.awake_end) or _parse_hhmm(DEFAULT_AWAKE_END) or (23, 0)
+        tz_name = (body.timezone or "").strip()
+        # Best-effort timezone validation — fall back silently to the
+        # user's profile timezone so we never reject a save.
+        if tz_name and ZoneInfo is not None:
+            try:
+                ZoneInfo(tz_name)
+            except Exception:
+                tz_name = ""
+        update_doc = {
+            "_id": user_id,
+            "awake_start": _fmt_hhmm(start),
+            "awake_end": _fmt_hhmm(end),
+            "sleep_all_day": bool(body.sleep_all_day),
+            "updated_at": _now_iso(),
+        }
+        if tz_name:
+            update_doc["timezone"] = tz_name
+        await _db.bt_player_schedule.update_one(
+            {"_id": user_id},
+            {"$set": update_doc},
+            upsert=True,
+        )
+        sched = await _get_user_schedule(user_id)
+        return {
+            "ok": True,
+            "schedule": {
+                "awake_start": sched["awake_start"],
+                "awake_end": sched["awake_end"],
+                "sleep_all_day": sched["sleep_all_day"],
+                "timezone": sched["timezone"],
+                "updated_at": sched["updated_at"],
+            },
+            "is_awake_now": await _is_user_awake_now(user_id),
+        }
 
     # ── SETTINGS (persistent area) ───────────────────────────────────
     # Once the user picks an area + radius the value is saved in
@@ -685,13 +911,18 @@ def attach_routes(app, get_user_or_legacy):
         cur = _db.bt_groups.find({"members.user_id": user_id}).sort("created_at", -1)
         out = []
         async for d in cur:
-            out.append(_group_public(d, viewer_id=user_id))
+            payload = _group_public(d, viewer_id=user_id)
+            await _enrich_group(payload, d)
+            out.append(payload)
         return {"groups": out}
 
     @router.get("/bt/groups/available")
     async def groups_available(user_id: str = Depends(get_user_or_legacy)):
         """Lobby-stage groups created by my friends that I'm not already
-        a member of — so I can request to join."""
+        a member of — so I can request to join. Smart Availability:
+        groups where NO member is currently awake (or every awake
+        member has muted the group) are excluded so users don't try to
+        join a group full of sleeping players."""
         friend_pool = await _friend_ids_fn(user_id)
         if not friend_pool:
             return {"groups": []}
@@ -702,7 +933,12 @@ def attach_routes(app, get_user_or_legacy):
         }).sort("created_at", -1)
         out = []
         async for d in cur:
-            out.append(_group_public(d, viewer_id=user_id))
+            if not await _is_group_active_now(d):
+                # Skip groups where everyone is asleep / muted.
+                continue
+            payload = _group_public(d, viewer_id=user_id)
+            payload["is_active_now"] = True
+            out.append(payload)
         return {"groups": out}
 
     async def _respond_invite(gid: str, user_id: str, *, accept: bool):
