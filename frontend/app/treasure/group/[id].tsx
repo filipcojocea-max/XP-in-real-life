@@ -22,6 +22,7 @@ import {
   Platform,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -44,6 +45,11 @@ export default function GroupScreen() {
   const [group, setGroup] = useState<BTGroup | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // Per-user notification preference for THIS group. ON = "Active —
+  // ready to play"; OFF = "Inactive — won't receive treasures".
+  // Defaults to true (notifications on) until /bt/groups/prefs resolves.
+  const [notifEnabled, setNotifEnabled] = useState(true);
+  const [togglingNotif, setTogglingNotif] = useState(false);
 
   // GPS shared by bury + hunting flows.
   const [gps, setGPS] = useState<{ lat: number; lng: number } | null>(null);
@@ -53,14 +59,35 @@ export default function GroupScreen() {
     if (!id) return;
     setLoading(true);
     try {
-      const g = await api.btGroupGet(String(id));
+      const [g, p] = await Promise.all([
+        api.btGroupGet(String(id)),
+        api.btGroupPrefs().catch(() => ({ prefs: {} as Record<string, boolean> })),
+      ]);
       setGroup(g);
+      // Default to true when no preference is saved yet (notifs ON).
+      const pref = p?.prefs?.[String(id)];
+      setNotifEnabled(pref === undefined ? true : pref);
     } catch (e: any) {
       showAlert('Failed to load group', String(e?.message || e));
     } finally {
       setLoading(false);
     }
   }, [id]);
+
+  const onToggleNotif = useCallback(async (next: boolean) => {
+    if (!group || togglingNotif) return;
+    setTogglingNotif(true);
+    // Optimistic — flip immediately, revert on error.
+    setNotifEnabled(next);
+    try {
+      await api.btGroupToggle(group.id, next);
+    } catch (e: any) {
+      setNotifEnabled(!next);
+      showAlert('Could not change setting', String(e?.message || e));
+    } finally {
+      setTogglingNotif(false);
+    }
+  }, [group, togglingNotif]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
   // Poll every 4 s so accept/reject/bury propagates to all members.
@@ -128,6 +155,31 @@ export default function GroupScreen() {
           <Text style={styles.headerSub}>code {group.code}</Text>
         </View>
         <View style={styles.headerBtn} />
+      </View>
+
+      {/* Per-group notification toggle. ON  → group is "Active — ready
+          to play" and included in treasure selection / pushes. OFF →
+          "Inactive — won't receive treasures": the group stays in the
+          list but is skipped by the selection algorithm. */}
+      <View style={[styles.toggleBar, !notifEnabled && styles.toggleBarOff]}>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.toggleLabel, !notifEnabled && styles.toggleLabelOff]}>
+            {notifEnabled ? 'Active — ready to play' : "Inactive — won't receive treasures"}
+          </Text>
+          <Text style={styles.toggleHint}>
+            {notifEnabled
+              ? 'You\'ll be picked when treasures drop for this group.'
+              : 'This group is skipped from treasure selection until you turn this back on.'}
+          </Text>
+        </View>
+        <Switch
+          value={notifEnabled}
+          onValueChange={onToggleNotif}
+          disabled={togglingNotif}
+          trackColor={{ false: '#3a3f48', true: colors.cyan + '88' }}
+          thumbColor={notifEnabled ? colors.cyan : '#9aa4af'}
+          testID="bt-group-notif-toggle"
+        />
       </View>
 
       {group.status === 'lobby' ? (
@@ -650,6 +702,19 @@ const styles = StyleSheet.create({
   headerBtn: { width: 40, height: 36, alignItems: 'center', justifyContent: 'center' },
   headerTitle: { color: colors.text, fontSize: 15, fontWeight: '800' },
   headerSub: { color: colors.textMuted, fontSize: 10, letterSpacing: 1, marginTop: 1 },
+  // Status banner between the header and the rest of the screen. Goes
+  // greyed-out when notifications are off so the visual matches the
+  // "Inactive" label.
+  toggleBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 10, paddingHorizontal: spacing.md,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1, borderColor: colors.border,
+  },
+  toggleBarOff: { opacity: 0.55 },
+  toggleLabel: { color: colors.text, fontSize: 13, fontWeight: '800' },
+  toggleLabelOff: { color: colors.textMuted },
+  toggleHint: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
   card: {
     backgroundColor: colors.surface, borderRadius: radii.lg,
     borderWidth: 1, borderColor: colors.border,

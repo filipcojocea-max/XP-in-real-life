@@ -763,6 +763,25 @@ def attach_routes(app, get_user_or_legacy):
         )
         return {"ok": True, "enabled": bool(body.enabled)}
 
+    @router.get("/bt/groups/prefs")
+    async def group_prefs(user_id: str = Depends(get_user_or_legacy)):
+        """Returns this user's per-group notification prefs as a
+        `{group_id: enabled}` map. Anything missing defaults to ON
+        (notifications enabled) on the client. One DB scan per home
+        screen open keeps the friends-list badge + the group-detail
+        toggle in sync without per-row round-trips."""
+        rows = await _db.bt_group_prefs.find(
+            {"user_id": user_id},
+            {"_id": 0, "group_id": 1, "notifications_enabled": 1},
+        ).to_list(500)
+        return {
+            "prefs": {
+                r.get("group_id"): bool(r.get("notifications_enabled", True))
+                for r in rows
+                if r.get("group_id")
+            },
+        }
+
     @router.post("/bt/groups/{gid}/reject")
     async def group_reject(gid: str, user_id: str = Depends(get_user_or_legacy)):
         return await _respond_invite(gid, user_id, accept=False)

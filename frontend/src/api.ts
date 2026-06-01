@@ -1290,6 +1290,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     }),
+  btGroupPrefs: () =>
+    req<{ prefs: Record<string, boolean> }>('/bt/groups/prefs'),
   // Solo hunt loop
   btSoloStart: (lat: number, lng: number, radius_m: number) =>
     req<BTSoloHunt>('/bt/solo/start', {
