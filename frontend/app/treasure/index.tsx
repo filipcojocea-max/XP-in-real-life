@@ -76,28 +76,54 @@ export default function TreasureHome() {
   const onAreaConfirmed = useCallback((area: BTAreaPicked) => {
     setPickedArea(area);
     setStage('pickMode');
+    // Persist the picked area so subsequent opens skip the picker
+    // entirely. Fire-and-forget — failure here is non-blocking; the
+    // user can always re-edit from /treasure/settings.
+    api.btSaveSettings(area.lat, area.lng, area.radius_m).catch(() => {
+      // swallow — UI continues, area still applies for this session
+    });
+    setSavedArea(area);
   }, []);
 
+  // Resolved area used by the play buttons. We prefer the freshly-
+  // picked area (mid-onboarding case) and fall back to the persisted
+  // settings so subsequent visits launch instantly without showing the
+  // map picker again. Per 2026-06-01 spec the picker only appears on
+  // first run — after that, location can only be changed from
+  // /treasure/settings.
+  const activeArea = pickedArea || savedArea;
+
+  // START HUNT entry — if we already have a saved area, jump straight
+  // to mode select; otherwise open the picker.
+  const onStartHunt = useCallback(() => {
+    if (savedArea) {
+      setPickedArea(savedArea);
+      setStage('pickMode');
+    } else {
+      setStage('pickArea');
+    }
+  }, [savedArea]);
+
   const startSolo = useCallback(async () => {
-    if (!pickedArea || busy) return;
+    if (!activeArea || busy) return;
     setBusy(true);
     try {
-      await api.btSoloStart(pickedArea.lat, pickedArea.lng, pickedArea.radius_m);
+      await api.btSoloStart(activeArea.lat, activeArea.lng, activeArea.radius_m);
       router.replace('/treasure/solo');
     } catch (e: any) {
       showAlert('Could not start hunt', String(e?.message || e));
     } finally {
       setBusy(false);
     }
-  }, [pickedArea, busy, router]);
+  }, [activeArea, busy, router]);
 
   const startFriends = useCallback(() => {
-    if (!pickedArea) return;
+    if (!activeArea) return;
     router.push({
       pathname: '/treasure/friends',
       params: {
-        lat: String(pickedArea.lat),
-        lng: String(pickedArea.lng),
+        lat: String(activeArea.lat),
+        lng: String(activeArea.lng),
         radius_m: String(pickedArea.radius_m),
       },
     });
@@ -219,11 +245,27 @@ export default function TreasureHome() {
         <TouchableOpacity
           style={styles.startBtn}
           activeOpacity={0.85}
-          onPress={() => setStage('pickArea')}
+          onPress={onStartHunt}
           testID="bt-start-hunt"
         >
           <Ionicons name="play" size={20} color="#0b0f15" />
           <Text style={styles.startBtnText}>START HUNT</Text>
+        </TouchableOpacity>
+
+        {/* Mini-App Settings — only entry point for editing the saved
+            hunt area after the first run. Per 2026-06-01 spec the home
+            map picker only fires when there's no area saved yet. */}
+        <TouchableOpacity
+          style={styles.settingsBtn}
+          activeOpacity={0.85}
+          onPress={() => router.push('/treasure/settings')}
+          testID="bt-open-settings"
+        >
+          <Ionicons name="settings-outline" size={18} color={colors.cyan} />
+          <Text style={styles.settingsBtnText}>
+            {savedArea ? 'Mini-App Settings · change hunt area' : 'Mini-App Settings'}
+          </Text>
+          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
         {myGroups.length > 0 ? (
@@ -287,6 +329,16 @@ const styles = StyleSheet.create({
     paddingVertical: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
   },
   startBtnText: { color: '#0b0f15', fontWeight: '900', fontSize: 16, letterSpacing: 1 },
+  // Secondary row tucked under the START HUNT button — the player's
+  // only path back into /treasure/settings once a hunt area is saved.
+  settingsBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 12, paddingHorizontal: 14,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  settingsBtnText: { color: colors.cyan, fontWeight: '800', fontSize: 12, flex: 1, letterSpacing: 0.4 },
   resumeCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     backgroundColor: colors.cyan + '15', borderRadius: radii.lg,
