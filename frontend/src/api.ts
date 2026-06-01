@@ -1274,6 +1274,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ lat, lng }),
     }),
+  // Persistent area saved in Mini-App Settings — once stored the map
+  // picker is skipped on every subsequent open.
+  btGetSettings: () =>
+    req<{ area: { lat: number; lng: number; radius_m: number; label?: string | null; updated_at?: string } | null }>(
+      '/bt/settings',
+    ),
+  btSaveSettings: (lat: number, lng: number, radius_m: number, label?: string) =>
+    req<{ ok: boolean; area: any }>('/bt/settings', {
+      method: 'POST',
+      body: JSON.stringify({ lat, lng, radius_m, label }),
+    }),
+  btGroupToggle: (gid: string, enabled: boolean) =>
+    req<{ ok: boolean; enabled: boolean }>(`/bt/groups/${gid}/toggle`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
   // Solo hunt loop
   btSoloStart: (lat: number, lng: number, radius_m: number) =>
     req<BTSoloHunt>('/bt/solo/start', {

@@ -276,6 +276,20 @@ class BuryBody(BaseModel):
     map_screenshot_base64: str
 
 
+class SettingsBody(BaseModel):
+    """Persistent area saved in Mini-App Settings. Once stored the
+    Treasure home screen skips the map picker on every subsequent open
+    — users can only edit this from /treasure/settings."""
+    lat: float
+    lng: float
+    radius_m: float = Field(..., gt=0)
+    label: Optional[str] = None
+
+
+class GroupToggleBody(BaseModel):
+    enabled: bool
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Public solo helpers
 # ─────────────────────────────────────────────────────────────────────
@@ -361,6 +375,55 @@ def attach_routes(app, get_user_or_legacy):
             upsert=True,
         )
         return {"ok": True}
+
+    # ── SETTINGS (persistent area) ───────────────────────────────────
+    # Once the user picks an area + radius the value is saved in
+    # `bt_player_settings` and the home screen skips the map picker
+    # forever after — they can only edit from /treasure/settings.
+    @router.get("/bt/settings")
+    async def get_settings(user_id: str = Depends(get_user_or_legacy)):
+        doc = await _db.bt_player_settings.find_one({"_id": user_id})
+        if not doc:
+            return {"area": None}
+        return {
+            "area": {
+                "lat": float(doc.get("lat") or 0.0),
+                "lng": float(doc.get("lng") or 0.0),
+                "radius_m": float(doc.get("radius_m") or 0.0),
+                "label": doc.get("label"),
+                "updated_at": doc.get("updated_at"),
+            }
+        }
+
+    @router.post("/bt/settings")
+    async def save_settings(
+        body: SettingsBody,
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        radius = _clamp_radius(body.radius_m)
+        await _db.bt_player_settings.update_one(
+            {"_id": user_id},
+            {"$set": {
+                "_id": user_id,
+                "lat": float(body.lat),
+                "lng": float(body.lng),
+                "radius_m": radius,
+                "label": (body.label or "").strip()[:80] or None,
+                "updated_at": _now_iso(),
+            }},
+            upsert=True,
+        )
+        # Also stamp the location for the friend-area check.
+        await _db.bt_player_location.update_one(
+            {"_id": user_id},
+            {"$set": {"_id": user_id, "lat": float(body.lat),
+                      "lng": float(body.lng), "updated_at": _now_iso()}},
+            upsert=True,
+        )
+        return {"ok": True, "area": {
+            "lat": float(body.lat), "lng": float(body.lng),
+            "radius_m": radius, "label": body.label,
+        }}
 
     # ── SOLO ─────────────────────────────────────────────────────────
     @router.post("/bt/solo/start")
@@ -671,6 +734,34 @@ def attach_routes(app, get_user_or_legacy):
     @router.post("/bt/groups/{gid}/accept")
     async def group_accept(gid: str, user_id: str = Depends(get_user_or_legacy)):
         return await _respond_invite(gid, user_id, accept=True)
+
+    @router.post("/bt/groups/{gid}/toggle")
+    async def group_toggle(
+        gid: str,
+        body: GroupToggleBody,
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        """Per-user notification toggle for a group.
+        ON  → group is "Active" — included in treasure selection / push.
+        OFF → group is "Inactive" — visible in the list but tagged so
+              and skipped when picking which group receives a treasure."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            raise HTTPException(404, "Group not found.")
+        if not any(m.get("user_id") == user_id for m in (doc.get("members") or [])):
+            raise HTTPException(403, "You're not a member of this group.")
+        await _db.bt_group_prefs.update_one(
+            {"_id": f"{user_id}:{gid}"},
+            {"$set": {
+                "_id": f"{user_id}:{gid}",
+                "user_id": user_id,
+                "group_id": gid,
+                "notifications_enabled": bool(body.enabled),
+                "updated_at": _now_iso(),
+            }},
+            upsert=True,
+        )
+        return {"ok": True, "enabled": bool(body.enabled)}
 
     @router.post("/bt/groups/{gid}/reject")
     async def group_reject(gid: str, user_id: str = Depends(get_user_or_legacy)):

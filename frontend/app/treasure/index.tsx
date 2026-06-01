@@ -35,17 +35,31 @@ export default function TreasureHome() {
   const [soloHunt, setSoloHunt] = useState<BTSoloHunt | null>(null);
   const [myGroups, setMyGroups] = useState<BTGroup[]>([]);
   const [pickedArea, setPickedArea] = useState<BTAreaPicked | null>(null);
+  // Persistent area saved on first run from /api/bt/settings. When set
+  // we skip the BTMapPicker entirely on subsequent opens — the user
+  // can only change the area from /treasure/settings.
+  const [savedArea, setSavedArea] = useState<BTAreaPicked | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     setStage('loading');
     try {
-      const [s, g] = await Promise.all([
+      const [s, g, settings] = await Promise.all([
         api.btSoloCurrent().catch(() => ({ hunt: null })),
         api.btGroupsMine().catch(() => ({ groups: [] as BTGroup[] })),
+        api.btGetSettings().catch(() => ({ area: null as any })),
       ]);
       setSoloHunt(s.hunt || null);
       setMyGroups(g.groups || []);
+      if (settings?.area) {
+        setSavedArea({
+          lat: settings.area.lat,
+          lng: settings.area.lng,
+          radius_m: settings.area.radius_m,
+        });
+      } else {
+        setSavedArea(null);
+      }
       setStage('idle');
     } catch (e: any) {
       showAlert('Failed to load', String(e?.message || e));
