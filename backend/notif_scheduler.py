@@ -32,6 +32,119 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# ─── Firebase Cloud Messaging fallback ──────────────────────────────
+# When Expo's push pipeline returns False for any reason (token expired,
+# Expo upstream 5xx, project mismatch on a custom build, etc.) we
+# re-send the same payload through Firebase Admin SDK using whatever
+# credentials are wired via .env. This is intentionally additive — Expo
+# remains the primary delivery channel; FCM only fires when Expo
+# couldn't.
+#
+# IMPORTANT delivery caveat: Firebase Admin's `messaging.send()` only
+# accepts RAW FCM device tokens. Expo issues `ExponentPushToken[...]`
+# wrappers that Firebase rejects. The fallback recognises Expo tokens
+# and silently skips them so we don't generate noisy errors. To
+# actually receive a fallback delivery the client has to also register
+# its raw device token (`Notifications.getDevicePushTokenAsync()`) and
+# store it alongside the Expo token in db.push_tokens. Until that's
+# wired, the fallback is a safety net that activates only for
+# already-FCM tokens (e.g. registered manually or from a future client
+# update).
+import os
+import firebase_admin
+from firebase_admin import credentials, messaging as _fcm_messaging
+
+_FCM_ENABLED = False
+
+
+def _repair_pem(raw: str) -> str:
+    """Restore PEM line-framing if the env var got flattened.
+
+    Service-account JSON typically uses `\\n` escapes inside the JSON
+    value; some operators paste it raw into `.env` and shells / web
+    forms strip every newline, leaving a single long line that
+    `cryptography` rejects with "MalformedFraming". This helper:
+
+      1. Replaces literal `\\n` escapes with real newlines (the
+         standard case).
+      2. If the result still has no newlines but does contain the
+         standard PEM header / footer, splits the base64 body into
+         the canonical 64-char lines and re-wraps the BEGIN / END
+         markers on their own lines.
+
+    The output is suitable for `cryptography.hazmat.primitives.
+    serialization.load_pem_private_key`.
+    """
+    if not raw:
+        return raw
+    s = raw.replace("\\n", "\n")
+    if "\n" in s:
+        return s
+    header = "-----BEGIN PRIVATE KEY-----"
+    footer = "-----END PRIVATE KEY-----"
+    if header not in s or footer not in s:
+        return s
+    body = s.split(header, 1)[1].split(footer, 1)[0].strip()
+    chunks = [body[i:i + 64] for i in range(0, len(body), 64)]
+    return "\n".join([header, *chunks, footer, ""])
+
+
+try:
+    if not firebase_admin._apps:
+        _fb_project = os.getenv("FIREBASE_PROJECT_ID")
+        _fb_priv = os.getenv("FIREBASE_PRIVATE_KEY")
+        _fb_email = os.getenv("FIREBASE_CLIENT_EMAIL")
+        if _fb_project and _fb_priv and _fb_email:
+            _cred = credentials.Certificate({
+                "type": "service_account",
+                "project_id": _fb_project,
+                "private_key": _repair_pem(_fb_priv),
+                "client_email": _fb_email,
+                "token_uri": "https://oauth2.googleapis.com/token",
+            })
+            firebase_admin.initialize_app(_cred)
+            _FCM_ENABLED = True
+    else:
+        _FCM_ENABLED = True
+except Exception as _fcm_init_err:
+    # Server must keep booting even when the FCM cert is missing /
+    # malformed. We log and downgrade to "no fallback" — Expo still
+    # works.
+    logging.getLogger("notif_scheduler").warning(
+        "[fcm-fallback] disabled (init failed): %s", _fcm_init_err,
+    )
+    _FCM_ENABLED = False
+
+
+async def _send_fcm_fallback(token: str, title: str, body: str,
+                              data: dict | None = None) -> bool:
+    """Push to a single raw FCM device token. Returns True on success.
+
+    Silently returns False for Expo-wrapped tokens (`ExponentPushToken
+    [...]`) and when the Firebase Admin app failed to initialise — those
+    are both well-known states the caller should not crash on."""
+    if not _FCM_ENABLED or not token:
+        return False
+    if str(token).startswith("ExponentPushToken"):
+        return False
+    try:
+        msg = _fcm_messaging.Message(
+            notification=_fcm_messaging.Notification(title=title, body=body),
+            # FCM only accepts string values in the data dict, so coerce.
+            data={k: str(v) for k, v in (data or {}).items()},
+            token=token,
+            android=_fcm_messaging.AndroidConfig(priority="high"),
+        )
+        # `messaging.send` is a *blocking* network call (urllib under the
+        # hood). Wrap with asyncio.to_thread so we never freeze the
+        # event loop while a single push is in-flight.
+        await asyncio.to_thread(_fcm_messaging.send, msg)
+        return True
+    except Exception as e:
+        logging.getLogger("notif_scheduler").warning("[fcm-fallback] %s", e)
+        return False
+
+
 # Astral — local sunrise/sunset calculations (no API key required).
 # Falls back to a hardcoded "safe daylight" window if the user's timezone
 # can't be resolved to a known city.
@@ -46,6 +159,8 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger("notif_scheduler")
 
 # Public hooks: server.py wires these to its own collections + push helper.
+# `_send_push` stays None until init_scheduler() runs — that's where we
+# also wrap the incoming Expo send fn with the FCM fallback wrapper.
 _db = None
 _send_push: Optional[Callable[..., Awaitable[bool]]] = None
 _pick_motivation: Optional[Callable[[], str]] = None
@@ -526,7 +641,28 @@ def init_scheduler(
     twice replaces the old jobs."""
     global _db, _send_push, _pick_motivation, _is_in_silence, scheduler
     _db = db
-    _send_push = send_push
+
+    # Wrap the caller's Expo push fn so every scheduled notification
+    # tries Expo first and, on failure (False / exception), automatically
+    # retries through Firebase Admin. Expo stays the primary delivery
+    # channel; FCM is a transparent gap-filler. See `_send_fcm_fallback`
+    # at the top of this file for the caveat about Expo vs raw FCM
+    # tokens — the wrapper safely no-ops for ExponentPushToken[...]
+    # values so we never generate noisy FCM errors.
+    async def _send_with_fallback(token, title, body, data=None):
+        try:
+            ok = bool(await send_push(token, title, body, data or {}))
+        except Exception as e:
+            logger.warning("[scheduler] Expo send raised: %s", e)
+            ok = False
+        if ok:
+            return True
+        # Only attempt the Firebase fallback when it's actually wired up.
+        if _FCM_ENABLED:
+            return await _send_fcm_fallback(token, title, body, data or {})
+        return False
+
+    _send_push = _send_with_fallback
     _pick_motivation = pick_motivation
     _is_in_silence = is_in_silence
 
