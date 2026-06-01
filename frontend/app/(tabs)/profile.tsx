@@ -16,6 +16,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
+import ShieldTapAnimator from '../../src/components/ShieldTapAnimator';
 import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 import { useRouter, useFocusEffect } from 'expo-router';
 import Card from '../../src/components/Card';
@@ -167,14 +168,30 @@ export default function ProfileScreen() {
                 // tier-correct shield matching the leaderboard / friends
                 // list / search so what you see in your own profile is
                 // exactly what others see in public surfaces.
-                <PremiumShield
-                  size={120}
+                //
+                // Wrapped with <ShieldTapAnimator/> so a tap/click plays
+                // the pulse + 1.5-rotation spin + color-matched particle
+                // burst + halo flash. Particle colors are pulled live
+                // from the shield's current tier so a Lv 25 player gets
+                // blue+gold sparks, a Lv 200 player gets gold+cream
+                // sparks, etc.
+                <ShieldTapAnimator
                   level={getDynamicShieldLevel({
                     level: profile.level,
                     total_xp: profile.total_xp,
                     is_admin: profile.is_admin,
                   })}
-                />
+                  size={120}
+                >
+                  <PremiumShield
+                    size={120}
+                    level={getDynamicShieldLevel({
+                      level: profile.level,
+                      total_xp: profile.total_xp,
+                      is_admin: profile.is_admin,
+                    })}
+                  />
+                </ShieldTapAnimator>
               )}
             </View>
           </Ring>

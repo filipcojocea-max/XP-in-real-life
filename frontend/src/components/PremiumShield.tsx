@@ -164,6 +164,41 @@ function pickTier(level: number): { tier: TierKey; sizeMul: number } {
 }
 
 /**
+ * Tier-aware accent palette used by <ShieldTapAnimator /> to spawn
+ * particles, glow halos and trail tints that automatically match
+ * whichever shield the player is currently displaying. The mix of
+ * 2-3 colors per tier reflects the dominant body / rim / bolt hues
+ * of that tier so a tap on a Lv 25-49 (blue body + golden rim) shield
+ * shoots BOTH blue AND gold particles, etc.
+ *
+ * Always returns at least one color so callers can use modulo
+ * indexing without a guard.
+ */
+export function getShieldTapColors(level: number): string[] {
+  const { tier } = pickTier(level);
+  switch (tier) {
+    case 'blue':
+      return ['#22D3EE', '#67E8F9', '#22C55E']; // cyan + lighter cyan + bolt-green
+    case 'blue_gold_glow':
+      return ['#22D3EE', '#FBBF24', '#67E8F9', '#22C55E']; // blue + gold + cyan + green
+    case 'yellow_blue_rim':
+      return ['#FDE047', '#22D3EE', '#22C55E']; // yellow body + cyan rim + green bolt
+    case 'yellow_yellow_rim':
+      return ['#FDE047', '#FBBF24', '#22C55E']; // yellow + amber + green
+    case 'gold_yellow_glow':
+      return ['#F5B935', '#FBBF24', '#FCE07A']; // gold + amber + light gold
+    case 'gold_gold':
+      return ['#F5B935', '#FCE07A', '#FFF7CC']; // gold + light gold + cream
+    case 'gold_black':
+      return ['#F5B935', '#FCE07A', '#FFFFFF']; // gold + light gold + spec white
+    case 'creator_yellow':
+      return ['#FFD700', '#FFEB3B', '#FFFFFF']; // creator gold + bright yellow + white
+    default:
+      return ['#22D3EE'];
+  }
+}
+
+/**
  * Public bridge: maps a player's current state to the dynamic shield level
  * the SVG should render at. Use this everywhere a shield is drawn so the
  * tier picks itself based on the *latest* XP, with one consistent rule
