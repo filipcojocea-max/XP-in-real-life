@@ -485,10 +485,13 @@ def _solo_public(doc: dict | None) -> dict | None:
     }
     # Chest coords — only present once a chest has been placed (which
     # happens immediately on hunt start in the current model, but we
-    # still null-guard for hunts that pre-date this field).
+    # still null-guard for hunts that pre-date this field). Stored
+    # nested under `doc['chest']` by solo_start(), so we read from
+    # there rather than the top level.
     try:
-        c_lat = doc.get("chest_lat")
-        c_lng = doc.get("chest_lng")
+        chest = doc.get("chest") or {}
+        c_lat = chest.get("lat")
+        c_lng = chest.get("lng")
         if c_lat is not None and c_lng is not None:
             out["chest_lat"] = float(c_lat)
             out["chest_lng"] = float(c_lng)

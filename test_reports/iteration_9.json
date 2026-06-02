@@ -1,0 +1,32 @@
+{
+  "summary": "Re-test of iteration 8 backend fix in /app/backend/buried_treasure.py::_solo_public. Verified chest coords are now sourced from doc['chest']['lat'/'lng']. All 7 tests in test_bt_iteration8_map_clue.py PASS (login, solo/start chest_lat+chest_lng inside 800m area at Sydney, /solo/current shape parity, compass shape regression, groups/mine, groups/available, schedule GET/POST). Added a small re-bury regression test (test_bt_iter8_rebury_retest.py) — also PASSES. retest_needed flips to false.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_iteration8_map_clue.py",
+    "/app/backend/tests/test_bt_iter8_rebury_retest.py",
+    "/app/test_reports/pytest/iter8_map_clue_retest.xml",
+    "/app/test_reports/pytest/iter8_rebury_retest.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_solo_public chest reader is correctly null-guarded; matches the nested storage layout used by solo_start()."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_iter8_rebury_retest.py (NEW — re-bury regression)"
+  ],
+  "success_rate": {"backend": "100% (8/8 across both files)", "frontend": "not tested (request was optional smoke; backend-only fix verified)"},
+  "seed_data_creation": "None. Used seeded admin (filip.cojocea122@gmail.com).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 8 chest_lat/chest_lng exposure on /api/bt/solo/start and /api/bt/solo/current is fully fixed and green. No further action required for this bug. The map clue UI (bt-map-clue inside /treasure/solo) was NOT exercised via Playwright this run since the request marked it optional and backend coverage is sufficient to confirm the reported bug is gone.",
+  "rca_of_issue": "Original bug: _solo_public read top-level doc['chest_lat']/doc['chest_lng'] but solo_start() stores chest coords nested under doc['chest']={'lat':..,'lng':..}. Result was always-missing chest coords in the public payload. Fix reads from doc['chest'] dict with null-guards — verified end-to-end."
+}
