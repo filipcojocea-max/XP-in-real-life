@@ -1360,6 +1360,25 @@ export const api = {
       }[];
       has_my_area: boolean;
     }>('/bt/friends-eligible'),
+  /** Persistent invites — list every pending one with requires_view=true.
+   *  Per Round B spec these notifications stay until the player explicitly
+   *  views them by opening the group page (which calls btInviteView). */
+  btInvitesPending: () =>
+    req<{
+      invites: {
+        group_id: string;
+        group_name: string;
+        group_code?: string | null;
+        creator_id: string;
+        creator_name: string;
+        created_at: string;
+        opened_at: string | null;
+        requires_view: boolean;
+      }[];
+      count: number;
+    }>('/bt/invites/pending'),
+  btInviteView: (gid: string) =>
+    req<{ ok: boolean }>(`/bt/invites/${gid}/view`, { method: 'POST' }),
   btGroupsMine: () => req<{ groups: BTGroup[] }>('/bt/groups/mine'),
   btGroupsAvailable: () => req<{ groups: BTGroup[] }>('/bt/groups/available'),
   btGroupAccept: (gid: string) =>

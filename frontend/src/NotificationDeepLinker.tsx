@@ -60,6 +60,17 @@ export function NotificationDeepLinker() {
               router.push(`/messages/${from}`);
             }, 0);
           }
+        } else if (type === 'bt_group_invite' || type === 'bt_group_response') {
+          // 2026-06-04 (Round B): deep-link straight into the group
+          // page so the player sees the Accept/Reject prompt at the
+          // top of the screen — the group page calls /bt/invites/{id}/view
+          // on mount, which is what clears the persistent invite.
+          const gid = (data?.group_id || data?.gid || '').toString();
+          if (gid) {
+            setTimeout(() => {
+              router.push(`/treasure/group/${gid}`);
+            }, 0);
+          }
         }
         // Future: wire 'gift' / 'suspended' here.
       } catch (e) {

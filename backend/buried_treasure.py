@@ -604,8 +604,43 @@ def attach_routes(app, get_user_or_legacy):
         )
         return {"ok": True}
 
+    # ── PERSISTENT INVITES (Round B, 2026-06-04) ─────────────────────
+    # Persistent in-app invite list. Per spec these notifications MUST
+    # NEVER disappear until the player explicitly opens and views the
+    # invite. The `requires_view=True` flag stays on until the
+    # /view endpoint is hit, at which point `opened_at` is stamped.
+    # Rejecting / accepting the invite via the existing
+    # /bt/groups/{id}/accept|reject also clears it (handled below).
+    @router.get("/bt/invites/pending")
+    async def invites_pending(user_id: str = Depends(get_user_or_legacy)):
+        cur = _db.bt_invites.find({
+            "user_id": user_id,
+            "requires_view": True,
+        }).sort("created_at", -1)
+        out: list[dict] = []
+        async for d in cur:
+            out.append({
+                "group_id": d.get("group_id"),
+                "group_name": d.get("group_name") or "Treasure Hunt",
+                "group_code": d.get("group_code"),
+                "creator_id": d.get("creator_id"),
+                "creator_name": d.get("creator_name") or "A friend",
+                "created_at": d.get("created_at"),
+                "opened_at": d.get("opened_at"),
+                "requires_view": True,
+            })
+        return {"invites": out, "count": len(out)}
+
+    @router.post("/bt/invites/{gid}/view")
+    async def invite_view(gid: str, user_id: str = Depends(get_user_or_legacy)):
+        """Mark a persistent invite as viewed. Idempotent."""
+        await _db.bt_invites.update_one(
+            {"group_id": gid, "user_id": user_id},
+            {"$set": {"requires_view": False, "opened_at": _now_iso()}},
+        )
+        return {"ok": True}
+
     # ── FRIENDS ELIGIBILITY (for invite UI) ──────────────────────────
-    # Returns the full friend list with per-friend eligibility metadata
     # so the invite UI can render:
     #   • selectable    — friend has BT settings AND their area
     #                     circle overlaps with mine.
@@ -1004,7 +1039,34 @@ def attach_routes(app, get_user_or_legacy):
             # Fire push notifications outside the DB write so a single
             # bad push token doesn't block the invite write.
             creator_name = await _player_name(user_id)
+            now_iso = _now_iso()
             for inv in invited_ok:
+                # ── Persistent in-app invite (Round B, 2026-06-04) ──
+                # Stays in the invitee's list with `requires_view=True`
+                # until they explicitly open the group page, at which
+                # point /bt/invites/{gid}/view stamps `opened_at`. The
+                # row is idempotent on (group_id, user_id) so re-invites
+                # don't create duplicates.
+                await _db.bt_invites.update_one(
+                    {"group_id": gid, "user_id": inv["user_id"]},
+                    {
+                        "$setOnInsert": {
+                            "_id": f"{gid}:{inv['user_id']}",
+                            "group_id": gid,
+                            "user_id": inv["user_id"],
+                            "created_at": now_iso,
+                        },
+                        "$set": {
+                            "group_name": doc.get("name") or "Treasure Hunt",
+                            "group_code": doc.get("code"),
+                            "creator_id": user_id,
+                            "creator_name": creator_name,
+                            "requires_view": True,
+                            "opened_at": None,
+                        },
+                    },
+                    upsert=True,
+                )
                 await _push_to_user(
                     inv["user_id"],
                     "Treasure Hunt invite",
@@ -1079,6 +1141,11 @@ def attach_routes(app, get_user_or_legacy):
             {"$set": {"members.$": me}},
         )
         doc["members"] = members
+        # Clear the persistent invite — answering is implicit viewing.
+        await _db.bt_invites.update_one(
+            {"group_id": gid, "user_id": user_id},
+            {"$set": {"requires_view": False, "opened_at": _now_iso()}},
+        )
         # Notify creator
         await _push_to_user(
             doc.get("creator_id"),

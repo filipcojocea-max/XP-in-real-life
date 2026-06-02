@@ -40,11 +40,21 @@ import { showAlert } from '../../src/uiAlert';
 type Stage = 'loading' | 'home' | 'pickArea';
 type PendingMode = 'solo' | 'friends' | null;
 
+type PendingInvite = {
+  group_id: string;
+  group_name: string;
+  creator_name: string;
+  created_at: string;
+};
+
 export default function TreasureHome() {
   const router = useRouter();
   const [stage, setStage] = useState<Stage>('loading');
   const [soloHunt, setSoloHunt] = useState<BTSoloHunt | null>(null);
   const [myGroups, setMyGroups] = useState<BTGroup[]>([]);
+  // Persistent invites (Round B) — stay visible until the player opens
+  // the group page, which calls /bt/invites/{id}/view to clear them.
+  const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
   // Persistent hunt area from /api/bt/settings. When set the picker is
   // skipped on every subsequent play; users edit it from the gear icon
   // top-right.
@@ -59,13 +69,15 @@ export default function TreasureHome() {
   const load = useCallback(async () => {
     setStage('loading');
     try {
-      const [s, g, settings] = await Promise.all([
+      const [s, g, settings, inv] = await Promise.all([
         api.btSoloCurrent().catch(() => ({ hunt: null })),
         api.btGroupsMine().catch(() => ({ groups: [] as BTGroup[] })),
         api.btGetSettings().catch(() => ({ area: null as any })),
+        api.btInvitesPending().catch(() => ({ invites: [], count: 0 } as any)),
       ]);
       setSoloHunt(s.hunt || null);
       setMyGroups(g.groups || []);
+      setPendingInvites(((inv && inv.invites) || []) as PendingInvite[]);
       if (settings?.area) {
         setSavedArea({
           lat: settings.area.lat,
@@ -241,6 +253,36 @@ export default function TreasureHome() {
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
       >
+        {/* ───────── PERSISTENT INVITE BANNERS (Round B) ─────────
+            One row per unviewed invite. Tapping routes to the group
+            page, which calls /bt/invites/{id}/view on mount and clears
+            the requires_view flag. The banner stays in the list until
+            then — even across app restarts. */}
+        {pendingInvites.length > 0 ? (
+          <View style={styles.invitesWrap} testID="bt-pending-invites">
+            {pendingInvites.map((iv) => (
+              <TouchableOpacity
+                key={iv.group_id}
+                style={styles.inviteBanner}
+                onPress={() => router.push(`/treasure/group/${iv.group_id}`)}
+                activeOpacity={0.9}
+                testID={`bt-invite-${iv.group_id}`}
+              >
+                <View style={styles.inviteIconBox}>
+                  <Ionicons name="mail-unread" size={22} color="#0b0f15" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inviteTitle}>NEW TREASURE INVITE</Text>
+                  <Text style={styles.inviteSub} numberOfLines={2}>
+                    {iv.creator_name} invited you to “{iv.group_name}” — tap to view
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color="#0b0f15" />
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+
         <View style={styles.hero}>
           <Ionicons name="map" size={42} color={colors.cyan} />
           <Text style={styles.heroTitle}>Find chests buried near you.</Text>
@@ -385,4 +427,23 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   inactivePillText: { color: '#FFB020', fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
+  // Persistent invite banners (Round B)
+  invitesWrap: { gap: 8 },
+  inviteBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    padding: spacing.md, borderRadius: radii.lg,
+    backgroundColor: '#FFD166',
+    borderWidth: 2, borderColor: '#FFB020',
+    shadowColor: '#FFD166',
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  inviteIconBox: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: '#0b0f1518',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  inviteTitle: { color: '#0b0f15', fontWeight: '900', fontSize: 12, letterSpacing: 1 },
+  inviteSub: { color: '#0b0f15CC', fontSize: 12, marginTop: 2, lineHeight: 17 },
 });
