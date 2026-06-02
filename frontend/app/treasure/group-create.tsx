@@ -32,7 +32,15 @@ export default function GroupCreate() {
   const { lat, lng, radius_m } = useLocalSearchParams<{ lat: string; lng: string; radius_m: string }>();
 
   const [name, setName] = useState('');
-  const [friends, setFriends] = useState<Player[]>([]);
+  const [friends, setFriends] = useState<Array<{
+    user_id: string;
+    name: string;
+    avatar_base64: string | null;
+    has_bt: boolean;
+    eligible: boolean;
+    reason: 'no_app' | 'different_region' | 'no_my_area' | null;
+    distance_km: number | null;
+  }>>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -40,8 +48,11 @@ export default function GroupCreate() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await api.friendsList();
-      setFriends((r.friends as Player[]) || []);
+      // 2026-06-04 spec: use the new eligibility endpoint so we can
+      // show ALL friends with the right lock/grey state instead of
+      // hiding the ones who can't be invited.
+      const r = await api.btFriendsEligible();
+      setFriends(r.friends || []);
     } catch (e: any) {
       showAlert('Failed to load friends', String(e?.message || e));
     } finally {
@@ -51,7 +62,8 @@ export default function GroupCreate() {
 
   useEffect(() => { load(); }, [load]);
 
-  const toggle = (id: string) => {
+  const toggle = (id: string, eligible: boolean) => {
+    if (!eligible) return;  // ineligible rows are not selectable
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -138,12 +150,23 @@ export default function GroupCreate() {
         ) : (
           friends.map((f) => {
             const isSel = selected.has(f.user_id);
+            // Three visual states per 2026-06-04 spec:
+            //   eligible:        full opacity, tappable, checkbox
+            //   no_app:          greyed + 🔒 lock icon (hasn't installed)
+            //   different_region greyed (no lock) — has BT but no overlap
+            const locked = f.reason === 'no_app';
+            const greyed = !f.eligible;
             return (
               <TouchableOpacity
                 key={f.user_id}
-                style={[styles.friendRow, isSel && styles.friendRowSel]}
-                onPress={() => toggle(f.user_id)}
-                activeOpacity={0.85}
+                style={[
+                  styles.friendRow,
+                  isSel && styles.friendRowSel,
+                  greyed && { opacity: 0.45 },
+                ]}
+                onPress={() => toggle(f.user_id, f.eligible)}
+                disabled={!f.eligible}
+                activeOpacity={f.eligible ? 0.85 : 1}
                 testID={`bt-friend-${f.user_id}`}
               >
                 <View style={[styles.avatar, { backgroundColor: colors.cyan + '22' }]}>
@@ -151,11 +174,22 @@ export default function GroupCreate() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.friendName}>{f.name}</Text>
-                  <Text style={styles.friendSub}>Lv {f.level} · {f.total_xp.toLocaleString()} XP</Text>
+                  <Text style={styles.friendSub}>
+                    {f.reason === 'no_app' ? 'Hasn’t opened Buried Treasure yet'
+                      : f.reason === 'different_region' ? `Different area${f.distance_km != null ? ` · ${f.distance_km} km away` : ''}`
+                      : f.reason === 'no_my_area' ? 'Set your hunt area first'
+                      : f.distance_km != null ? `In your area · ${f.distance_km} km` : 'In your area'}
+                  </Text>
                 </View>
-                <View style={[styles.checkbox, isSel && styles.checkboxOn]}>
-                  {isSel ? <Ionicons name="checkmark" size={16} color="#0b0f15" /> : null}
-                </View>
+                {locked ? (
+                  <Ionicons name="lock-closed" size={18} color={colors.textMuted} />
+                ) : !f.eligible ? (
+                  <Ionicons name="remove-circle-outline" size={18} color={colors.textMuted} />
+                ) : (
+                  <View style={[styles.checkbox, isSel && styles.checkboxOn]}>
+                    {isSel ? <Ionicons name="checkmark" size={16} color="#0b0f15" /> : null}
+                  </View>
+                )}
               </TouchableOpacity>
             );
           })

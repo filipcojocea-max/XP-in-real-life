@@ -214,9 +214,16 @@ function LobbyView({
   onBegan: () => void;
 }) {
   const router = useRouter();
-  const me = group.members.find((m) => m.user_id === group.members[0]?.user_id);
+  // 2026-06-04 spec: invitees may FLIP their answer (Accept ↔ Reject)
+  // at any point until the group transitions from "lobby" to
+  // "hunting" / "finished" — at which point the backend sets
+  // `responses_locked: true` and rejects further /accept|/reject hits.
+  const responsesLocked = !!(group as any).responses_locked || group.status !== 'lobby';
+  const me = group.members.find((m) => m.user_id === group.creator_id);
+  const myEntry = group.members.find((m) => m.my_status !== undefined as any) || null;
   // Identify "me" by my_status — server populates it.
   const myPending = group.my_status === 'pending';
+  const iAmInvitedNonCreator = group.my_status !== undefined && !group.is_creator;
   const others = group.members.filter((m) => m.user_id !== group.creator_id);
   const allAccepted = others.length > 0 && others.every((m) => m.status === 'accepted');
 
@@ -252,32 +259,42 @@ function LobbyView({
             <Text style={styles.memberName}>{m.name}</Text>
             <Text style={styles.memberStatus}>
               {m.user_id === group.creator_id ? 'Creator' :
-               m.status === 'accepted' ? 'In!' :
-               m.status === 'rejected' ? 'Out' : 'Pending'}
+               m.status === 'accepted' ? 'Invite Accepted' :
+               m.status === 'rejected' ? 'Invite Rejected' : 'Invited — Awaiting Reply'}
             </Text>
           </View>
         ))}
       </View>
 
-      {myPending ? (
+      {iAmInvitedNonCreator && !responsesLocked ? (
         <View style={styles.actionRow}>
           <TouchableOpacity
-            style={[styles.actionBtn, { backgroundColor: '#22C55E' }, busy && { opacity: 0.5 }]}
+            style={[
+              styles.actionBtn,
+              { backgroundColor: '#22C55E' },
+              busy && { opacity: 0.5 },
+              group.my_status === 'accepted' && { borderWidth: 2, borderColor: '#0b0f15' },
+            ]}
             disabled={busy}
             onPress={onAccept}
             testID="bt-accept"
           >
             <Ionicons name="checkmark" size={20} color="#0b0f15" />
-            <Text style={styles.actionText}>ACCEPT</Text>
+            <Text style={styles.actionText}>{group.my_status === 'accepted' ? 'ACCEPTED' : 'ACCEPT'}</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.actionBtn, { backgroundColor: colors.red }, busy && { opacity: 0.5 }]}
+            style={[
+              styles.actionBtn,
+              { backgroundColor: colors.red },
+              busy && { opacity: 0.5 },
+              group.my_status === 'rejected' && { borderWidth: 2, borderColor: '#fff' },
+            ]}
             disabled={busy}
             onPress={onReject}
             testID="bt-reject"
           >
             <Ionicons name="close" size={20} color="#fff" />
-            <Text style={[styles.actionText, { color: '#fff' }]}>REJECT</Text>
+            <Text style={[styles.actionText, { color: '#fff' }]}>{group.my_status === 'rejected' ? 'REJECTED' : 'REJECT'}</Text>
           </TouchableOpacity>
         </View>
       ) : null}

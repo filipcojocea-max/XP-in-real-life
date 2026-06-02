@@ -169,6 +169,17 @@ export default function SoloHunt() {
     };
   }, []);
 
+  // ─── Live "you are here" → mini-map blue dot ───────────────────────
+  // Pipe every GPS tick into both map WebViews (embedded + expanded)
+  // so the player can visually compare their position to the X marker.
+  useEffect(() => {
+    if (dailyStage !== 'active' || !gps) return;
+    mapRef.current?.setUserLocation(gps.lat, gps.lng);
+    if (mapExpanded) {
+      expandedMapRef.current?.setUserLocation(gps.lat, gps.lng);
+    }
+  }, [gps, dailyStage, mapExpanded]);
+
   // ─── Server compass (bearing + distance to chest) ───────────────
   const fetchCompass = useCallback(async () => {
     if (!gps) return;
@@ -450,6 +461,54 @@ export default function SoloHunt() {
           </View>
         </View>
       </Modal>
+      {/* ───────────── Expanded full-screen map modal ─────────────
+          Per Part-1 spec: tapping "EXPAND MAP" promotes the snapshot
+          to a full-screen modal with pan + pinch + zoom buttons all
+          enabled. Tapping "Minimize Map" returns to the embedded box.
+          We render a SECOND BTLeafletMap inside the modal so the small
+          map keeps its scroll position when the modal closes. */}
+      <Modal
+        visible={mapExpanded}
+        animationType="slide"
+        onRequestClose={() => setMapExpanded(false)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#0b0f15' }} edges={['top']}>
+          <View style={styles.header}>
+            <TouchableOpacity onPress={() => setMapExpanded(false)} style={styles.headerBtn}>
+              <Ionicons name="contract" size={22} color={colors.text} />
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>Treasure map · X marks the spot</Text>
+            <TouchableOpacity
+              onPress={() => setMapExpanded(false)}
+              style={[styles.headerBtn, { width: 'auto', paddingHorizontal: 10 }]}
+              testID="bt-minimize-map"
+            >
+              <Text style={{ color: colors.cyan, fontWeight: '900', fontSize: 11, letterSpacing: 1 }}>MINIMIZE</Text>
+            </TouchableOpacity>
+          </View>
+          {hunt?.chest_lat != null && hunt?.chest_lng != null ? (
+            <BTLeafletMap
+              ref={expandedMapRef}
+              mode="static"
+              initialLat={hunt.chest_lat}
+              initialLng={hunt.chest_lng}
+              initialZoom={17}
+              initialRadius={0}
+              markerShape="x"
+              markerColor="#EF4444"
+              ringColor="#EF4444"
+              interactive={true}
+              onReady={() => {
+                // Drop in the live user dot the moment the expanded
+                // map finishes loading, otherwise the player would
+                // see only the X until the next GPS tick.
+                if (gps) expandedMapRef.current?.setUserLocation(gps.lat, gps.lng);
+              }}
+              style={{ flex: 1 }}
+            />
+          ) : null}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -498,6 +557,15 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 4, borderColor: '#22C55E',
   },
+  // Styles
+  expandBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1, borderColor: colors.cyan + '88',
+    backgroundColor: colors.cyan + '22',
+  },
+  expandBtnText: { color: colors.cyan, fontSize: 9, fontWeight: '900', letterSpacing: 0.8 },
   // ── Daily interstitial ────────────────────────────────────────────
   gateWrap: {
     flex: 1, alignItems: 'center', justifyContent: 'center',

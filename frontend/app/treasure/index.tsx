@@ -53,6 +53,9 @@ export default function TreasureHome() {
   const [pendingMode, setPendingMode] = useState<PendingMode>(null);
   const [busy, setBusy] = useState(false);
 
+  // Bootstrap loads everything in parallel; on first run (no savedArea
+  // yet) we DROP STRAIGHT INTO THE MAP PICKER per 2026-06-04 spec so
+  // the player picks their hunt area before seeing anything else.
   const load = useCallback(async () => {
     setStage('loading');
     try {
@@ -69,10 +72,15 @@ export default function TreasureHome() {
           lng: settings.area.lng,
           radius_m: settings.area.radius_m,
         });
+        setStage('home');
       } else {
+        // First-time visit — force the area picker as the very first
+        // thing the user sees. `pendingMode=null` means we just save
+        // and return to home; nothing auto-starts.
         setSavedArea(null);
+        setPendingMode(null);
+        setStage('pickArea');
       }
-      setStage('home');
     } catch (e: any) {
       showAlert('Failed to load', String(e?.message || e));
       setStage('home');
@@ -193,10 +201,15 @@ export default function TreasureHome() {
         <BTMapPicker
           onConfirm={onAreaConfirmed}
           initialRadius={800}
+          title={
+            !savedArea && pendingMode === null
+              ? 'Welcome! Pick where you want to hunt.'
+              : 'Pick your hunt area'
+          }
           confirmLabel={
             pendingMode === 'solo' ? 'Save & start solo hunt'
               : pendingMode === 'friends' ? 'Save & go to friends'
-              : 'Save area'
+              : 'Done · Save my hunt area'
           }
         />
       </SafeAreaView>
