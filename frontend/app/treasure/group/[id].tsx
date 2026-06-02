@@ -319,7 +319,7 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
   const [spotPhoto, setSpotPhoto] = useState<string | null>(null);
   const [camOpen, setCamOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const mapRef = useRef<any>(null);
+  const mapRef = useRef<BTLeafletMapHandle | null>(null);
   const camRef = useRef<any>(null);
 
   useEffect(() => {
@@ -333,21 +333,24 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
   }, []);
 
   const snapMap = useCallback(async () => {
-    if (!mapRef.current || IS_WEB_PLACEHOLDER) {
-      // On web preview we can't capture the native map — fall back to
-      // a small generated placeholder so the flow can still complete.
+    // BTLeafletMap captures via html2canvas inside the WebView. If the
+    // capture fails for any reason (canvas tainted, network slow,
+    // unmounted mid-call) we degrade gracefully to a placeholder so the
+    // bury flow can still complete — the backend treats the map photo
+    // as a "best effort" image, not a verification artefact.
+    if (!mapRef.current) {
       setMapShot('PLACEHOLDER');
       return;
     }
     try {
-      const uri = await mapRef.current.takeSnapshot({
-        format: 'jpg', quality: 0.6, result: 'base64',
-      });
-      // react-native-maps returns a base64 string directly when result='base64'.
-      if (typeof uri === 'string' && uri.length > 200) setMapShot(uri);
+      const b64 = await mapRef.current.requestSnapshot();
+      if (b64 && b64.length > 200) setMapShot(b64);
       else throw new Error('Map returned empty snapshot.');
     } catch (e: any) {
-      showAlert('Could not capture map', String(e?.message || e));
+      // Soft-fail: log + placeholder so the user can still bury.
+      // eslint-disable-next-line no-console
+      console.warn('[bt] map snapshot failed', e?.message || e);
+      setMapShot('PLACEHOLDER');
     }
   }, []);
 
@@ -405,26 +408,17 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
         <Text style={styles.cardKicker}>1 · MAP SNAPSHOT</Text>
         {gps ? (
           <View style={styles.miniMap}>
-            <MapView
-              ref={mapRef as any}
+            <BTLeafletMap
+              ref={mapRef}
+              mode="static"
+              initialLat={gps.lat}
+              initialLng={gps.lng}
+              initialZoom={17}
+              initialRadius={15}
+              ringColor="#FFD166"
+              markerColor="#FFD166"
               style={StyleSheet.absoluteFill}
-              initialRegion={{
-                latitude: gps.lat,
-                longitude: gps.lng,
-                latitudeDelta: 0.003,
-                longitudeDelta: 0.003,
-              }}
-              showsUserLocation
-            >
-              <Marker coordinate={{ latitude: gps.lat, longitude: gps.lng }} pinColor="#FFD166" title="Chest spot" />
-              <Circle
-                center={{ latitude: gps.lat, longitude: gps.lng }}
-                radius={15}
-                strokeColor="#FFD166"
-                strokeWidth={2}
-                fillColor="rgba(255,209,102,0.25)"
-              />
-            </MapView>
+            />
           </View>
         ) : (
           <ActivityIndicator color={colors.cyan} style={{ marginVertical: 20 }} />

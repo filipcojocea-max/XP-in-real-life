@@ -1,14 +1,24 @@
 /**
  * /treasure — Buried Treasure entry screen.
  *
- * State machine:
- *   1. Loading        → fetch any current solo hunt + groups I'm in
- *   2. Idle           → no current hunts → big START HUNT button
- *   3. PickArea       → BTMapPicker, user confirms area + radius
- *   4. PickMode       → "Play Solo" / "Play with Friends"
+ * 2026-06-04 — full redesign per direct product spec:
  *
- * Resuming an in-progress solo hunt skips straight to /treasure/solo.
- * Active groups are listed at the bottom so you can jump back into them.
+ *   • The previous "Resume Solo Hunt / Start Hunt / Settings link"
+ *     layout is gone.
+ *   • Opens straight into TWO big buttons centred on the screen:
+ *       PLAY SOLO  ·  PLAY WITH FRIENDS
+ *   • Solo is now a single button — it auto-resumes any in-progress
+ *     hunt or starts a fresh one if nothing is saved.
+ *   • Settings live behind a small gear icon in the top-right corner.
+ *
+ * State machine:
+ *   1. loading  — bootstrap from /api
+ *   2. home     — the new two-button hub
+ *   3. pickArea — first-time map picker (only shown if no area saved
+ *                 yet AND the user clicked one of the play buttons)
+ *
+ * Pending intents (when the picker fires AFTER a play tap) are stored
+ * in `pendingMode` so the area picker knows what to do once confirmed.
  */
 import React, { useCallback, useState } from 'react';
 import {
@@ -27,18 +37,20 @@ import { api, type BTGroup, type BTSoloHunt } from '../../src/api';
 import { colors, radii, spacing } from '../../src/theme';
 import { showAlert } from '../../src/uiAlert';
 
-type Stage = 'loading' | 'idle' | 'pickArea' | 'pickMode';
+type Stage = 'loading' | 'home' | 'pickArea';
+type PendingMode = 'solo' | 'friends' | null;
 
 export default function TreasureHome() {
   const router = useRouter();
   const [stage, setStage] = useState<Stage>('loading');
   const [soloHunt, setSoloHunt] = useState<BTSoloHunt | null>(null);
   const [myGroups, setMyGroups] = useState<BTGroup[]>([]);
-  const [pickedArea, setPickedArea] = useState<BTAreaPicked | null>(null);
-  // Persistent area saved on first run from /api/bt/settings. When set
-  // we skip the BTMapPicker entirely on subsequent opens — the user
-  // can only change the area from /treasure/settings.
+  // Persistent hunt area from /api/bt/settings. When set the picker is
+  // skipped on every subsequent play; users edit it from the gear icon
+  // top-right.
   const [savedArea, setSavedArea] = useState<BTAreaPicked | null>(null);
+  // What the user intended to do BEFORE we made them pick an area.
+  const [pendingMode, setPendingMode] = useState<PendingMode>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -60,10 +72,10 @@ export default function TreasureHome() {
       } else {
         setSavedArea(null);
       }
-      setStage('idle');
+      setStage('home');
     } catch (e: any) {
       showAlert('Failed to load', String(e?.message || e));
-      setStage('idle');
+      setStage('home');
     }
   }, []);
 
@@ -73,61 +85,85 @@ export default function TreasureHome() {
     }, [load]),
   );
 
-  const onAreaConfirmed = useCallback((area: BTAreaPicked) => {
-    setPickedArea(area);
-    setStage('pickMode');
-    // Persist the picked area so subsequent opens skip the picker
-    // entirely. Fire-and-forget — failure here is non-blocking; the
-    // user can always re-edit from /treasure/settings.
-    api.btSaveSettings(area.lat, area.lng, area.radius_m).catch(() => {
-      // swallow — UI continues, area still applies for this session
-    });
-    setSavedArea(area);
-  }, []);
-
-  // Resolved area used by the play buttons. We prefer the freshly-
-  // picked area (mid-onboarding case) and fall back to the persisted
-  // settings so subsequent visits launch instantly without showing the
-  // map picker again. Per 2026-06-01 spec the picker only appears on
-  // first run — after that, location can only be changed from
-  // /treasure/settings.
-  const activeArea = pickedArea || savedArea;
-
-  // START HUNT entry — if we already have a saved area, jump straight
-  // to mode select; otherwise open the picker.
-  const onStartHunt = useCallback(() => {
-    if (savedArea) {
-      setPickedArea(savedArea);
-      setStage('pickMode');
-    } else {
-      setStage('pickArea');
+  // ── Play Solo (merged "resume" + "new") ────────────────────────────
+  // 1. If an active solo hunt is already in progress, jump straight
+  //    back into /treasure/solo so the user picks up where they left
+  //    off — no extra taps.
+  // 2. Otherwise, if we have a saved hunt area, kick off a brand-new
+  //    solo hunt against it and go straight into the chase screen.
+  // 3. If neither — we need to ask for an area first, so we drop into
+  //    the picker stage with `pendingMode='solo'`.
+  const onPlaySolo = useCallback(async () => {
+    if (busy) return;
+    // Active hunt? auto-resume.
+    if (soloHunt) {
+      router.push('/treasure/solo');
+      return;
     }
-  }, [savedArea]);
-
-  const startSolo = useCallback(async () => {
-    if (!activeArea || busy) return;
+    if (!savedArea) {
+      setPendingMode('solo');
+      setStage('pickArea');
+      return;
+    }
     setBusy(true);
     try {
-      await api.btSoloStart(activeArea.lat, activeArea.lng, activeArea.radius_m);
-      router.replace('/treasure/solo');
+      await api.btSoloStart(savedArea.lat, savedArea.lng, savedArea.radius_m);
+      router.push('/treasure/solo');
     } catch (e: any) {
       showAlert('Could not start hunt', String(e?.message || e));
     } finally {
       setBusy(false);
     }
-  }, [activeArea, busy, router]);
+  }, [busy, soloHunt, savedArea, router]);
 
-  const startFriends = useCallback(() => {
-    if (!activeArea) return;
+  const onPlayFriends = useCallback(() => {
+    if (busy) return;
+    if (!savedArea) {
+      setPendingMode('friends');
+      setStage('pickArea');
+      return;
+    }
     router.push({
       pathname: '/treasure/friends',
       params: {
-        lat: String(activeArea.lat),
-        lng: String(activeArea.lng),
-        radius_m: String(pickedArea.radius_m),
+        lat: String(savedArea.lat),
+        lng: String(savedArea.lng),
+        radius_m: String(savedArea.radius_m),
       },
     });
-  }, [pickedArea, router]);
+  }, [busy, savedArea, router]);
+
+  // After the picker fires (first-run only), persist the area and then
+  // honour whatever the user originally clicked.
+  const onAreaConfirmed = useCallback(async (area: BTAreaPicked) => {
+    const mode = pendingMode;
+    setSavedArea(area);
+    setPendingMode(null);
+    setStage('home');
+    // Fire-and-forget settings save — failure here is non-blocking and
+    // the user can re-edit from the gear icon any time.
+    api.btSaveSettings(area.lat, area.lng, area.radius_m).catch(() => {});
+    if (mode === 'solo') {
+      setBusy(true);
+      try {
+        await api.btSoloStart(area.lat, area.lng, area.radius_m);
+        router.push('/treasure/solo');
+      } catch (e: any) {
+        showAlert('Could not start hunt', String(e?.message || e));
+      } finally {
+        setBusy(false);
+      }
+    } else if (mode === 'friends') {
+      router.push({
+        pathname: '/treasure/friends',
+        params: {
+          lat: String(area.lat),
+          lng: String(area.lng),
+          radius_m: String(area.radius_m),
+        },
+      });
+    }
+  }, [pendingMode, router]);
 
   // ───────────────────────── render ─────────────────────────
   if (stage === 'loading') {
@@ -144,67 +180,30 @@ export default function TreasureHome() {
       <SafeAreaView style={styles.root} edges={['top']}>
         <Stack.Screen options={{ headerShown: false }} />
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => setStage('idle')} style={styles.headerBtn} testID="bt-back">
+          <TouchableOpacity
+            onPress={() => { setPendingMode(null); setStage('home'); }}
+            style={styles.headerBtn}
+            testID="bt-back-from-picker"
+          >
             <Ionicons name="chevron-back" size={22} color={colors.text} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Buried Treasure</Text>
+          <Text style={styles.headerTitle}>Pick your hunt area</Text>
           <View style={styles.headerBtn} />
         </View>
-        <BTMapPicker onConfirm={onAreaConfirmed} />
+        <BTMapPicker
+          onConfirm={onAreaConfirmed}
+          initialRadius={800}
+          confirmLabel={
+            pendingMode === 'solo' ? 'Save & start solo hunt'
+              : pendingMode === 'friends' ? 'Save & go to friends'
+              : 'Save area'
+          }
+        />
       </SafeAreaView>
     );
   }
 
-  if (stage === 'pickMode' && pickedArea) {
-    const radiusLabel = pickedArea.radius_m >= 1000
-      ? `${(pickedArea.radius_m / 1000).toFixed(1)} km`
-      : `${Math.round(pickedArea.radius_m)} m`;
-    return (
-      <SafeAreaView style={styles.root} edges={['top']}>
-        <Stack.Screen options={{ headerShown: false }} />
-        <View style={styles.header}>
-          <TouchableOpacity onPress={() => setStage('pickArea')} style={styles.headerBtn}>
-            <Ionicons name="chevron-back" size={22} color={colors.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>How do you want to play?</Text>
-          <View style={styles.headerBtn} />
-        </View>
-        <View style={styles.modeBody}>
-          <View style={styles.areaPill}>
-            <Ionicons name="location" size={14} color={colors.cyan} />
-            <Text style={styles.areaPillText}>Hunt area · {radiusLabel}</Text>
-          </View>
-          <TouchableOpacity
-            style={[styles.bigBtn, { backgroundColor: colors.cyan }]}
-            activeOpacity={0.85}
-            disabled={busy}
-            onPress={startSolo}
-            testID="bt-mode-solo"
-          >
-            <Ionicons name="person" size={26} color="#0b0f15" />
-            <View>
-              <Text style={styles.bigBtnTitle}>PLAY SOLO</Text>
-              <Text style={styles.bigBtnSub}>Find a randomly-buried chest near you</Text>
-            </View>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.bigBtn, { backgroundColor: '#FFD166' }]}
-            activeOpacity={0.85}
-            onPress={startFriends}
-            testID="bt-mode-friends"
-          >
-            <Ionicons name="people" size={26} color="#0b0f15" />
-            <View>
-              <Text style={styles.bigBtnTitle}>PLAY WITH FRIENDS</Text>
-              <Text style={styles.bigBtnSub}>Bury a chest, race your crew</Text>
-            </View>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  // idle
+  // home
   return (
     <SafeAreaView style={styles.root} edges={['top']}>
       <Stack.Screen options={{ headerShown: false }} />
@@ -213,9 +212,22 @@ export default function TreasureHome() {
           <Ionicons name="chevron-back" size={22} color={colors.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Buried Treasure</Text>
-        <View style={styles.headerBtn} />
+        {/* Settings gear (top-right) — only entry point to the area /
+            awake-hours settings screen now that the inline link is gone. */}
+        <TouchableOpacity
+          onPress={() => router.push('/treasure/settings')}
+          style={styles.headerBtn}
+          activeOpacity={0.7}
+          testID="bt-open-settings"
+        >
+          <Ionicons name="settings-outline" size={22} color={colors.cyan} />
+        </TouchableOpacity>
       </View>
-      <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+      >
         <View style={styles.hero}>
           <Ionicons name="map" size={42} color={colors.cyan} />
           <Text style={styles.heroTitle}>Find chests buried near you.</Text>
@@ -226,48 +238,50 @@ export default function TreasureHome() {
           </Text>
         </View>
 
-        {soloHunt ? (
+        {/* ───────── Two BIG buttons in the centre ───────── */}
+        <View style={styles.ctaStack}>
           <TouchableOpacity
-            style={styles.resumeCard}
+            style={[styles.bigBtn, { backgroundColor: colors.cyan }]}
             activeOpacity={0.85}
-            onPress={() => router.push('/treasure/solo')}
-            testID="bt-resume-solo"
+            disabled={busy}
+            onPress={onPlaySolo}
+            testID="bt-play-solo"
           >
-            <Ionicons name="flame" size={22} color={colors.cyan} />
+            <Ionicons name="person" size={26} color="#0b0f15" />
             <View style={{ flex: 1 }}>
-              <Text style={styles.resumeTitle}>Resume solo hunt</Text>
-              <Text style={styles.resumeSub}>Your chest is still waiting to be found.</Text>
+              <Text style={styles.bigBtnTitle}>PLAY SOLO</Text>
+              <Text style={styles.bigBtnSub}>
+                {soloHunt ? 'Resume your hunt in progress' : 'Find a randomly-buried chest near you'}
+              </Text>
             </View>
-            <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+            {busy ? (
+              <ActivityIndicator color="#0b0f15" />
+            ) : (
+              <Ionicons name="chevron-forward" size={20} color="#0b0f15" />
+            )}
           </TouchableOpacity>
-        ) : null}
 
-        <TouchableOpacity
-          style={styles.startBtn}
-          activeOpacity={0.85}
-          onPress={onStartHunt}
-          testID="bt-start-hunt"
-        >
-          <Ionicons name="play" size={20} color="#0b0f15" />
-          <Text style={styles.startBtnText}>START HUNT</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.bigBtn, { backgroundColor: '#FFD166' }]}
+            activeOpacity={0.85}
+            disabled={busy}
+            onPress={onPlayFriends}
+            testID="bt-play-friends"
+          >
+            <Ionicons name="people" size={26} color="#0b0f15" />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.bigBtnTitle}>PLAY WITH FRIENDS</Text>
+              <Text style={styles.bigBtnSub}>Bury a chest, race your crew</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#0b0f15" />
+          </TouchableOpacity>
+        </View>
 
-        {/* Mini-App Settings — only entry point for editing the saved
-            hunt area after the first run. Per 2026-06-01 spec the home
-            map picker only fires when there's no area saved yet. */}
-        <TouchableOpacity
-          style={styles.settingsBtn}
-          activeOpacity={0.85}
-          onPress={() => router.push('/treasure/settings')}
-          testID="bt-open-settings"
-        >
-          <Ionicons name="settings-outline" size={18} color={colors.cyan} />
-          <Text style={styles.settingsBtnText}>
-            {savedArea ? 'Mini-App Settings · change hunt area' : 'Mini-App Settings'}
-          </Text>
-          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
-        </TouchableOpacity>
-
+        {/* ───────── Compact "your groups" list ─────────
+            Kept as a single compact rail so users can dive back into
+            an existing group without going through the friends hub.
+            Intentionally minimal — the main two CTAs above are the
+            only "primary" buttons on this screen. */}
         {myGroups.length > 0 ? (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>YOUR GROUPS</Text>
@@ -323,6 +337,7 @@ const styles = StyleSheet.create({
   },
   headerBtn: { width: 40, height: 36, alignItems: 'center', justifyContent: 'center' },
   headerTitle: { color: colors.text, fontSize: 15, fontWeight: '800', flex: 1, textAlign: 'center' },
+  scroll: { padding: spacing.md, gap: spacing.lg, paddingBottom: spacing.xl ?? 32 },
   hero: {
     alignItems: 'center', padding: spacing.lg, gap: 10,
     backgroundColor: colors.surface, borderRadius: radii.lg,
@@ -330,41 +345,15 @@ const styles = StyleSheet.create({
   },
   heroTitle: { color: colors.text, fontSize: 18, fontWeight: '800', textAlign: 'center' },
   heroSub: { color: colors.textSecondary, fontSize: 13, lineHeight: 18, textAlign: 'center' },
-  startBtn: {
-    backgroundColor: colors.cyan, borderRadius: radii.lg,
-    paddingVertical: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
-  },
-  startBtnText: { color: '#0b0f15', fontWeight: '900', fontSize: 16, letterSpacing: 1 },
-  // Secondary row tucked under the START HUNT button — the player's
-  // only path back into /treasure/settings once a hunt area is saved.
-  settingsBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingVertical: 12, paddingHorizontal: 14,
-    backgroundColor: colors.surface,
-    borderRadius: radii.md,
-    borderWidth: 1, borderColor: colors.border,
-  },
-  settingsBtnText: { color: colors.cyan, fontWeight: '800', fontSize: 12, flex: 1, letterSpacing: 0.4 },
-  resumeCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    backgroundColor: colors.cyan + '15', borderRadius: radii.lg,
-    borderWidth: 1, borderColor: colors.cyan + '55', padding: spacing.md,
-  },
-  resumeTitle: { color: colors.text, fontWeight: '800', fontSize: 14 },
-  resumeSub: { color: colors.textSecondary, fontSize: 12, marginTop: 2 },
-  modeBody: { padding: spacing.md, gap: spacing.md },
-  areaPill: {
-    alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999,
-    borderWidth: 1, borderColor: colors.cyan + '55', backgroundColor: colors.cyan + '15',
-  },
-  areaPillText: { color: colors.cyan, fontWeight: '800', fontSize: 11, letterSpacing: 0.5 },
+  // CTA stack — kept slightly larger than typical buttons so it reads
+  // like the "main action area" of the screen.
+  ctaStack: { gap: spacing.md, marginTop: spacing.sm },
   bigBtn: {
-    borderRadius: radii.lg, padding: spacing.md,
+    borderRadius: radii.lg, paddingVertical: 22, paddingHorizontal: spacing.md,
     flexDirection: 'row', alignItems: 'center', gap: 14,
   },
-  bigBtnTitle: { color: '#0b0f15', fontWeight: '900', fontSize: 15, letterSpacing: 1 },
-  bigBtnSub: { color: '#0b0f15CC', fontSize: 11, marginTop: 2 },
+  bigBtnTitle: { color: '#0b0f15', fontWeight: '900', fontSize: 16, letterSpacing: 1 },
+  bigBtnSub: { color: '#0b0f15CC', fontSize: 12, marginTop: 3 },
   section: { marginTop: spacing.md, gap: 8 },
   sectionTitle: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
   groupRow: {

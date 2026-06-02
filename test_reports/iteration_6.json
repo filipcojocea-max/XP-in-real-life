@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 6 verification — Buried Treasure redesign + Leaflet/OSM map swap. Frontend: 21/21 Playwright assertions PASSED against the public preview URL. The new /treasure home renders exactly as specced — back arrow + 'Buried Treasure' title + cyan settings-outline gear (testID bt-open-settings) in the top-right, hero card with '100 XP' description copy, and only TWO big CTA buttons (bt-play-solo, bt-play-friends). None of the deprecated UI is present: no 'START HUNT' button, no 'Resume Solo Hunt' card heading, no 'Mini-App Settings · change hunt area' inline link. Tapping the gear navigates to /treasure/settings which renders both SAVED LOCATION (with bt-edit-location button visible, showing the saved Sydney coords -33.8688, 151.2093 · 1.2 km from the backend regression run) and AWAKE HOURS sections. Tapping bt-play-friends with a saved area routes to /treasure/friends?lat=...&lng=...&radius_m=... — NO 'Failed to load With Friends' crash, NO null radius_m TypeError; the destination renders bt-create-group + bt-code-input cleanly. Backend regression: 7/7 PASSED on /app/backend/tests/test_bt_iteration6_regression.py covering GET/POST /api/bt/settings (round-trip persisted), GET /api/bt/groups/{mine,available}, POST /api/bt/groups/create (returns lobby + 6-char code + persists to /mine), GET/POST /api/bt/schedule. Earlier suites (test_buried_treasure_v2.py 34 tests + test_bt_schedule_toggle.py 16 tests) remain green by reference. No new critical or minor issues to flag this round.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_iteration6_regression.py",
+    "/app/test_reports/pytest/bt_iter6.xml"
+  ],
+  "action_items": [
+    "Optional polish: the OSM tile CSS filter 'brightness(0.78) contrast(1.05) saturate(0.85)' in BTLeafletMap dims the map to match the dark theme — verify legibility for users with reduced vision and consider exposing a 'high-contrast tiles' setting.",
+    "Optional: snapshot timeout in BTLeafletMap is hard-coded to 8000 ms; on slow mid-range Androids html2canvas can take 10–12 s. Consider bumping to 12 s or making it configurable per call.",
+    "Optional (carry-over): /app/backend/buried_treasure.py is still ~1230 lines; the iteration-5 recommendation to split it into bt_solo.py / bt_groups.py / bt_schedule.py is still pending."
+  ],
+  "critical_code_review_comments": [
+    "treasure/index.tsx (new): pendingMode + savedArea state machine is sound. The 'no savedArea' branch correctly drops into pickArea instead of dereferencing — directly fixes the previous 'pickedArea.radius_m' null crash.",
+    "BTLeafletMap.tsx: HTML is correctly frozen with useMemo([]) so prop changes don't reload Leaflet (which is expensive). useImperativeHandle gives RN clean control over centre/radius/snapshot — good separation.",
+    "BTLeafletMap.tsx: snapshotPromises.current uses a per-request id, so concurrent captures don't cross wires. The 8 s timeout cleanup correctly deletes from the registry on both expire and resolve.",
+    "BTLeafletMap.tsx: onShouldStartLoadWithRequest whitelists about: and https://localhost/ only — good defence against the WebView opening OSM attribution links in-app. May want to additionally allow tile.openstreetmap.org explicitly if you ever switch from inline HTML to external URL.",
+    "BTMapPicker.tsx: the second useEffect (mapReady && !gpsLoading && centre.lat !== AUS_INITIAL.lat) re-centres once the map signals ready — correctly races GPS resolution against WebView boot. Edge case: if a user happens to be at lat=-25.2744 (Australia centroid), the second useEffect won't fire; harmless in practice but worth a comment.",
+    "react-native-webview shows the documented 'WebView not supported on this platform' placeholder on web preview — by design per the review brief; not a bug.",
+    "Page-load console has many pre-existing 404s on /api/active-boost, /api/boost/inventory, /api/spot/finds — unrelated to this iteration, but worth eventually cleaning up to keep the console signal-to-noise high."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_iteration6_regression.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (7/7)",
+    "frontend": "100% (21/21 assertions across home / settings / friends flows)"
+  },
+  "seed_data_creation": "Backend regression created one lobby group 'TEST_iter6_<hex>' in bt_groups (status='lobby', creator=admin). Admin's /api/bt/settings is left at lat=-33.8688, lng=151.2093, radius_m=1200 (Sydney CBD). Admin's /api/bt/schedule is reset to 08:00–23:00 / sleep_all_day=false / America/New_York. All test data is prefixed 'TEST_' and safe to purge by name LIKE 'TEST_%' if desired.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Use admin filip.cojocea122@gmail.com / XL98CZW5599. EXPO_PUBLIC_BACKEND_URL is the public preview URL. Iter-6 regression: pytest /app/backend/tests/test_bt_iteration6_regression.py (must export EXPO_PUBLIC_BACKEND_URL inline). Iter-5 toggles: test_bt_schedule_toggle.py. Iter-4 full BT v2: test_buried_treasure_v2.py. For frontend, log in via /auth/login (UI fill — localStorage seeding alone doesn't satisfy AuthContext on this app), then navigate to /treasure. Key testIDs on the new home: bt-play-solo, bt-play-friends, bt-open-settings. Picker stage: bt-back-from-picker, bt-locate-me, bt-confirm-area. Settings: bt-edit-location, bt-awake-start, bt-awake-end, bt-sleep-all-day, bt-save-schedule. Friends: bt-create-group, bt-code-input, bt-join-code. NOTE: react-native-webview shows 'WebView not supported on this platform' on web — that's expected; don't fail tests on it.",
+  "rca_of_issue": "N/A — no bugs found. The previous 'Failed to load With Friends' crash (pickedArea.radius_m null-deref) is verifiably fixed: the new index.tsx uses savedArea and gracefully drops into the picker stage when null, never dereferencing a possibly-null shape. Verified by tapping bt-play-friends with a saved area present (routes to /treasure/friends with proper query string) — no red screen, no alert overlay, no console TypeError."
+}

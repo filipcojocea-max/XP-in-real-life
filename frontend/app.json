@@ -25,11 +25,6 @@
       "package": "app.emergent.xpconfidencec2316dfc2",
       "googleServicesFile": "./google-services.json",
       "versionCode": 1030,
-      "config": {
-        "googleMaps": {
-          "apiKey": "AIzaSyDeKaODqTyoCmvyICTJM3voFI3NmWIoS4M"
-        }
-      },
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/new-icon.png",
         "backgroundColor": "#000000"

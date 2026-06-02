@@ -1,16 +1,24 @@
 /**
- * Platform shim for react-native-maps.
+ * @deprecated 2026-06-04 — Google Maps / react-native-maps were
+ * replaced by <BTLeafletMap /> (WebView + Leaflet + OSM). This file
+ * intentionally re-exports the Leaflet stack under the legacy names so
+ * any straggling imports keep compiling, but new code should import
+ * `BTLeafletMap` directly.
  *
- * react-native-maps relies on `codegenNativeComponent`, which is not
- * implemented on react-native-web, so importing it on the web preview
- * crashes the bundle with "(0, _reactNativeWebDistIndex.codegenNative
- * Component) is not a function". This file is the NATIVE variant — the
- * companion `MapShim.web.tsx` provides a safe placeholder for the web
- * Preview-in-Browser environment. Metro picks the right one based on the
- * platform extension at bundle time.
+ * The legacy <MapView>/<Marker>/<Circle> components from react-native-maps
+ * are NOT available anymore — calling them throws so callers notice
+ * during development. The `IS_WEB_PLACEHOLDER` flag is preserved so the
+ * group-bury flow's old branch keeps working.
  */
-import MapView, { Marker, Circle, Polygon } from 'react-native-maps';
-
-export { MapView, Marker, Circle, Polygon };
-export default MapView;
+export { default as MapView } from './BTLeafletMap';
+export { default } from './BTLeafletMap';
 export const IS_WEB_PLACEHOLDER = false;
+
+const _throw = (name: string) => () => {
+  throw new Error(
+    `MapShim.${name} is deprecated — use <BTLeafletMap /> instead.`,
+  );
+};
+export const Marker = _throw('Marker');
+export const Circle = _throw('Circle');
+export const Polygon = _throw('Polygon');

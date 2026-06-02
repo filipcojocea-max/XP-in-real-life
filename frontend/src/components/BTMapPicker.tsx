@@ -1,21 +1,24 @@
 /**
  * <BTMapPicker /> — Buried Treasure location + radius picker.
  *
- * Renders the player's current GPS pin plus an adjustable blue radius
- * circle on a Google Map. A slider lets them stretch the radius from
- * 100 m up to 25 km. When the user confirms we return {lat, lng,
- * radius_m} to the caller.
+ * 2026-06-04: rebuilt on top of <BTLeafletMap /> (WebView + Leaflet +
+ * OpenStreetMap) — we ditched Google Maps / react-native-maps after
+ * weeks of unreliable rendering on the user's Android devices. No API
+ * keys needed, identical UX on iOS and Android.
  *
- * The actual map ships from `react-native-maps` via the shared MapShim
- * so it lights up on iOS / Android. On the web preview we still render
- * a non-map fallback (the MapShim.web variant) so this component never
- * crashes the bundle there.
+ * UX:
+ *   1. Opens centred on Australia (per spec) so a brand-new user
+ *      sees a familiar starting view even before location permission
+ *      is resolved.
+ *   2. Requests foreground location; on grant we recenter to the
+ *      user's GPS at street-level zoom and drop the pin there.
+ *   3. User can tap or drag the pin to fine-tune the hunt centre.
+ *   4. Slider in RN drives the radius circle imperatively.
  */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Dimensions,
-  Platform,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -24,12 +27,14 @@ import {
 import Slider from '@react-native-community/slider';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
-import MapView, { Circle, Marker, IS_WEB_PLACEHOLDER } from './MapShim';
+import BTLeafletMap, { type BTLeafletMapHandle, type LatLng } from './BTLeafletMap';
 import { colors, radii, spacing } from '../theme';
-import { showAlert } from '../uiAlert';
 
 const MIN_RADIUS = 100;     // metres
 const MAX_RADIUS = 25_000;  // metres
+
+// Australia centroid — initial view per spec.
+const AUS_INITIAL = { lat: -25.2744, lng: 133.7751, zoom: 4 };
 
 const fmtRadius = (m: number) =>
   m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
@@ -39,6 +44,9 @@ export type BTAreaPicked = { lat: number; lng: number; radius_m: number };
 type Props = {
   onConfirm: (area: BTAreaPicked) => void;
   initialRadius?: number;
+  /** Optional pre-set centre (used by /treasure/settings when editing). */
+  initialLat?: number;
+  initialLng?: number;
   title?: string;
   confirmLabel?: string;
 };
@@ -46,20 +54,94 @@ type Props = {
 export default function BTMapPicker({
   onConfirm,
   initialRadius = 800,
-  title = 'Select what location you’re at',
+  initialLat,
+  initialLng,
+  title = 'Pick where you’re hunting',
   confirmLabel = 'Confirm location & area',
 }: Props) {
-  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [loadingGPS, setLoadingGPS] = useState(true);
-  const [radius, setRadius] = useState(initialRadius);
-  const [permError, setPermError] = useState<string | null>(null);
-  const mapRef = useRef<any>(null);
+  const mapRef = useRef<BTLeafletMapHandle | null>(null);
+  // Centre is initially Australia OR the caller-provided value; it gets
+  // overridden by the GPS result once the permission resolves.
+  const [centre, setCentre] = useState<LatLng>(() => ({
+    lat: typeof initialLat === 'number' ? initialLat : AUS_INITIAL.lat,
+    lng: typeof initialLng === 'number' ? initialLng : AUS_INITIAL.lng,
+  }));
+  const [radius, setRadius] = useState<number>(initialRadius);
+  const [gpsLoading, setGpsLoading] = useState<boolean>(typeof initialLat !== 'number');
+  const [permNote, setPermNote] = useState<string | null>(null);
+  const [mapReady, setMapReady] = useState(false);
 
-  const fetchGPS = async () => {
-    setLoadingGPS(true);
-    setPermError(null);
+  // GPS auto-locate — only runs when the caller didn't pre-set a centre.
+  useEffect(() => {
+    if (typeof initialLat === 'number') {
+      setGpsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const cur = await Location.getForegroundPermissionsAsync();
+        let granted = cur.status === 'granted';
+        if (!granted && cur.canAskAgain) {
+          const r = await Location.requestForegroundPermissionsAsync();
+          granted = r.status === 'granted';
+        }
+        if (!granted) {
+          if (!cancelled) {
+            setPermNote(
+              cur.canAskAgain === false
+                ? 'Location is blocked — tap the map to drop a pin.'
+                : 'Allow Location to auto-drop your pin, or tap the map.',
+            );
+            setGpsLoading(false);
+          }
+          return;
+        }
+        const pos = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        if (cancelled) return;
+        const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setCentre(next);
+        setGpsLoading(false);
+        // Recenter the WebView once it's ready. If the map isn't yet
+        // mounted we just rely on the `mapReady` effect below.
+        mapRef.current?.setCenter(next.lat, next.lng, 14);
+      } catch (e: any) {
+        if (!cancelled) {
+          setPermNote('Could not get your location — tap the map to drop a pin.');
+          setGpsLoading(false);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Push slider changes into the WebView circle.
+  useEffect(() => {
+    if (mapReady) mapRef.current?.setRadius(radius);
+  }, [radius, mapReady]);
+
+  // When the WebView signals ready AFTER we already received GPS, jump
+  // straight to street zoom. This fixes a race where the map mounted
+  // before the GPS resolved.
+  useEffect(() => {
+    if (mapReady && !gpsLoading && centre.lat !== AUS_INITIAL.lat) {
+      mapRef.current?.setCenter(centre.lat, centre.lng, 14);
+      mapRef.current?.setRadius(radius);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady]);
+
+  const onCentreChange = useCallback((c: LatLng) => {
+    setCentre(c);
+  }, []);
+
+  const onLocateMe = useCallback(async () => {
+    setGpsLoading(true);
+    setPermNote(null);
     try {
-      // Check existing perm first so we don't double-prompt.
       const cur = await Location.getForegroundPermissionsAsync();
       let granted = cur.status === 'granted';
       if (!granted && cur.canAskAgain) {
@@ -67,109 +149,67 @@ export default function BTMapPicker({
         granted = r.status === 'granted';
       }
       if (!granted) {
-        setPermError(
+        setPermNote(
           cur.canAskAgain === false
-            ? "Location is blocked. Open Settings to allow Location for this app."
-            : "Allow Location to drop your pin on the map.",
+            ? 'Location is blocked. Open Settings to allow it.'
+            : 'Permission denied — tap the map to drop a pin.',
         );
-        setLoadingGPS(false);
         return;
       }
       const pos = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
-      setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      setCentre(next);
+      mapRef.current?.setCenter(next.lat, next.lng, 14);
     } catch (e: any) {
-      setPermError(String(e?.message || e));
+      setPermNote(String(e?.message || e));
     } finally {
-      setLoadingGPS(false);
+      setGpsLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchGPS();
   }, []);
 
-  // Re-fit the map whenever the radius changes so the entire circle
-  // stays in view as the user drags the slider.
-  useEffect(() => {
-    if (!mapRef.current || !coords || IS_WEB_PLACEHOLDER) return;
-    // 1° latitude  ≈ 111_320 m so we convert the radius to a degree
-    // delta with a small zoom-out factor so the ring isn't flush with
-    // the screen edge.
-    const latDelta = (radius / 111_320) * 3.2;
-    try {
-      mapRef.current.animateToRegion(
-        {
-          latitude: coords.lat,
-          longitude: coords.lng,
-          latitudeDelta: latDelta,
-          longitudeDelta: latDelta,
-        },
-        400,
-      );
-    } catch {
-      // Some platforms don't support animateToRegion before first layout
-    }
-  }, [radius, coords]);
-
-  const initialRegion = useMemo(() => {
-    if (!coords) return undefined;
-    const latDelta = (radius / 111_320) * 3.2;
-    return {
-      latitude: coords.lat,
-      longitude: coords.lng,
-      latitudeDelta: latDelta,
-      longitudeDelta: latDelta,
-    };
-  }, [coords]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  if (loadingGPS) {
-    return (
-      <View style={styles.fill}>
-        <ActivityIndicator color={colors.cyan} />
-        <Text style={styles.status}>Finding your location…</Text>
-      </View>
-    );
-  }
-
-  if (permError || !coords) {
-    return (
-      <View style={styles.fill}>
-        <Ionicons name="location-outline" size={40} color={colors.amber} />
-        <Text style={[styles.status, { color: colors.amber, marginTop: 12 }]}>{permError || 'Location unavailable.'}</Text>
-        <TouchableOpacity onPress={fetchGPS} style={styles.retryBtn}>
-          <Text style={styles.retryText}>Try again</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+  const initialZoom = useMemo(
+    () => (typeof initialLat === 'number' ? 14 : AUS_INITIAL.zoom),
+    [initialLat],
+  );
 
   return (
     <View style={styles.wrap}>
       <Text style={styles.title}>{title}</Text>
       <View style={styles.mapBox}>
-        <MapView
-          ref={mapRef as any}
+        <BTLeafletMap
+          ref={mapRef}
+          mode="picker"
+          initialLat={centre.lat}
+          initialLng={centre.lng}
+          initialZoom={initialZoom}
+          initialRadius={radius}
+          onCenterChange={onCentreChange}
+          onReady={() => setMapReady(true)}
           style={StyleSheet.absoluteFill}
-          initialRegion={initialRegion as any}
-          showsUserLocation
-          showsMyLocationButton={Platform.OS === 'android'}
+        />
+        {/* Locate-me FAB */}
+        <TouchableOpacity
+          onPress={onLocateMe}
+          activeOpacity={0.85}
+          style={styles.fab}
+          testID="bt-locate-me"
         >
-          <Marker
-            coordinate={{ latitude: coords.lat, longitude: coords.lng }}
-            title="You are here"
-            pinColor="#22D3EE"
-          />
-          <Circle
-            center={{ latitude: coords.lat, longitude: coords.lng }}
-            radius={radius}
-            strokeColor="#22D3EE"
-            strokeWidth={2}
-            fillColor="rgba(34, 211, 238, 0.18)"
-          />
-        </MapView>
+          {gpsLoading ? (
+            <ActivityIndicator color={colors.cyan} size="small" />
+          ) : (
+            <Ionicons name="locate" size={20} color={colors.cyan} />
+          )}
+        </TouchableOpacity>
       </View>
+
+      {permNote ? (
+        <View style={styles.note}>
+          <Ionicons name="information-circle" size={14} color={colors.amber} />
+          <Text style={styles.noteText}>{permNote}</Text>
+        </View>
+      ) : null}
 
       <View style={styles.controls}>
         <View style={styles.row}>
@@ -198,7 +238,7 @@ export default function BTMapPicker({
         style={styles.confirmBtn}
         activeOpacity={0.85}
         onPress={() =>
-          onConfirm({ lat: coords.lat, lng: coords.lng, radius_m: radius })
+          onConfirm({ lat: centre.lat, lng: centre.lng, radius_m: radius })
         }
         testID="bt-confirm-area"
       >
@@ -213,8 +253,6 @@ const { width } = Dimensions.get('window');
 
 const styles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: colors.bg },
-  fill: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 8, backgroundColor: colors.bg },
-  status: { color: colors.textSecondary, fontSize: 13, textAlign: 'center' },
   title: {
     color: colors.text,
     fontSize: 15,
@@ -228,8 +266,30 @@ const styles = StyleSheet.create({
   mapBox: {
     width: '100%',
     height: Math.min(420, width * 1.0),
-    backgroundColor: '#1d2126',
+    backgroundColor: '#1a1d22',
+    position: 'relative',
   },
+  fab: {
+    position: 'absolute',
+    right: 12,
+    bottom: 12,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#0b0f15EE',
+    borderWidth: 1,
+    borderColor: colors.cyan + '88',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  note: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: spacing.md, paddingVertical: 8,
+    backgroundColor: '#FFB02011',
+    borderBottomWidth: 1,
+    borderColor: '#FFB02033',
+  },
+  noteText: { color: colors.amber, fontSize: 11, flex: 1 },
   controls: {
     padding: spacing.md,
     backgroundColor: colors.surface,
@@ -252,13 +312,4 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   confirmText: { color: '#0b0f15', fontWeight: '900', fontSize: 14, letterSpacing: 0.4 },
-  retryBtn: {
-    marginTop: 16,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: radii.md,
-    borderWidth: 1,
-    borderColor: colors.cyan,
-  },
-  retryText: { color: colors.cyan, fontWeight: '800' },
 });
