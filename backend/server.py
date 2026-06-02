@@ -1668,7 +1668,12 @@ async def list_tasks(date: Optional[str] = None, user_id: str = Depends(get_user
     target_date = date or today_str()
     tasks = await db.tasks.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
     logs = await db.task_logs.find({"user_id": user_id, "date": target_date}, {"_id": 0}).to_list(1000)
-    done_ids = {log["task_id"] for log in logs}
+    # 2026-06-02 — guard against legacy task_log docs missing `task_id`.
+    # Older clients (and a couple of broken seed scripts) wrote logs
+    # without the field; that used to crash this endpoint with a 500
+    # KeyError. Filter the missing ones rather than throwing — the
+    # "completed" flag for those orphaned logs is just unrecoverable.
+    done_ids = {log["task_id"] for log in logs if log.get("task_id")}
     for t in tasks:
         t["completed"] = t["id"] in done_ids
 
@@ -1684,7 +1689,13 @@ async def list_tasks(date: Optional[str] = None, user_id: str = Depends(get_user
         d_str = (target_d - timedelta(days=delta)).isoformat()
         prior = await db.task_logs.find({"user_id": user_id, "date": d_str}, {"_id": 0}).sort("completed_at", 1).to_list(1000)
         if prior:
-            rank_map = {log["task_id"]: i for i, log in enumerate(prior)}
+            # Same defensive filter as above — orphaned logs without a
+            # `task_id` get a stable, very-large rank so they sort last.
+            rank_map = {
+                log["task_id"]: i
+                for i, log in enumerate(prior)
+                if log.get("task_id")
+            }
             rank_source_date = d_str
             break
 

@@ -76,16 +76,41 @@ export default function SoloHunt() {
   }, []);
 
   // ─── Magnetometer (device heading) ──────────────────────────────
+  // 2026-06-02 — wrapped in availability + try/catch. On some Android
+  // devices the `_nativeModule.addListener` symbol is missing (no
+  // magnetometer hardware, sensor blocked by OEM power policy, or the
+  // expo-sensors native module wasn't bridged in time). Without this
+  // guard the entire Solo screen crashes on mount with
+  // "this._nativeModule.addListener is not a function" before the user
+  // can even see the compass. Compass rotation is purely a
+  // nice-to-have — the chest-find logic only needs GPS — so we degrade
+  // silently if sensors aren't available.
   useEffect(() => {
-    Magnetometer.setUpdateInterval(120);
-    const sub = Magnetometer.addListener(({ x, y }) => {
-      // atan2 gives -π..π; convert to compass deg 0..360 (0 = north)
-      let deg = Math.atan2(y, x) * (180 / Math.PI);
-      deg = (deg + 360 + 90) % 360;
-      setHeading(deg);
-    });
-    magSubRef.current = sub;
+    let cancelled = false;
+    (async () => {
+      try {
+        const available = await Magnetometer.isAvailableAsync();
+        if (!available || cancelled) return;
+        try {
+          Magnetometer.setUpdateInterval(120);
+        } catch { /* setUpdateInterval can throw on Android 14 when the
+                     sensor service is rate-limited — non-fatal. */ }
+        const sub = Magnetometer.addListener(({ x, y }) => {
+          // atan2 gives -π..π; convert to compass deg 0..360 (0 = north)
+          let deg = Math.atan2(y, x) * (180 / Math.PI);
+          deg = (deg + 360 + 90) % 360;
+          setHeading(deg);
+        });
+        magSubRef.current = sub;
+      } catch (e) {
+        // Final safety net — DO NOT propagate. Heading stays at 0 and
+        // the compass arrow just points north until the user moves.
+        // eslint-disable-next-line no-console
+        console.warn('[solo] Magnetometer unavailable:', (e as any)?.message || e);
+      }
+    })();
     return () => {
+      cancelled = true;
       try { magSubRef.current?.remove(); } catch {}
     };
   }, []);

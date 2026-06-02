@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 7 targeted regression. Backend: 4/4 pytest tests PASS — GET /api/tasks returns 200 with correct shape; orphan task_log docs (missing task_id) on both today and prior-day rank-source DO NOT trigger a 500 anymore; create→complete→list flow still marks the task completed: true. Frontend (optional sanity): After restarting Expo to flush a stale Metro bundle, /treasure/solo no longer emits _nativeModule.addListener errors on mount. (NOTE: The first run reproduced the original Uncaught error because the bundle had not been rebuilt after E1's fix — flushing the bundle resolved it. The Solo screen still requires auth to fully mount; the optional auth-gated path is therefore only partially exercised on web preview.)",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_tasks_orphan_regression.py",
+    "/app/test_reports/pytest/iter7_orphan.xml"
+  ],
+  "action_items": [
+    "After applying frontend hot-fixes to Magnetometer/sensor code, restart expo (sudo supervisorctl restart expo) — Metro is in CI mode (reloads disabled), so stale bundles will keep firing the old error otherwise.",
+    "Optional UX hardening: the existing inner try/catch around Magnetometer.setUpdateInterval can also wrap the addListener call so that even web-preview's misleading isAvailableAsync()=true does not surface a console error; currently it falls through to the outer catch which warns silently — acceptable but noisy."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1676,1694 — defensive `if log.get('task_id')` guards are correct and idempotent; consider a one-off migration / startup cleanup to delete orphan task_logs (where task_id is missing) instead of leaving them in the collection forever.",
+    "solo.tsx:88-116 — Magnetometer.isAvailableAsync() returns true on web (we observed `setUpdateInterval() is not supported on web` warning emitted), so the availability gate doesn't protect web; safety still works because the outer try/catch swallows the addListener throw."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_tasks_orphan_regression.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "partial — auth-gated mount not fully exercised on web"},
+  "seed_data_creation": "Synthetic orphan task_logs (missing task_id) inserted via pymongo for the admin user on today + yesterday; deleted in test teardown. Also created and deleted two TEST_ tasks via API.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend fix for orphan task_logs is verified end-to-end. Reuse /app/backend/tests/test_tasks_orphan_regression.py for future regressions. If frontend Magnetometer regression resurfaces, FIRST flush Metro (`sudo supervisorctl restart expo`) before reproducing — CI=true blocks live reload and stale bundles are common here.",
+  "rca_of_issue": "Backend RCA: legacy/broken seed scripts inserted task_log docs without a task_id field. The dict comprehensions at server.py:1676 and 1694 used `log['task_id']` directly, raising KeyError and surfacing as 500. Fix adds `if log.get('task_id')` filter on both. Reproduced by inserting `{user_id, date, completed_at}` doc with no task_id → endpoint now returns 200. Frontend RCA: Solo screen called Magnetometer.addListener unconditionally; on devices/web where the expo-sensors native bridge lacks _nativeModule.addListener, this throws. Fix awaits isAvailableAsync, wraps in try/catch, degrades silently. Note: on web isAvailableAsync returns true even though the bridge is broken — the outer try/catch is what actually saves the mount."
+}
