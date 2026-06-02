@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 8 — Buried Treasure daily-gate + map-clue verification. Backend: 5/7 PASS, 2 critical FAILs — both POST /api/bt/solo/start and GET /api/bt/solo/current omit the new chest_lat/chest_lng fields entirely, so the new contract is broken end-to-end. Regression sweep (/bt/groups/mine, /bt/groups/available, /bt/schedule GET+POST) and /bt/solo/compass shape PASS. Frontend (Playwright, mobile viewport 390x844, real admin login): Daily gate flow works exactly per spec — TEST1 gate visible on fresh day, camera hidden ✅; TEST2 gate disappears after tapping bt-start-daily-hunt, compass 'Locking onto the chest...' loader appears, and AsyncStorage now contains bt_daily_started:2026-06-02 ✅; TEST3 gate skipped on reload ✅; TEST5 /treasure home still shows bt-play-solo + bt-play-friends ✅; TEST4 (map clue) FAILS because the frontend hides bt-map-clue when hunt.chest_lat is null — which is currently always the case due to the backend bug. The frontend code itself is correct.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/bt/solo/start  &  GET /api/bt/solo/current",
+        "issue": "_solo_public() in /app/backend/buried_treasure.py:489 reads doc.get('chest_lat') / doc.get('chest_lng') at the TOP LEVEL of the bt_solo doc, but solo_start() (line 685) stores chest coords NESTED at doc['chest'] = {'lat': clat, 'lng': clng}. The lookup always returns None, so chest_lat/chest_lng are NEVER attached to the public payload. Verified via direct API call as admin: response keys are ['user_id','area','created_at','status'] — no chest_lat/chest_lng. Fix is one of: (a) in _solo_public read from (doc.get('chest') or {}).get('lat') / .get('lng'); (b) in solo_start() store chest_lat / chest_lng at the top level alongside chest. Note: solo_find() at line 758-761 also persists as 'chest': {'lat','lng'} — so option (a) is the smaller change and keeps wire/storage backward-compatible.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Map clue rendering on /treasure/solo",
+        "issue": "bt-map-clue is never rendered because hunt.chest_lat/chest_lng are always undefined — caused by the backend _solo_public bug, NOT the frontend. Frontend gating (`hunt?.chest_lat != null && hunt?.chest_lng != null`) is correct and degrades silently as designed. No frontend change needed — fixing the backend will make this render automatically.",
+        "affected_testIDs": ["bt-map-clue"]
+      }
+    ],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_iteration8_map_clue.py",
+    "/app/test_reports/pytest/iter8_map_clue.xml"
+  ],
+  "action_items": [
+    "Fix /app/backend/buried_treasure.py:_solo_public (lines 489-496). Replace the top-level chest_lat/chest_lng lookup with: `chest = doc.get('chest') or {}; c_lat = chest.get('lat'); c_lng = chest.get('lng')` (then keep the float() + null-guard). This single change makes POST /bt/solo/start AND GET /bt/solo/current expose the new fields and unlocks the static map clue UI on the frontend.",
+    "After applying the fix, re-run /app/backend/tests/test_bt_iteration8_map_clue.py — all 7 tests should pass — then a quick frontend smoke (sign in → /treasure/solo → tap bt-start-daily-hunt → confirm bt-map-clue is now in the DOM)."
+  ],
+  "critical_code_review_comments": [
+    "buried_treasure.py:489 vs 685 — naming inconsistency between storage shape ({chest:{lat,lng}}) and public-payload accessors (chest_lat/chest_lng) is the root cause of this bug. Consider a single helper `_chest_from(doc) -> (lat,lng)|None` used both by _solo_public and solo_compass/solo_find so future readers can't drift again.",
+    "buried_treasure.py:736 (solo_find) — chest is read via doc.get('chest') which is correct; reinforces that the storage shape is the nested dict and _solo_public is the outlier."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_iteration8_map_clue.py (new)"
+  ],
+  "success_rate": {"backend": "71% (5/7) — 2 failing tests prove the chest-coords contract is broken", "frontend": "80% (4/5) — only failure (map clue) is caused by the backend bug"},
+  "seed_data_creation": "Logged in as admin (filip.cojocea122@gmail.com); seeded bt_player_settings (Sydney CBD, 800 m) and started a solo hunt via /api/bt/solo/start. AsyncStorage flag bt_daily_started:2026-06-02 set and then cleared between gated/active tests. No DB cleanup necessary — the admin's bt_solo doc is just overwritten on each test run.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "After main agent fixes _solo_public (~3 lines) in /app/backend/buried_treasure.py, re-run `pytest /app/backend/tests/test_bt_iteration8_map_clue.py -v` — it covers both the chest_lat/chest_lng contract AND the regression sweep. The frontend daily-gate flow already works end-to-end; only the map clue needs a re-check, which is a single DOM assertion (bt-map-clue count >= 1 after tapping bt-start-daily-hunt with a hunt that has chest coords).",
+  "rca_of_issue": "RCA: In /app/backend/buried_treasure.py the bt_solo MongoDB doc is written by solo_start() (and solo_find()) as `{..., 'chest': {'lat': clat, 'lng': clng}, ...}` — chest coords are NESTED inside a 'chest' sub-dict. The new 2026-06-04 spec change to _solo_public attempts to expose them as TOP-LEVEL chest_lat/chest_lng but reads `doc.get('chest_lat')` / `doc.get('chest_lng')` directly off the root doc, where those keys do not exist. Result: the null-guard at line 492 trips on every call and the keys are silently dropped from the response. Reproduction: POST /api/bt/solo/start with {lat,lng,radius_m} as admin → response body keys = ['user_id','area','created_at','status'] (no chest_*). Mitigation: change the two lookups to read from the nested 'chest' sub-dict. Two-line fix, no DB migration needed."
+}

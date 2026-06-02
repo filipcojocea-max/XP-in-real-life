@@ -461,11 +461,19 @@ def _clamp_radius(r: float) -> float:
 
 
 def _solo_public(doc: dict | None) -> dict | None:
-    """Strip the hidden chest coords — the client never sees them."""
+    """Public solo-hunt payload.
+
+    2026-06-04 — per product spec the "Find the Treasure Chest" screen
+    now shows a static map clue centred on the chest, so we explicitly
+    expose `chest_lat` / `chest_lng` to the client. (Previously these
+    were hidden so the player had to navigate purely via the compass.)
+    The compass / distance / find-ring radius are still authoritative
+    server-side via /bt/solo/compass + /bt/solo/find.
+    """
     if not doc:
         return None
     area = doc.get("area") or {}
-    return {
+    out = {
         "user_id": doc.get("_id"),
         "area": {
             "lat": float(area.get("lat") or 0.0),
@@ -475,6 +483,18 @@ def _solo_public(doc: dict | None) -> dict | None:
         "created_at": doc.get("created_at"),
         "status": "active",
     }
+    # Chest coords — only present once a chest has been placed (which
+    # happens immediately on hunt start in the current model, but we
+    # still null-guard for hunts that pre-date this field).
+    try:
+        c_lat = doc.get("chest_lat")
+        c_lng = doc.get("chest_lng")
+        if c_lat is not None and c_lng is not None:
+            out["chest_lat"] = float(c_lat)
+            out["chest_lng"] = float(c_lng)
+    except Exception:
+        pass
+    return out
 
 
 def _group_public(doc: dict | None, *, viewer_id: str) -> dict | None:

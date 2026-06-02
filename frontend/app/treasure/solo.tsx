@@ -25,26 +25,71 @@ import {
 import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
 import * as FileSystem from 'expo-file-system';
-import { api, type BTCompassReading } from '../../src/api';
+import { api, type BTCompassReading, type BTSoloHunt } from '../../src/api';
+import BTLeafletMap from '../../src/components/BTLeafletMap';
 import { colors, radii, spacing } from '../../src/theme';
 import { showAlert } from '../../src/uiAlert';
+
+// ── Daily-gate helpers ────────────────────────────────────────────────
+// AsyncStorage key includes the local YYYY-MM-DD so the interstitial
+// re-appears at local midnight even if the user never closed the app.
+// Per spec: "if they haven't started their hunt for the day yet, show
+// a clean screen with a single prominent button: Start Daily Treasure
+// Hunt". Once tapped, the flag persists for the rest of the day.
+const localDateKey = (): string => {
+  const d = new Date();
+  return `bt_daily_started:${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 export default function SoloHunt() {
   const router = useRouter();
   const [gps, setGPS] = useState<{ lat: number; lng: number } | null>(null);
   const [compass, setCompass] = useState<BTCompassReading | null>(null);
+  const [hunt, setHunt] = useState<BTSoloHunt | null>(null);
   const [heading, setHeading] = useState(0);  // device facing (deg true-north)
   const [perm] = useCameraPermissions();
   const [cameraOpen, setCameraOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // Daily interstitial gate:
+  //   null      → still checking AsyncStorage (brief flash)
+  //   'gated'   → show "Start Daily Treasure Hunt" button
+  //   'active'  → show the normal compass + camera UI
+  const [dailyStage, setDailyStage] = useState<'checking' | 'gated' | 'active'>('checking');
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const magSubRef = useRef<{ remove: () => void } | null>(null);
   const cameraRef = useRef<any>(null);
+
+  // ─── Daily gate check ───────────────────────────────────────────
+  // Runs once on mount. If the user already activated today's hunt we
+  // skip straight to the compass; otherwise we park them on the
+  // interstitial until they tap the big button.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const v = await AsyncStorage.getItem(localDateKey());
+        if (cancelled) return;
+        setDailyStage(v ? 'active' : 'gated');
+      } catch {
+        // If AsyncStorage is unavailable for some reason, default to
+        // showing the gate (better UX than dumping them into the
+        // compass without the "starting" moment).
+        if (!cancelled) setDailyStage('gated');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const onActivateDaily = useCallback(async () => {
+    try { await AsyncStorage.setItem(localDateKey(), '1'); } catch {}
+    setDailyStage('active');
+  }, []);
 
   // ─── GPS watcher ────────────────────────────────────────────────
   useEffect(() => {
@@ -143,6 +188,21 @@ export default function SoloHunt() {
     }
   }, [gps, router]);
 
+  // Fetch the current hunt doc so we can render the static map clue
+  // (chest_lat / chest_lng) below the compass. Refreshed after every
+  // find since the server auto-buries the next chest in the same area.
+  const fetchHunt = useCallback(async () => {
+    try {
+      const r = await api.btSoloCurrent();
+      setHunt(r.hunt || null);
+    } catch { /* silent — compass loop will catch fatal "no hunt" cases */ }
+  }, []);
+
+  useEffect(() => {
+    if (dailyStage !== 'active') return;
+    fetchHunt();
+  }, [dailyStage, fetchHunt]);
+
   useEffect(() => {
     fetchCompass();
     const id = setInterval(fetchCompass, 2000);
@@ -193,6 +253,8 @@ export default function SoloHunt() {
       );
       // Refresh compass so the bearing/distance update to the next chest.
       await fetchCompass();
+      // Refresh hunt doc so the static map clue jumps to the new chest.
+      await fetchHunt();
     } catch (e: any) {
       showAlert('Could not claim find', String(e?.message || e));
     } finally {
@@ -223,7 +285,38 @@ export default function SoloHunt() {
         </TouchableOpacity>
       </View>
 
-      {loading ? (
+      {dailyStage === 'checking' ? (
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.cyan} />
+        </View>
+      ) : dailyStage === 'gated' ? (
+        // ───────────── Daily interstitial ─────────────
+        // Single-purpose screen — "Start Daily Treasure Hunt" — that
+        // marks today's hunt as activated and reveals the compass.
+        // Persists across app restarts via AsyncStorage; auto-resets
+        // at local midnight (key includes today's YYYY-MM-DD).
+        <View style={styles.gateWrap} testID="bt-daily-gate">
+          <View style={styles.gateBadge}>
+            <Ionicons name="today" size={14} color="#FFD166" />
+            <Text style={styles.gateBadgeText}>TODAY'S EVENT</Text>
+          </View>
+          <Ionicons name="map" size={72} color={colors.cyan} />
+          <Text style={styles.gateTitle}>A new chest is buried.</Text>
+          <Text style={styles.gateSub}>
+            Tap below to officially start today's hunt. Once you start, the
+            compass will lock onto the chest and your map clue will appear.
+          </Text>
+          <TouchableOpacity
+            style={styles.gateBtn}
+            onPress={onActivateDaily}
+            activeOpacity={0.85}
+            testID="bt-start-daily-hunt"
+          >
+            <Ionicons name="play-circle" size={24} color="#0b0f15" />
+            <Text style={styles.gateBtnText}>START DAILY TREASURE HUNT</Text>
+          </TouchableOpacity>
+        </View>
+      ) : loading ? (
         <View style={styles.center}>
           <ActivityIndicator color={colors.cyan} />
           <Text style={styles.loadingText}>Locking onto the chest…</Text>
@@ -268,6 +361,34 @@ export default function SoloHunt() {
             </Text>
             {compass.in_find_ring ? (
               <Text style={styles.ringHit}>📍 You're inside the {compass.find_ring_m} m find ring — open the camera!</Text>
+            ) : null}
+
+            {/* ───────────── Map snapshot clue ─────────────
+                Static read-only Leaflet map centred on the chest with
+                a red marker. Helps the player visualise the actual
+                location instead of relying purely on the compass arrow.
+                Falls back silently if the server hasn't sent chest
+                coords yet (briefly true between btSoloStart and the
+                first /api/bt/solo/current response). */}
+            {hunt?.chest_lat != null && hunt?.chest_lng != null ? (
+              <View style={styles.mapClue} testID="bt-map-clue">
+                <View style={styles.mapClueHeader}>
+                  <Ionicons name="location" size={14} color="#EF4444" />
+                  <Text style={styles.mapClueTitle}>BURIED HERE</Text>
+                </View>
+                <View style={styles.mapClueBox} pointerEvents="none">
+                  <BTLeafletMap
+                    mode="static"
+                    initialLat={hunt.chest_lat}
+                    initialLng={hunt.chest_lng}
+                    initialZoom={17}
+                    initialRadius={0}
+                    markerColor="#EF4444"
+                    ringColor="#EF4444"
+                    style={StyleSheet.absoluteFill}
+                  />
+                </View>
+              </View>
             ) : null}
           </View>
 
@@ -366,4 +487,51 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 4, borderColor: '#22C55E',
   },
+  // ── Daily interstitial ────────────────────────────────────────────
+  gateWrap: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: spacing.xl ?? 28, gap: 14,
+  },
+  gateBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
+    borderWidth: 1, borderColor: '#FFD16655',
+    backgroundColor: '#FFD16622',
+    marginBottom: 8,
+  },
+  gateBadgeText: { color: '#FFD166', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  gateTitle: { color: colors.text, fontSize: 22, fontWeight: '900', textAlign: 'center' },
+  gateSub: {
+    color: colors.textSecondary, fontSize: 13, lineHeight: 19,
+    textAlign: 'center', maxWidth: 320,
+  },
+  gateBtn: {
+    marginTop: spacing.lg,
+    backgroundColor: colors.cyan,
+    paddingVertical: 18, paddingHorizontal: 26, borderRadius: radii.lg,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+    minWidth: 280,
+  },
+  gateBtnText: { color: '#0b0f15', fontWeight: '900', fontSize: 14, letterSpacing: 1 },
+  // ── Map clue (static chest map under the compass) ─────────────────
+  mapClue: {
+    width: '100%',
+    marginTop: 16,
+    borderRadius: radii.lg,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#EF444455',
+    backgroundColor: colors.surface,
+  },
+  mapClueHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 10, paddingVertical: 6,
+    backgroundColor: '#EF444422',
+    borderBottomWidth: 1, borderBottomColor: '#EF444433',
+  },
+  mapClueTitle: { color: '#EF4444', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  // Fixed-height map box. Keeping the box self-contained means the
+  // surrounding ScrollView (if added later) doesn't fight the WebView
+  // for vertical space.
+  mapClueBox: { width: '100%', height: 160, backgroundColor: '#1a1d22' },
 });

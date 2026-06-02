@@ -2453,6 +2453,10 @@ export type BTSoloHunt = {
   area: BTArea;
   created_at: string;
   status: 'active';
+  /** Map-clue coords for the new "Find the Treasure Chest" hint card.
+   *  Present once a chest is placed (≈ immediately after btSoloStart). */
+  chest_lat?: number;
+  chest_lng?: number;
 };
 
 export type BTSoloFind = {
