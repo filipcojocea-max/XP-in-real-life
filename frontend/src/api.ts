@@ -1339,6 +1339,27 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ friend_ids }),
     }),
+  /**
+   * Full friend list + per-friend eligibility metadata for the BT
+   * invite UI. reason values:
+   *   'no_app'           — friend hasn't opened/installed BT yet
+   *   'different_region' — has BT but area doesn't overlap mine
+   *   'no_my_area'       — I haven't set my own area yet
+   *    null              — eligible (selectable)
+   */
+  btFriendsEligible: () =>
+    req<{
+      friends: {
+        user_id: string;
+        name: string;
+        avatar_base64: string | null;
+        has_bt: boolean;
+        eligible: boolean;
+        reason: 'no_app' | 'different_region' | 'no_my_area' | null;
+        distance_km: number | null;
+      }[];
+      has_my_area: boolean;
+    }>('/bt/friends-eligible'),
   btGroupsMine: () => req<{ groups: BTGroup[] }>('/bt/groups/mine'),
   btGroupsAvailable: () => req<{ groups: BTGroup[] }>('/bt/groups/available'),
   btGroupAccept: (gid: string) =>
@@ -2512,6 +2533,9 @@ export type BTGroup = {
    * assume active".
    */
   is_active_now?: boolean;
+  /** True once the group transitions from "lobby" to "hunting" — at
+   *  that point Accept / Reject answers are locked. */
+  responses_locked?: boolean;
 };
 
 export type BTInviteResult = {

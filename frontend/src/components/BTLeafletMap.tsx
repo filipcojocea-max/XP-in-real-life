@@ -44,6 +44,14 @@ export type BTLeafletMapHandle = {
   setCenter: (lat: number, lng: number, zoom?: number) => void;
   /** Update the radius ring (metres) without changing the centre. */
   setRadius: (radiusM: number) => void;
+  /** Update / hide the live user-location blue dot. Pass null to hide. */
+  setUserLocation: (lat: number | null, lng?: number | null) => void;
+  /** Flip drag/pan interactivity. Used by Expand/Minimize on the
+   *  hunt screen — pinch-zoom and the +/- buttons stay enabled in
+   *  both modes. */
+  setInteractive: (on: boolean) => void;
+  /** Tell Leaflet the WebView changed size (e.g. modal open). */
+  invalidateSize: () => void;
   /**
    * Capture the current map as a JPEG base64 string. Resolves when the
    * WebView reports back. Returns the raw base64 (no `data:` prefix).
@@ -64,6 +72,11 @@ type Props = {
   initialRadius?: number;
   ringColor?: string;
   markerColor?: string;
+  /** 'dot' = filled coloured circle (default). 'x' = red treasure cross. */
+  markerShape?: 'dot' | 'x';
+  /** When false the map shows tiles + markers but doesn't react to drag /
+   *  tap. Zoom buttons and pinch-zoom remain enabled. */
+  interactive?: boolean;
   onCenterChange?: (c: LatLng) => void;
   onReady?: () => void;
   style?: ViewStyle | ViewStyle[];
@@ -82,6 +95,8 @@ const buildHtml = (initial: {
   mode: 'picker' | 'static';
   ring: string;
   marker: string;
+  markerShape: 'dot' | 'x';
+  interactive: boolean;
 }) => `<!DOCTYPE html>
 <html>
 <head>
@@ -96,6 +111,30 @@ const buildHtml = (initial: {
   /* Subtle dark filter on tiles so the map matches the rest of the app's
      dark theme without needing a paid dark tile provider. */
   .leaflet-tile-pane { filter: brightness(0.78) contrast(1.05) saturate(0.85); }
+  /* Zoom buttons — slightly bigger touch target so they're tappable on
+     phones inside a non-fullscreen embed. */
+  .leaflet-control-zoom a {
+    width: 32px; height: 32px; line-height: 32px;
+    font-size: 18px; font-weight: 900;
+  }
+  /* Pulsing blue "you are here" dot. Standard Apple-style accuracy halo. */
+  .bt-userdot {
+    width: 18px; height: 18px; border-radius: 9px;
+    background: #2196F3; border: 3px solid #fff;
+    box-shadow: 0 0 0 6px rgba(33,150,243,0.28), 0 2px 6px rgba(0,0,0,.5);
+  }
+  /* Red "X" marker for treasure burial spots. */
+  .bt-x {
+    position: relative; width: 22px; height: 22px;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6));
+  }
+  .bt-x::before, .bt-x::after {
+    content: ''; position: absolute; left: 9px; top: -1px;
+    width: 4px; height: 24px; background: #EF4444; border-radius: 2px;
+    border: 1px solid #fff;
+  }
+  .bt-x::before { transform: rotate(45deg); }
+  .bt-x::after  { transform: rotate(-45deg); }
 </style>
 </head>
 <body>
@@ -112,12 +151,23 @@ const buildHtml = (initial: {
   };
 
   try {
+    // 2026-06-04: even in "static" mode we KEEP zoomControl + scroll
+    // wheel zoom enabled so the +/- buttons in the corner work. We
+    // only suppress map drag and tap-to-set-pin until the parent flips
+    // interactivity on (Expand button on the solo screen, etc.).
     var map = L.map('map', {
       zoomControl: true,
       attributionControl: true,
       tap: true,
-      // Smooth wheel zoom on the web preview, snappy on real devices.
       zoomSnap: 0.25,
+      dragging: INITIAL.interactive,
+      doubleClickZoom: true,
+      scrollWheelZoom: true,
+      boxZoom: false,
+      keyboard: false,
+      // Touch pinch zoom is the most-requested control even in static
+      // mode (per user feedback), so it stays on regardless.
+      touchZoom: true,
     }).setView([INITIAL.lat, INITIAL.lng], INITIAL.zoom);
 
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -126,15 +176,25 @@ const buildHtml = (initial: {
       crossOrigin: 'anonymous',
     }).addTo(map);
 
-    var iconHtml = '<div style="width:18px;height:18px;border-radius:9px;background:' + INITIAL.marker + ';border:3px solid #fff;box-shadow:0 0 0 2px ' + INITIAL.marker + '88,0 2px 6px rgba(0,0,0,.5);"></div>';
+    // ── Treasure / picker marker ────────────────────────────────────
+    var iconHtml;
+    var iconSize = [18, 18];
+    var iconAnchor = [9, 9];
+    if (INITIAL.markerShape === 'x') {
+      iconHtml = '<div class="bt-x"></div>';
+      iconSize = [22, 22];
+      iconAnchor = [11, 11];
+    } else {
+      iconHtml = '<div style="width:18px;height:18px;border-radius:9px;background:' + INITIAL.marker + ';border:3px solid #fff;box-shadow:0 0 0 2px ' + INITIAL.marker + '88,0 2px 6px rgba(0,0,0,.5);"></div>';
+    }
     var pinIcon = L.divIcon({
       className: 'bt-pin',
       html: iconHtml,
-      iconSize: [18, 18],
-      iconAnchor: [9, 9],
+      iconSize: iconSize,
+      iconAnchor: iconAnchor,
     });
 
-    var draggable = (INITIAL.mode === 'picker');
+    var draggable = (INITIAL.mode === 'picker') && INITIAL.interactive;
     var marker = L.marker([INITIAL.lat, INITIAL.lng], { draggable: draggable, icon: pinIcon, keyboard: false }).addTo(map);
 
     var circle = null;
@@ -149,6 +209,26 @@ const buildHtml = (initial: {
       }).addTo(map);
     }
 
+    // ── Live "you are here" user dot (added on demand by RN) ────────
+    var userIcon = L.divIcon({
+      className: 'bt-userwrap',
+      html: '<div class="bt-userdot"></div>',
+      iconSize: [18, 18],
+      iconAnchor: [9, 9],
+    });
+    var userMarker = null;
+    window.__btSetUserLocation = function(lat, lng) {
+      if (lat == null || lng == null) {
+        if (userMarker) { map.removeLayer(userMarker); userMarker = null; }
+        return;
+      }
+      if (!userMarker) {
+        userMarker = L.marker([lat, lng], { icon: userIcon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map);
+      } else {
+        userMarker.setLatLng([lat, lng]);
+      }
+    };
+
     var setCenter = function(lat, lng) {
       marker.setLatLng([lat, lng]);
       if (circle) circle.setLatLng([lat, lng]);
@@ -160,12 +240,12 @@ const buildHtml = (initial: {
       send({ type: 'center', lat: ll.lat, lng: ll.lng });
     });
 
-    if (draggable) {
-      map.on('click', function(e) {
-        setCenter(e.latlng.lat, e.latlng.lng);
-        send({ type: 'center', lat: e.latlng.lat, lng: e.latlng.lng });
-      });
-    }
+    var clickHandler = function(e) {
+      if (INITIAL.mode !== 'picker') return;
+      setCenter(e.latlng.lat, e.latlng.lng);
+      send({ type: 'center', lat: e.latlng.lat, lng: e.latlng.lng });
+    };
+    map.on('click', clickHandler);
 
     // ── RN-driven imperatives ───────────────────────────────────────
     window.__btSetCenter = function(lat, lng, zoom) {
@@ -189,6 +269,24 @@ const buildHtml = (initial: {
       } else {
         circle.setRadius(r);
       }
+    };
+    // Flip interactivity on/off — used by the Expand/Minimize feature
+    // so the static map clue can become fully pannable in the modal.
+    window.__btSetInteractive = function(on) {
+      if (on) {
+        map.dragging.enable();
+        if (marker && INITIAL.mode === 'picker') marker.dragging && marker.dragging.enable();
+      } else {
+        map.dragging.disable();
+        if (marker && marker.dragging) marker.dragging.disable();
+      }
+      // Force Leaflet to recompute sizes after a layout swap (e.g.
+      // entering or leaving the full-screen modal).
+      setTimeout(function() { map.invalidateSize(); }, 50);
+    };
+    // RN calls this after the WebView resizes (modal toggle, rotate).
+    window.__btInvalidateSize = function() {
+      try { map.invalidateSize(); } catch (e) {}
     };
     // html2canvas-based snapshot. The reqId lets the RN side correlate
     // the response when multiple captures are queued.
@@ -238,6 +336,8 @@ const BTLeafletMap = forwardRef<BTLeafletMapHandle, Props>(function BTLeafletMap
     initialRadius = 800,
     ringColor = '#22D3EE',
     markerColor = '#22D3EE',
+    markerShape = 'dot',
+    interactive = true,
     onCenterChange,
     onReady,
     style,
@@ -263,6 +363,8 @@ const BTLeafletMap = forwardRef<BTLeafletMapHandle, Props>(function BTLeafletMap
       mode,
       ring: ringColor,
       marker: markerColor,
+      markerShape: (markerShape || 'dot'),
+      interactive: interactive !== false,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -283,6 +385,23 @@ const BTLeafletMap = forwardRef<BTLeafletMapHandle, Props>(function BTLeafletMap
     setRadius: (r) => {
       webRef.current?.injectJavaScript(
         `window.__btSetRadius && window.__btSetRadius(${Math.max(1, Math.round(r))}); true;`,
+      );
+    },
+    setUserLocation: (lat, lng) => {
+      const lat_n = (lat == null) ? 'null' : String(lat);
+      const lng_n = (lng == null) ? 'null' : String(lng);
+      webRef.current?.injectJavaScript(
+        `window.__btSetUserLocation && window.__btSetUserLocation(${lat_n}, ${lng_n}); true;`,
+      );
+    },
+    setInteractive: (on) => {
+      webRef.current?.injectJavaScript(
+        `window.__btSetInteractive && window.__btSetInteractive(${on ? 'true' : 'false'}); true;`,
+      );
+    },
+    invalidateSize: () => {
+      webRef.current?.injectJavaScript(
+        `window.__btInvalidateSize && window.__btInvalidateSize(); true;`,
       );
     },
     requestSnapshot: () =>

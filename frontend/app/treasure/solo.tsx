@@ -365,26 +365,37 @@ export default function SoloHunt() {
 
             {/* ───────────── Map snapshot clue ─────────────
                 Static read-only Leaflet map centred on the chest with
-                a red marker. Helps the player visualise the actual
-                location instead of relying purely on the compass arrow.
-                Falls back silently if the server hasn't sent chest
-                coords yet (briefly true between btSoloStart and the
-                first /api/bt/solo/current response). */}
+                a red X marker and a live blue "you are here" dot. The
+                Expand button promotes it to a full-screen modal where
+                the player can pinch/drag freely. */}
             {hunt?.chest_lat != null && hunt?.chest_lng != null ? (
               <View style={styles.mapClue} testID="bt-map-clue">
                 <View style={styles.mapClueHeader}>
                   <Ionicons name="location" size={14} color="#EF4444" />
-                  <Text style={styles.mapClueTitle}>BURIED HERE</Text>
+                  <Text style={styles.mapClueTitle}>BURIED HERE · X MARKS THE SPOT</Text>
+                  <View style={{ flex: 1 }} />
+                  <TouchableOpacity
+                    onPress={() => setMapExpanded(true)}
+                    style={styles.expandBtn}
+                    activeOpacity={0.8}
+                    testID="bt-expand-map"
+                  >
+                    <Ionicons name="expand" size={12} color={colors.cyan} />
+                    <Text style={styles.expandBtnText}>EXPAND MAP</Text>
+                  </TouchableOpacity>
                 </View>
-                <View style={styles.mapClueBox} pointerEvents="none">
+                <View style={styles.mapClueBox}>
                   <BTLeafletMap
+                    ref={mapRef}
                     mode="static"
                     initialLat={hunt.chest_lat}
                     initialLng={hunt.chest_lng}
                     initialZoom={17}
                     initialRadius={0}
+                    markerShape="x"
                     markerColor="#EF4444"
                     ringColor="#EF4444"
+                    interactive={false}
                     style={StyleSheet.absoluteFill}
                   />
                 </View>

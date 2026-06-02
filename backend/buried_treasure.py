@@ -567,6 +567,10 @@ def _group_public(doc: dict | None, *, viewer_id: str) -> dict | None:
         "is_creator": is_creator,
         "my_status": my_status,
         "status": doc.get("status"),
+        # Per 2026-06-04 spec: Accept/Reject answers stay flippable
+        # while the group is in "lobby"; once the creator transitions
+        # the group (status != lobby) the answers lock.
+        "responses_locked": doc.get("status") != "lobby",
         "area": doc.get("area"),
         "members": members,
         "chest": chest_payload,
@@ -599,6 +603,96 @@ def attach_routes(app, get_user_or_legacy):
             upsert=True,
         )
         return {"ok": True}
+
+    # ── FRIENDS ELIGIBILITY (for invite UI) ──────────────────────────
+    # Returns the full friend list with per-friend eligibility metadata
+    # so the invite UI can render:
+    #   • selectable    — friend has BT settings AND their area
+    #                     circle overlaps with mine.
+    #   • greyed+locked — friend has no BT settings (proxy for "hasn't
+    #                     installed / opened the mini-app yet").
+    #   • greyed only   — friend has BT settings but different region.
+    #
+    # Overlap rule per 2026-06-04 spec: two area circles overlap when
+    # the great-circle distance between their centres is ≤ the sum of
+    # their radii (haversine + radius sum).
+    @router.get("/bt/friends-eligible")
+    async def friends_eligible(user_id: str = Depends(get_user_or_legacy)):
+        friend_ids = await _friend_ids_fn(user_id)
+        if not friend_ids:
+            return {"friends": [], "has_my_area": False}
+        my_area_doc = await _db.bt_settings.find_one({"_id": user_id})
+        my_area = (my_area_doc or {}).get("area") or {}
+        my_lat = my_area.get("lat")
+        my_lng = my_area.get("lng")
+        my_rad = my_area.get("radius_m") or 0.0
+        if my_lat is None or my_lng is None:
+            # Creator hasn't picked an area yet — nobody is eligible
+            # regardless of friends' status, but we still return the
+            # list so the UI can render a "set your area first" hint.
+            no_my_area = True
+        else:
+            no_my_area = False
+
+        # Pull the names + BT settings for all friends in one go.
+        name_map = {}
+        async for prof in _db.profile.find(
+            {"_id": {"$in": friend_ids}}, {"_id": 1, "name": 1, "avatar_base64": 1}
+        ):
+            name_map[prof.get("_id")] = {
+                "name": prof.get("name") or "Player",
+                "avatar_base64": prof.get("avatar_base64") or None,
+            }
+        settings_map = {}
+        async for s in _db.bt_settings.find(
+            {"_id": {"$in": friend_ids}}, {"_id": 1, "area": 1}
+        ):
+            settings_map[s.get("_id")] = (s.get("area") or {})
+
+        out: list[dict] = []
+        for fid in friend_ids:
+            np = name_map.get(fid) or {"name": "Player", "avatar_base64": None}
+            farea = settings_map.get(fid) or {}
+            has_bt = bool(farea.get("lat") is not None and farea.get("lng") is not None)
+            entry: dict = {
+                "user_id": fid,
+                "name": np["name"],
+                "avatar_base64": np["avatar_base64"],
+                "has_bt": has_bt,
+                "eligible": False,
+                "reason": None,        # null when eligible
+                "distance_km": None,   # populated when has_bt is true
+            }
+            if not has_bt:
+                entry["reason"] = "no_app"
+                out.append(entry)
+                continue
+            if no_my_area:
+                # We can't compute overlap without our own area, but the
+                # friend has BT — still show them but block invite.
+                entry["reason"] = "no_my_area"
+                out.append(entry)
+                continue
+            dist_m = _haversine_m(
+                float(my_lat), float(my_lng),
+                float(farea["lat"]), float(farea["lng"]),
+            )
+            entry["distance_km"] = round(dist_m / 1000.0, 1)
+            overlap_threshold = float(my_rad or 0.0) + float(farea.get("radius_m") or 0.0)
+            if dist_m <= overlap_threshold:
+                entry["eligible"] = True
+            else:
+                entry["reason"] = "different_region"
+            out.append(entry)
+
+        # Sort: eligible first, then has_bt, then no_app — alphabetical
+        # within each tier so the UI feels deterministic.
+        def _sort_key(e: dict):
+            tier = 0 if e["eligible"] else (1 if e["has_bt"] else 2)
+            return (tier, (e["name"] or "").lower())
+        out.sort(key=_sort_key)
+
+        return {"friends": out, "has_my_area": not no_my_area}
 
     # ── SCHEDULE (awake hours — synced with Work-Scheduler) ──────────
     # 2026-06-02 — the per-user manual awake hours stored in
@@ -964,12 +1058,20 @@ def attach_routes(app, get_user_or_legacy):
         doc = await _db.bt_groups.find_one({"_id": gid})
         if not doc:
             raise HTTPException(404, "Group not found.")
+        # Per 2026-06-04 spec: responses stay flippable (Accept ↔
+        # Reject) until the creator finalises the group by burying the
+        # chest, at which point `status` transitions from "lobby" to
+        # "hunting" / "finished" and we lock the answers.
+        if doc.get("status") != "lobby":
+            raise HTTPException(400, "Group is locked — responses can't change anymore.")
         members = list(doc.get("members") or [])
         me = next((m for m in members if m.get("user_id") == user_id), None)
         if not me:
             raise HTTPException(403, "You weren't invited to this group.")
-        if me.get("status") not in ("pending",):
-            raise HTTPException(400, f"Already responded ({me.get('status')}).")
+        if me.get("user_id") == doc.get("creator_id"):
+            # Creator is implicitly accepted; don't let them flip
+            # themselves to "rejected" and brick the group.
+            raise HTTPException(400, "The creator is already in this group.")
         me["status"] = "accepted" if accept else "rejected"
         me["responded_at"] = _now_iso()
         await _db.bt_groups.update_one(
