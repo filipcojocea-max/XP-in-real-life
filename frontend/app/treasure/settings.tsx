@@ -1,29 +1,27 @@
 /**
  * /treasure/settings — Mini-App Settings for Buried Treasure.
  *
- * Two sections now live on this single screen:
+ * Two sections:
  *
  *   1. SAVED LOCATION
- *      The persistent area/radius the player saved on their first run.
- *      Per 2026-06-01 spec the map picker no longer fires every time
- *      they enter /treasure — it only fires when there's no area saved.
- *      After that, this card is the only path to edit it.
+ *      Persistent hunt area / radius. The map picker only fires from
+ *      here (or on first run); /treasure home skips it otherwise.
  *
- *   2. AWAKE HOURS  (added 2026-06-01 — Smart Availability Filter)
- *      HH:MM start/end in the user's local timezone, plus an optional
- *      "Sleep all day" toggle. Saving here updates the server-side
- *      filter that excludes sleeping players from treasure selection
- *      and hides asleep groups from /bt/groups/available.
+ *   2. AVAILABILITY (read-only, 2026-06-02)
+ *      The awake window is now SYNCED with the Work-Scheduler mini-app
+ *      (profile.shift_schedule). Per product spec we no longer ask
+ *      users to enter the same hours twice — this card simply shows
+ *      the resolved window + an "Active right now" status pill. When
+ *      the scheduler is disabled / unconfigured we fall back to the
+ *      default 08:00–23:00 local window and the card surfaces a quick
+ *      link to set the scheduler up.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Platform,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -40,44 +38,20 @@ type Stage = 'loading' | 'view' | 'editing' | 'saving';
 const fmtRadius = (m: number) =>
   m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
 
-// ── Awake-hours helpers ───────────────────────────────────────────────
-const HHMM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
-
-const detectTz = (): string => {
-  try {
-    // Available on every JS runtime we target (Hermes, V8, web).
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  } catch {
-    return 'UTC';
-  }
-};
-
-const normalizeHHMM = (raw: string, fallback: string): string => {
-  const t = (raw || '').trim();
-  if (HHMM_RE.test(t)) return t;
-  // Try recovering "8:5" → "08:05"
-  const m = /^(\d{1,2}):?(\d{0,2})$/.exec(t);
-  if (m) {
-    const h = Math.min(23, Math.max(0, parseInt(m[1] || '0', 10)));
-    const mm = Math.min(59, Math.max(0, parseInt(m[2] || '0', 10)));
-    return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-  }
-  return fallback;
+type ScheduleState = {
+  awake_start: string;
+  awake_end: string;
+  timezone: string;
+  source: 'scheduler' | 'default';
+  shift?: 'day' | 'night' | 'off' | null;
+  is_awake_now: boolean;
 };
 
 export default function TreasureSettings() {
   const router = useRouter();
   const [stage, setStage] = useState<Stage>('loading');
   const [area, setArea] = useState<{ lat: number; lng: number; radius_m: number; label?: string | null; updated_at?: string } | null>(null);
-
-  // Schedule state — Smart Availability Filter
-  const [awakeStart, setAwakeStart] = useState('08:00');
-  const [awakeEnd, setAwakeEnd] = useState('23:00');
-  const [sleepAllDay, setSleepAllDay] = useState(false);
-  const [tz, setTz] = useState<string>(detectTz());
-  const [isAwakeNow, setIsAwakeNow] = useState<boolean>(true);
-  const [scheduleSaving, setScheduleSaving] = useState(false);
-  const [scheduleDirty, setScheduleDirty] = useState(false);
+  const [schedule, setSchedule] = useState<ScheduleState | null>(null);
 
   const load = useCallback(async () => {
     setStage('loading');
@@ -88,13 +62,17 @@ export default function TreasureSettings() {
       ]);
       setArea(s.area || null);
       if (sched?.schedule) {
-        setAwakeStart(sched.schedule.awake_start || '08:00');
-        setAwakeEnd(sched.schedule.awake_end || '23:00');
-        setSleepAllDay(!!sched.schedule.sleep_all_day);
-        setTz(sched.schedule.timezone || detectTz());
-        setIsAwakeNow(!!sched.is_awake_now);
+        setSchedule({
+          awake_start: sched.schedule.awake_start || '08:00',
+          awake_end: sched.schedule.awake_end || '23:00',
+          timezone: sched.schedule.timezone || 'UTC',
+          source: sched.schedule.source || 'default',
+          shift: sched.schedule.shift ?? null,
+          is_awake_now: !!sched.is_awake_now,
+        });
+      } else {
+        setSchedule(null);
       }
-      setScheduleDirty(false);
       setStage('view');
     } catch (e: any) {
       showAlert('Failed to load settings', String(e?.message || e));
@@ -117,42 +95,14 @@ export default function TreasureSettings() {
     }
   }, []);
 
-  const onSaveSchedule = useCallback(async () => {
-    if (scheduleSaving) return;
-    // Sanitize inputs before sending so a typo doesn't lock the user
-    // out — bad HH:MM falls back to the current defaults.
-    const start = normalizeHHMM(awakeStart, '08:00');
-    const end = normalizeHHMM(awakeEnd, '23:00');
-    setAwakeStart(start);
-    setAwakeEnd(end);
-    setScheduleSaving(true);
-    try {
-      const r = await api.btSaveSchedule(start, end, sleepAllDay, tz);
-      setAwakeStart(r.schedule.awake_start);
-      setAwakeEnd(r.schedule.awake_end);
-      setSleepAllDay(r.schedule.sleep_all_day);
-      setTz(r.schedule.timezone || tz);
-      setIsAwakeNow(!!r.is_awake_now);
-      setScheduleDirty(false);
-      showAlert(
-        'Saved',
-        r.schedule.sleep_all_day
-          ? 'You\'ll be marked Inactive until you turn off "Sleep all day".'
-          : 'Your awake hours have been updated.',
-      );
-    } catch (e: any) {
-      showAlert('Could not save', String(e?.message || e));
-    } finally {
-      setScheduleSaving(false);
+  const statusPill = useMemo(() => {
+    if (!schedule) {
+      return { label: 'Loading…', color: colors.textMuted };
     }
-  }, [awakeStart, awakeEnd, sleepAllDay, tz, scheduleSaving]);
-
-  const statusLabel = useMemo(() => {
-    if (sleepAllDay) return { label: 'Sleeping (all day)', color: '#9aa1a8' };
-    return isAwakeNow
+    return schedule.is_awake_now
       ? { label: 'Active right now', color: '#22C55E' }
       : { label: 'Inactive — outside awake window', color: '#FFB020' };
-  }, [sleepAllDay, isAwakeNow]);
+  }, [schedule]);
 
   if (stage === 'editing') {
     return (
@@ -226,90 +176,79 @@ export default function TreasureSettings() {
           <Text style={styles.ctaText}>{area ? 'EDIT LOCATION' : 'PICK LOCATION'}</Text>
         </TouchableOpacity>
 
-        {/* ───────── AWAKE HOURS ───────── */}
+        {/* ───────── AVAILABILITY (synced) ───────── */}
         <View style={styles.card}>
-          <Text style={styles.cardKicker}>AWAKE HOURS</Text>
+          <Text style={styles.cardKicker}>AVAILABILITY</Text>
           <Text style={styles.helper}>
-            Tell us when you're awake so we don't pick a group for a treasure when
-            everyone's asleep. Times are in your local timezone.
+            Your availability is synced with your Work-Scheduler. If the
+            scheduler is off, a default 08:00–23:00 window is used.
           </Text>
 
-          <View style={[styles.statusPill, { borderColor: statusLabel.color + '88', backgroundColor: statusLabel.color + '22' }]}>
-            <View style={[styles.statusDot, { backgroundColor: statusLabel.color }]} />
-            <Text style={[styles.statusText, { color: statusLabel.color }]}>{statusLabel.label}</Text>
+          {/* Status pill — kept per spec so users can see their state
+              at a glance even though manual inputs are gone. */}
+          <View
+            style={[
+              styles.statusPill,
+              {
+                borderColor: statusPill.color + '88',
+                backgroundColor: statusPill.color + '22',
+              },
+            ]}
+            testID="bt-availability-pill"
+          >
+            <View style={[styles.statusDot, { backgroundColor: statusPill.color }]} />
+            <Text style={[styles.statusText, { color: statusPill.color }]}>
+              {statusPill.label}
+            </Text>
           </View>
 
-          <View style={styles.timeRow}>
-            <View style={styles.timeBox}>
-              <Text style={styles.timeLabel}>Awake from</Text>
-              <TextInput
-                value={awakeStart}
-                onChangeText={(t) => { setAwakeStart(t.slice(0, 5)); setScheduleDirty(true); }}
-                onBlur={() => setAwakeStart((v) => normalizeHHMM(v, '08:00'))}
-                editable={!sleepAllDay}
-                placeholder="HH:MM"
-                placeholderTextColor={colors.textMuted}
-                keyboardType={Platform.select({ ios: 'numbers-and-punctuation', default: 'default' })}
-                style={[styles.timeInput, sleepAllDay && styles.timeInputDisabled]}
-                maxLength={5}
-                testID="bt-awake-start"
+          {schedule ? (
+            <View style={styles.syncRow}>
+              <Ionicons
+                name={schedule.source === 'scheduler' ? 'sync' : 'time-outline'}
+                size={14}
+                color={schedule.source === 'scheduler' ? colors.cyan : colors.textMuted}
               />
-            </View>
-            <Ionicons name="arrow-forward" size={16} color={colors.textMuted} />
-            <View style={styles.timeBox}>
-              <Text style={styles.timeLabel}>Until</Text>
-              <TextInput
-                value={awakeEnd}
-                onChangeText={(t) => { setAwakeEnd(t.slice(0, 5)); setScheduleDirty(true); }}
-                onBlur={() => setAwakeEnd((v) => normalizeHHMM(v, '23:00'))}
-                editable={!sleepAllDay}
-                placeholder="HH:MM"
-                placeholderTextColor={colors.textMuted}
-                keyboardType={Platform.select({ ios: 'numbers-and-punctuation', default: 'default' })}
-                style={[styles.timeInput, sleepAllDay && styles.timeInputDisabled]}
-                maxLength={5}
-                testID="bt-awake-end"
-              />
-            </View>
-          </View>
-
-          <View style={styles.toggleRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.toggleLabel}>Sleep all day</Text>
-              <Text style={styles.helper}>
-                Always Inactive — you won't be picked for treasures until you turn this off.
+              <Text style={styles.syncText}>
+                {schedule.source === 'scheduler'
+                  ? `Synced from Work-Scheduler${schedule.shift ? ` · ${schedule.shift.toUpperCase()} shift` : ''}`
+                  : 'Work-Scheduler is off — using default window'}
               </Text>
             </View>
-            <Switch
-              value={sleepAllDay}
-              onValueChange={(v) => { setSleepAllDay(v); setScheduleDirty(true); }}
-              trackColor={{ false: '#3a3f48', true: '#FFB020AA' }}
-              thumbColor={sleepAllDay ? '#FFB020' : '#9aa4af'}
-              testID="bt-sleep-all-day"
-            />
-          </View>
+          ) : null}
 
-          <View style={styles.tzRow}>
-            <Ionicons name="globe-outline" size={14} color={colors.textMuted} />
-            <Text style={styles.tzText}>Timezone · {tz}</Text>
-          </View>
+          {schedule ? (
+            <View style={styles.windowRow}>
+              <View style={styles.windowBox}>
+                <Text style={styles.windowLabel}>Awake from</Text>
+                <Text style={styles.windowVal}>{schedule.awake_start}</Text>
+              </View>
+              <Ionicons name="arrow-forward" size={14} color={colors.textMuted} />
+              <View style={styles.windowBox}>
+                <Text style={styles.windowLabel}>Until</Text>
+                <Text style={styles.windowVal}>{schedule.awake_end}</Text>
+              </View>
+            </View>
+          ) : null}
 
-          <TouchableOpacity
-            style={[styles.saveBtn, (!scheduleDirty || scheduleSaving) && styles.saveBtnDisabled]}
-            onPress={onSaveSchedule}
-            disabled={!scheduleDirty || scheduleSaving}
-            activeOpacity={0.85}
-            testID="bt-save-schedule"
-          >
-            {scheduleSaving ? (
-              <ActivityIndicator color="#0b0f15" />
-            ) : (
-              <>
-                <Ionicons name="checkmark" size={18} color="#0b0f15" />
-                <Text style={styles.saveBtnText}>SAVE AWAKE HOURS</Text>
-              </>
-            )}
-          </TouchableOpacity>
+          {schedule ? (
+            <View style={styles.tzRow}>
+              <Ionicons name="globe-outline" size={14} color={colors.textMuted} />
+              <Text style={styles.tzText}>Timezone · {schedule.timezone}</Text>
+            </View>
+          ) : null}
+
+          {schedule?.source === 'default' ? (
+            <TouchableOpacity
+              style={styles.linkBtn}
+              onPress={() => router.push('/schedule' as any)}
+              activeOpacity={0.7}
+              testID="bt-open-scheduler"
+            >
+              <Ionicons name="open-outline" size={16} color={colors.cyan} />
+              <Text style={styles.linkBtnText}>OPEN WORK-SCHEDULER</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
 
         <Text style={styles.footnote}>
@@ -349,7 +288,7 @@ const styles = StyleSheet.create({
     color: colors.textMuted, fontSize: 11, fontStyle: 'italic',
     textAlign: 'center', marginTop: spacing.sm, lineHeight: 16,
   },
-  // Awake hours section
+  // Availability section
   statusPill: {
     alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, borderWidth: 1,
@@ -357,31 +296,27 @@ const styles = StyleSheet.create({
   },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusText: { fontWeight: '900', fontSize: 11, letterSpacing: 0.5 },
-  timeRow: {
-    flexDirection: 'row', alignItems: 'flex-end', gap: 10,
-    marginTop: 6,
+  syncRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  syncText: { color: colors.textSecondary, fontSize: 11, fontWeight: '700' },
+  windowRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 6,
   },
-  timeBox: { flex: 1, gap: 4 },
-  timeLabel: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
-  timeInput: {
+  windowBox: { flex: 1, gap: 4 },
+  windowLabel: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  windowVal: {
     color: colors.text, fontSize: 18, fontWeight: '800', letterSpacing: 2,
     backgroundColor: colors.bg, borderRadius: radii.md,
     borderWidth: 1, borderColor: colors.border,
     paddingVertical: 10, paddingHorizontal: 12, textAlign: 'center',
   },
-  timeInputDisabled: { opacity: 0.4 },
-  toggleRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingVertical: 6, marginTop: 4,
-  },
-  toggleLabel: { color: colors.text, fontWeight: '800', fontSize: 13 },
   tzRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
   tzText: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
-  saveBtn: {
-    backgroundColor: colors.cyan, borderRadius: radii.md,
-    paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    marginTop: 4,
+  linkBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, paddingVertical: 10, borderRadius: radii.md,
+    borderWidth: 1, borderColor: colors.cyan + '55',
+    backgroundColor: colors.cyan + '11',
+    marginTop: 6,
   },
-  saveBtnDisabled: { opacity: 0.45 },
-  saveBtnText: { color: '#0b0f15', fontWeight: '900', letterSpacing: 0.8 },
+  linkBtnText: { color: colors.cyan, fontSize: 11, fontWeight: '900', letterSpacing: 1 },
 });

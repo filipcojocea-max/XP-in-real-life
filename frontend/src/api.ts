@@ -1294,41 +1294,25 @@ export const api = {
     }),
   btGroupPrefs: () =>
     req<{ prefs: Record<string, boolean> }>('/bt/groups/prefs'),
-  // ── Awake-hours schedule (Smart Availability Filter) ──────────────
-  // HH:MM strings + IANA timezone. `sleep_all_day=true` forces the
-  // user "inactive" 24/7 until they turn it back off.
+  // ── Awake-hours schedule ──────────────────────────────────────────
+  // 2026-06-02 — the BT awake window is now SYNCED with the
+  // Work-Scheduler mini-app (profile.shift_schedule). No manual entry
+  // here. The legacy POST endpoint was removed; only GET remains so
+  // the UI can render the "Active right now" status pill.
   btGetSchedule: () =>
     req<{
       schedule: {
         awake_start: string;
         awake_end: string;
-        sleep_all_day: boolean;
         timezone: string;
-        updated_at?: string | null;
-        is_default?: boolean;
+        /** 'scheduler' = pulled from profile.shift_schedule.
+         *  'default'   = scheduler off → 08:00–23:00 fallback. */
+        source: 'scheduler' | 'default';
+        /** Current shift label when source==='scheduler'. */
+        shift?: 'day' | 'night' | 'off' | null;
       };
       is_awake_now: boolean;
     }>('/bt/schedule'),
-  btSaveSchedule: (
-    awake_start: string,
-    awake_end: string,
-    sleep_all_day: boolean,
-    timezone?: string,
-  ) =>
-    req<{
-      ok: boolean;
-      schedule: {
-        awake_start: string;
-        awake_end: string;
-        sleep_all_day: boolean;
-        timezone: string;
-        updated_at?: string | null;
-      };
-      is_awake_now: boolean;
-    }>('/bt/schedule', {
-      method: 'POST',
-      body: JSON.stringify({ awake_start, awake_end, sleep_all_day, timezone }),
-    }),
   // Solo hunt loop
   btSoloStart: (lat: number, lng: number, radius_m: number) =>
     req<BTSoloHunt>('/bt/solo/start', {

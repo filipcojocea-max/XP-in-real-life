@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 10 — Buried Treasure schedule SYNCED with Work-Scheduler. Backend 9/9 PASS (new GET /api/bt/schedule shape with source/shift, no sleep_all_day/updated_at/is_default; default 08:00-23:00 when scheduler off; scheduler-on day pattern → 06:00-22:00; scheduler-on night pattern → 14:00-06:00 wrap-around; POST /api/bt/schedule returns 405; regression /bt/groups/mine, /bt/groups/available, /bt/settings, /bt/solo/current all 200). Frontend /treasure/settings UI verified: SAVED LOCATION + AVAILABILITY cards present, synced-with-Work-Scheduler copy present, bt-availability-pill='Active right now', read-only HH:MM Awake from/Until labels (no <input> tags on page), bt-open-scheduler visible when source==='default'. All four removed testIDs (bt-awake-start, bt-awake-end, bt-sleep-all-day, bt-save-schedule) confirmed gone. First UI run showed a STALE Metro bundle (still old UI); a single 'sudo supervisorctl restart expo' cleared it and the new UI rendered correctly. Main agent should be aware that without restarting expo, end users on the preview environment may continue to see the old UI until Metro re-bundles.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_schedule_sync.py",
+    "/app/test_reports/pytest/iter10_schedule_sync.xml"
+  ],
+  "action_items": [
+    "(Optional) Note for next iteration: Metro is started in CI mode (reloads disabled). After any frontend change, supervisorctl restart expo is required for the preview environment to serve the new bundle — otherwise stale UI persists. Already verified the new UI renders after restart this round."
+  ],
+  "critical_code_review_comments": [
+    "backend/buried_treasure.py::_get_user_schedule correctly lazy-imports _shift_for_date + DEFAULT_SHIFTS from server.py inside the function body to avoid the circular import.",
+    "Night-shift wrap-around (start 14:00, sleep 06:00) is exposed as awake_start='14:00', awake_end='06:00' — consumers MUST handle awake_end < awake_start as a wrap. Confirmed is_awake_now logic handles this for the test user's TZ during the run.",
+    "POST /api/bt/schedule cleanly returns 405 Method Not Allowed (FastAPI default since GET is still defined on /api/bt/schedule); the legacy bt_player_schedule collection is no longer touched.",
+    "Frontend correctly hides bt-open-scheduler when source==='scheduler' and shows it when source==='default'. Pill text reflects is_awake_now ('Active right now' vs 'Inactive — outside awake hours')."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_schedule_sync.py (NEW — 9 pytest tests for the new schedule shape, default/day/night cases, POST removal, regression)"
+  ],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100% (all assertions on /treasure/settings pass after expo restart)"},
+  "seed_data_creation": "None permanent. Used backup_schedule fixture to snapshot admin profile.shift_schedule before each test class and restore after. Final state of admin restored to pre-test value.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 10 schedule sync (backend buried_treasure._get_user_schedule + frontend /treasure/settings rewrite) is fully verified. Backend reuses lazy-imported _shift_for_date / DEFAULT_SHIFTS from server.py (lines 472-518). Tests are at /app/backend/tests/test_bt_schedule_sync.py and use the backup-then-restore pattern via motor on admin profile. The obsolete /app/backend/tests/test_bt_schedule_toggle.py.obsolete file was correctly NOT executed. Note: Metro runs in CI mode — supervisorctl restart expo is needed for frontend changes to take effect in the preview env.",
+  "rca_of_issue": "N/A — verification round, no bug to RCA. Side note: the *first* UI test attempt showed the old UI because Metro had cached the previous bundle from before the frontend change; this is environmental, not a code defect. After 'sudo supervisorctl restart expo' + ~30s warmup, the new bundle is served and all assertions pass."
+}

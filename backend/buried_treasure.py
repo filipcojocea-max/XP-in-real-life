@@ -236,36 +236,85 @@ def _is_in_window(now_minutes: int, start: tuple[int, int], end: tuple[int, int]
     return now_minutes >= s or now_minutes < e
 
 
-async def _get_user_schedule(user_id: str) -> dict:
-    """Return the user's awake-hours doc, falling back to sensible
-    defaults when nothing is saved yet. Always non-None."""
-    doc = await _db.bt_player_schedule.find_one({"_id": user_id}) or {}
-    # Resolve timezone — explicit on schedule wins; profile.timezone
-    # is the fallback so existing users get a sane default without
-    # having to open the settings screen first.
-    tz_name = (doc.get("timezone") or "").strip()
-    if not tz_name:
-        prof = await _db.profile.find_one({"_id": user_id}, {"_id": 0, "timezone": 1})
-        tz_name = ((prof or {}).get("timezone") or "").strip() or "UTC"
+async def _get_user_schedule(user_id: str, *, now_utc: Optional[datetime] = None) -> dict:
+    """Return the user's awake window — SYNCED with the Work-Scheduler
+    mini-app (profile.shift_schedule). When the scheduler is disabled
+    or has no pattern, we fall back to a default 08:00–23:00 local
+    window per 2026-06-02 product spec.
+
+    The manual `bt_player_schedule` collection is deprecated — we no
+    longer ask the user to enter awake hours twice.
+
+    Returned shape:
+      {
+        user_id, awake_start, awake_end, timezone,
+        source: 'scheduler' | 'default',
+        shift:  'day' | 'night' | 'off' | None,
+      }
+    """
+    prof = await _db.profile.find_one(
+        {"_id": user_id},
+        {"_id": 0, "timezone": 1, "shift_schedule": 1, "wake_time": 1, "day_start_time": 1},
+    ) or {}
+    tz_name = (prof.get("timezone") or "").strip() or "UTC"
+    tz = _resolve_tz(tz_name)
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+
+    sched = prof.get("shift_schedule") or {}
+    enabled = bool(sched.get("enabled"))
+    shift_label: Optional[str] = None
+
+    if enabled:
+        # Lazy import — avoids a circular dep at module-load time
+        # because server.py imports this module at startup.
+        try:
+            from server import _shift_for_date, DEFAULT_SHIFTS  # type: ignore
+        except Exception:
+            _shift_for_date = None  # type: ignore
+            DEFAULT_SHIFTS = {}  # type: ignore
+
+        if _shift_for_date is not None:
+            today_iso = now.date().isoformat()
+            try:
+                shift_label = _shift_for_date(prof, today_iso)
+            except Exception:
+                shift_label = None
+            if shift_label:
+                shifts = sched.get("shifts") or {}
+                s_def = shifts.get(shift_label) or DEFAULT_SHIFTS.get(shift_label) or {}
+                start = _parse_hhmm(s_def.get("start_time")) or (8, 0)
+                # The scheduler's "sleep_time" is the moment they stop
+                # being awake → exactly the awake-window end.
+                end = _parse_hhmm(s_def.get("sleep_time")) or (23, 0)
+                return {
+                    "user_id": user_id,
+                    "awake_start": _fmt_hhmm(start),
+                    "awake_end": _fmt_hhmm(end),
+                    "timezone": tz_name,
+                    "source": "scheduler",
+                    "shift": shift_label,
+                }
+            # enabled but no shift for today (e.g. empty pattern) →
+            # fall through to default below so the user still gets a
+            # sensible awake window rather than being marked inactive
+            # 24/7 by accident.
+
+    # ── Fallback: scheduler off / not set up → 08:00–23:00 local ─────
     return {
         "user_id": user_id,
-        "awake_start": (doc.get("awake_start") or DEFAULT_AWAKE_START),
-        "awake_end": (doc.get("awake_end") or DEFAULT_AWAKE_END),
-        "sleep_all_day": bool(doc.get("sleep_all_day", False)),
+        "awake_start": "08:00",
+        "awake_end": "23:00",
         "timezone": tz_name,
-        "updated_at": doc.get("updated_at"),
-        "_saved": bool(doc),
+        "source": "default",
+        "shift": None,
     }
 
 
 async def _is_user_awake_now(user_id: str, *, now_utc: Optional[datetime] = None) -> bool:
-    """True iff the user is currently inside their saved awake window.
-    Users with no schedule saved default to 08:00–23:00 local time —
-    so they're treated as awake during normal daytime hours without
-    needing to opt in. `sleep_all_day=True` always returns False."""
-    sched = await _get_user_schedule(user_id)
-    if sched["sleep_all_day"]:
-        return False
+    """True iff the user is currently inside their resolved awake
+    window. Awake-window resolution rules are documented on
+    `_get_user_schedule`."""
+    sched = await _get_user_schedule(user_id, now_utc=now_utc)
     start = _parse_hhmm(sched["awake_start"]) or (8, 0)
     end = _parse_hhmm(sched["awake_end"]) or (23, 0)
     tz = _resolve_tz(sched["timezone"])
@@ -436,21 +485,10 @@ class GroupToggleBody(BaseModel):
     enabled: bool
 
 
-class ScheduleBody(BaseModel):
-    """Awake-hours schedule for Smart Availability Filter.
-
-    awake_start / awake_end are HH:MM strings in the user's local
-    timezone. `sleep_all_day=True` ignores both values and locks the
-    user out of treasure selection entirely until they turn it off.
-    `timezone` is optional — when omitted we fall back to the user's
-    profile timezone. Sending it lets the client stamp the device's
-    current IANA zone in one call (e.g. via
-    `Intl.DateTimeFormat().resolvedOptions().timeZone`).
-    """
-    awake_start: Optional[str] = None
-    awake_end: Optional[str] = None
-    sleep_all_day: bool = False
-    timezone: Optional[str] = None
+# (ScheduleBody was removed 2026-06-02 — the manual awake-hours POST
+#  endpoint is gone now that BT availability is synced with the
+#  Work-Scheduler mini-app. See `_get_user_schedule` for the new
+#  resolution rules.)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -562,10 +600,13 @@ def attach_routes(app, get_user_or_legacy):
         )
         return {"ok": True}
 
-    # ── SCHEDULE (awake hours — Smart Availability Filter) ───────────
-    # Storage: bt_player_schedule. Default behaviour (no doc saved):
-    # the user is treated as awake 08:00–23:00 local time so the
-    # filter never silently locks people out.
+    # ── SCHEDULE (awake hours — synced with Work-Scheduler) ──────────
+    # 2026-06-02 — the per-user manual awake hours stored in
+    # `bt_player_schedule` were removed in favour of pulling straight
+    # from `profile.shift_schedule` (Work-Scheduler mini-app). When the
+    # scheduler is disabled / unconfigured we fall back to 08:00–23:00
+    # local time. The POST endpoint is gone — users no longer enter
+    # awake hours twice.
     @router.get("/bt/schedule")
     async def get_schedule(user_id: str = Depends(get_user_or_legacy)):
         sched = await _get_user_schedule(user_id)
@@ -573,54 +614,9 @@ def attach_routes(app, get_user_or_legacy):
             "schedule": {
                 "awake_start": sched["awake_start"],
                 "awake_end": sched["awake_end"],
-                "sleep_all_day": sched["sleep_all_day"],
                 "timezone": sched["timezone"],
-                "updated_at": sched["updated_at"],
-                "is_default": not sched["_saved"],
-            },
-            "is_awake_now": await _is_user_awake_now(user_id),
-        }
-
-    @router.post("/bt/schedule")
-    async def save_schedule(
-        body: ScheduleBody,
-        user_id: str = Depends(get_user_or_legacy),
-    ):
-        # Validate HH:MM — coerce to defaults if user sent garbage so
-        # the filter never breaks on bad input.
-        start = _parse_hhmm(body.awake_start) or _parse_hhmm(DEFAULT_AWAKE_START) or (8, 0)
-        end = _parse_hhmm(body.awake_end) or _parse_hhmm(DEFAULT_AWAKE_END) or (23, 0)
-        tz_name = (body.timezone or "").strip()
-        # Best-effort timezone validation — fall back silently to the
-        # user's profile timezone so we never reject a save.
-        if tz_name and ZoneInfo is not None:
-            try:
-                ZoneInfo(tz_name)
-            except Exception:
-                tz_name = ""
-        update_doc = {
-            "_id": user_id,
-            "awake_start": _fmt_hhmm(start),
-            "awake_end": _fmt_hhmm(end),
-            "sleep_all_day": bool(body.sleep_all_day),
-            "updated_at": _now_iso(),
-        }
-        if tz_name:
-            update_doc["timezone"] = tz_name
-        await _db.bt_player_schedule.update_one(
-            {"_id": user_id},
-            {"$set": update_doc},
-            upsert=True,
-        )
-        sched = await _get_user_schedule(user_id)
-        return {
-            "ok": True,
-            "schedule": {
-                "awake_start": sched["awake_start"],
-                "awake_end": sched["awake_end"],
-                "sleep_all_day": sched["sleep_all_day"],
-                "timezone": sched["timezone"],
-                "updated_at": sched["updated_at"],
+                "source": sched["source"],   # 'scheduler' | 'default'
+                "shift": sched.get("shift"), # 'day'|'night'|'off'|None
             },
             "is_awake_now": await _is_user_awake_now(user_id),
         }
