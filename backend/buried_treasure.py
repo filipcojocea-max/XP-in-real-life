@@ -656,8 +656,13 @@ def attach_routes(app, get_user_or_legacy):
         friend_ids = await _friend_ids_fn(user_id)
         if not friend_ids:
             return {"friends": [], "has_my_area": False}
-        my_area_doc = await _db.bt_settings.find_one({"_id": user_id})
-        my_area = (my_area_doc or {}).get("area") or {}
+        # 2026-06-04 fix: read from bt_player_settings (the canonical
+        # collection used by /bt/settings GET/POST) with the flat
+        # {lat, lng, radius_m} schema. The earlier draft accidentally
+        # read from `bt_settings.area.{...}` which doesn't exist in
+        # production, so every real friend was returning reason='no_app'.
+        my_area_doc = await _db.bt_player_settings.find_one({"_id": user_id})
+        my_area = my_area_doc or {}
         my_lat = my_area.get("lat")
         my_lng = my_area.get("lng")
         my_rad = my_area.get("radius_m") or 0.0
@@ -679,10 +684,13 @@ def attach_routes(app, get_user_or_legacy):
                 "avatar_base64": prof.get("avatar_base64") or None,
             }
         settings_map = {}
-        async for s in _db.bt_settings.find(
-            {"_id": {"$in": friend_ids}}, {"_id": 1, "area": 1}
+        async for s in _db.bt_player_settings.find(
+            {"_id": {"$in": friend_ids}},
+            {"_id": 1, "lat": 1, "lng": 1, "radius_m": 1},
         ):
-            settings_map[s.get("_id")] = (s.get("area") or {})
+            # Flat schema — copy the doc directly; downstream code reads
+            # `.get("lat")` / `.get("lng")` / `.get("radius_m")`.
+            settings_map[s.get("_id")] = s
 
         out: list[dict] = []
         for fid in friend_ids:

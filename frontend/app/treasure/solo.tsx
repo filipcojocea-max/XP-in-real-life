@@ -61,6 +61,12 @@ export default function SoloHunt() {
   //   'gated'   → show "Start Daily Treasure Hunt" button
   //   'active'  → show the normal compass + camera UI
   const [dailyStage, setDailyStage] = useState<'checking' | 'gated' | 'active'>('checking');
+  // Map clue expand/minimize state (Part 1 spec). Declared HERE — when
+  // these were defined inline elsewhere the bundler crashed at runtime
+  // because the closures captured undefined refs.
+  const [mapExpanded, setMapExpanded] = useState(false);
+  const mapRef = useRef<BTLeafletMapHandle | null>(null);
+  const expandedMapRef = useRef<BTLeafletMapHandle | null>(null);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const magSubRef = useRef<{ remove: () => void } | null>(null);
   const cameraRef = useRef<any>(null);

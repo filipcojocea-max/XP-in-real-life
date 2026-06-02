@@ -77,7 +77,15 @@ export default function TreasureHome() {
       ]);
       setSoloHunt(s.hunt || null);
       setMyGroups(g.groups || []);
-      setPendingInvites(((inv && inv.invites) || []) as PendingInvite[]);
+      // Defensive parsing for Round B invites: accept either the
+      // documented {invites:[...]} shape, a raw array (unlikely but
+      // safe), or a missing/null body — we never want a stale or
+      // bad response to silently zero out the gold banner state.
+      const rawInvites: any =
+        (inv && Array.isArray(inv.invites)) ? inv.invites
+          : Array.isArray(inv) ? inv
+          : [];
+      setPendingInvites(rawInvites as PendingInvite[]);
       if (settings?.area) {
         setSavedArea({
           lat: settings.area.lat,
