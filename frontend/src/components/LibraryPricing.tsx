@@ -171,6 +171,17 @@ export function PricingBadge({
     : {};
 
   // Build inner display
+  // Priority order (highest → lowest):
+  //   1. FREE           — nothing to charge regardless of overrides
+  //   2. OWNED          — already bought, no price to show
+  //   3. has_override   — Creator set a personal price for this user;
+  //                       beats both the % discount and the duo offer
+  //                       (server already collapses these into
+  //                       effective_price, but we still want the public
+  //                       `price` rendered with a strikethrough for
+  //                       transparency).
+  //   4. discount_active — solo % discount window
+  //   5. plain price
   let inner: React.ReactNode;
   if (pricing.is_free) {
     inner = <Text style={badgeStyles.freeText}>FREE</Text>;
@@ -180,6 +191,28 @@ export function PricingBadge({
         <Ionicons name="checkmark-circle" size={11} color={colors.green} />
         <Text style={badgeStyles.ownedText}>OWNED</Text>
       </>
+    );
+  } else if (pricing.has_override && typeof pricing.override_price === 'number') {
+    // Per-spec 2026-06-02: strikethrough original on the left, the new
+    // exclusive price on the right in gold-bold, plus a small chip so
+    // the player notices it's a personal deal rather than a sitewide
+    // sale.
+    const original = pricing.price;
+    const newPrice = pricing.override_price as number;
+    const showStrike = original > newPrice && original > 0;
+    inner = (
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+        {showStrike ? (
+          <Text style={badgeStyles.struck}>{formatPrice(original, pricing.currency)}</Text>
+        ) : null}
+        <Text style={badgeStyles.overrideText} testID={testID ? `${testID}-override` : undefined}>
+          {formatPrice(newPrice, pricing.override_currency || pricing.currency)}
+        </Text>
+        <View style={badgeStyles.overrideChip}>
+          <Ionicons name="star" size={8} color="#0b0f15" />
+          <Text style={badgeStyles.overrideChipText}>YOUR PRICE</Text>
+        </View>
+      </View>
     );
   } else if (pricing.discount_active) {
     inner = (
@@ -200,7 +233,13 @@ export function PricingBadge({
       {...wrapProps}
       style={[
         badgeStyles.pill,
-        pricing.is_free ? badgeStyles.free : owned ? badgeStyles.owned : badgeStyles.priced,
+        pricing.is_free
+          ? badgeStyles.free
+          : owned
+            ? badgeStyles.owned
+            : pricing.has_override
+              ? badgeStyles.overridePill
+              : badgeStyles.priced,
         isAdmin && badgeStyles.adminEditable,
       ]}
       testID={testID}
@@ -251,6 +290,35 @@ const badgeStyles = StyleSheet.create({
   discountText: { color: colors.red, fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
   owned: { backgroundColor: colors.green + '22', borderColor: colors.green + '88' },
   ownedText: { color: colors.green, fontSize: 10, fontWeight: '900', letterSpacing: 0.5 },
+  // ── Per-player override styles ────────────────────────────────────
+  // Gold-tinted to read as "premium / exclusive" rather than a
+  // sitewide red sale chip. Bold weight keeps the new price scannable
+  // at a glance even when sat right next to the strikethrough original.
+  overridePill: {
+    backgroundColor: '#FFD70014',
+    borderColor: '#FFD700AA',
+  },
+  overrideText: {
+    color: '#FFD700',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  overrideChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: '#FFD700',
+    borderRadius: radii.pill,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  overrideChipText: {
+    color: '#0b0f15',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
   adminEditable: { borderStyle: 'dashed', borderColor: '#FFD70088' },
   editIcon: { marginLeft: 2 },
 });
@@ -1029,7 +1097,23 @@ export function BuyAppModal({
             {description ? <Text style={buyStyles.desc}>{description}</Text> : null}
 
             <View style={buyStyles.priceBox}>
-              {pricing.discount_active ? (
+              {pricing.has_override && typeof pricing.override_price === 'number' ? (
+                // Per-player override — gold-bold new price + strikethrough
+                // original + an "Exclusive" chip so the buyer sees this
+                // isn't a sitewide sale, it's their personal price.
+                <View style={{ alignItems: 'center', gap: 4 }}>
+                  {pricing.price > (pricing.override_price as number) && pricing.price > 0 ? (
+                    <Text style={buyStyles.struck}>{formatPrice(pricing.price, pricing.currency)}</Text>
+                  ) : null}
+                  <Text style={[buyStyles.priceBig, { color: '#FFD700' }]}>
+                    {formatPrice(pricing.override_price as number, pricing.override_currency || pricing.currency)}
+                  </Text>
+                  <View style={[buyStyles.discChip, { borderColor: '#FFD70088', backgroundColor: '#FFD70022' }]}>
+                    <Ionicons name="star" size={10} color="#FFD700" />
+                    <Text style={[buyStyles.discText, { color: '#FFD700' }]}>EXCLUSIVE PRICE — just for you</Text>
+                  </View>
+                </View>
+              ) : pricing.discount_active ? (
                 <View style={{ alignItems: 'center', gap: 4 }}>
                   <Text style={buyStyles.struck}>{formatPrice(pricing.price, pricing.currency)}</Text>
                   <Text style={buyStyles.priceBig}>{formatPrice(pricing.effective_price, pricing.currency)}</Text>

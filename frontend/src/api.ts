@@ -2314,7 +2314,7 @@ export type ScheduleDay = {
 };
 
 export type LibraryAppPricing = {
-  app_id: 'sleep' | 'challenges' | 'spot' | 'confidence';
+  app_id: 'sleep' | 'challenges' | 'spot' | 'confidence' | 'treasure';
   price: number;
   currency: string;
   purchase_url: string;
@@ -2327,6 +2327,16 @@ export type LibraryAppPricing = {
   purchased: boolean;
   /** Duo Referral Discount, if Creator has an active offer for the app. */
   duo_offer?: DuoOffer | null;
+  /**
+   * Per-player price override set by the Creator from Admin Player
+   * Tools. When `has_override` is true the override BEATS both the
+   * solo % discount and the duo offer — `effective_price` will already
+   * be the override amount. `price` still holds the original public
+   * price so the UI can render the strikethrough.
+   */
+  has_override?: boolean;
+  override_price?: number;
+  override_currency?: string;
 };
 
 // ─── Per-friend chat preferences (bubble colors + mute + soft-block) ───

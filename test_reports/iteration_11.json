@@ -1,0 +1,37 @@
+{
+  "summary": "Per-player price-override display verified on both backend and Library+ frontend. Backend: 3/3 pytest cases pass — GET /api/library/pricing returns has_override boolean on every entry; POST .../price-overrides/sleep sets override=$4.99 USD and the same GET now returns has_override=true, override_price=4.99, override_currency='USD', effective_price=4.99; DELETE clears it and has_override reverts to false. Frontend: with the override seeded, /library renders pricing-badge-sleep with a strikethrough '$7.00', gold bold '$4.99' (testID pricing-badge-sleep-override), a 'YOUR PRICE' chip, and a distinct gold-tinted pill background (rgba(255,215,0,0.08)) vs the default dark fill on challenges/spot/confidence — those three remain on the plain priced pill with no override sub-testID, confirming the new branch is scoped to overridden apps only. BuyAppModal override branch could NOT be exercised through the UI because the test user is the admin/creator and canOpenApp() returns true unconditionally for isAdmin → tapping the sleep card routes to /sleep/onboarding instead of opening BuyAppModal; the override code path inside BuyAppModal (LibraryPricing.tsx lines 1099-1115) was code-reviewed instead and is correctly wired (priority OVERRIDE > discount_active > plain, gold #FFD700 new price, strikethrough original, 'EXCLUSIVE PRICE — just for you' chip). Admin price-override on sleep was cleaned up via DELETE — verified has_override=false after teardown.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_price_override_display.py",
+    "/app/test_reports/pytest/iter11_price_override.xml"
+  ],
+  "action_items": [
+    "(Optional / not blocking) Add a non-admin seed user to /app/memory/test_credentials.md so the BuyAppModal override branch can be exercised end-to-end via Playwright in future iterations — currently the admin/creator account bypasses the buy modal via canOpenApp()'s isAdmin short-circuit (library.tsx:119)."
+  ],
+  "critical_code_review_comments": [
+    "LibraryPricing.tsx PricingBadge override branch (lines 195-216) and BuyAppModal override branch (lines 1099-1115) both respect the priority order FREE > OWNED > OVERRIDE > discount_active > plain and use the spec-required gold #FFD700 tokens.",
+    "library/(tabs)/library.tsx:119 — canOpenApp short-circuits true for admin, so admin cannot reach BuyAppModal through normal taps. Fine for production UX, just limits E2E coverage of the modal.",
+    "Console shows pre-existing benign warnings only: deprecated shadow*/textShadow*/pointerEvents props, expo-router 'No route named' for nested children, expo-notifications web limitation, and a Require-cycle src/api.ts <-> AuthContext.tsx. None block this feature."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_price_override_display.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (3/3 pytest)",
+    "frontend": "PricingBadge override verified end-to-end via Playwright; BuyAppModal override verified via code review only (admin cannot trigger it through the UI)"
+  },
+  "seed_data_creation": "Test transiently set a $4.99 USD override on the `sleep` mini-app for the admin user via POST /api/admin/players/{user_id}/price-overrides/sleep, then removed it via DELETE. Admin state is fully restored at end of test (has_override=false confirmed).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "test_price_override_display.py is reusable — it logs in as admin, snapshots clean state, POST/GET/DELETE the override and validates the new fields. It is idempotent (DELETE on teardown) and uses the EXPO_PUBLIC_BACKEND_URL public ingress. If a non-admin test user becomes available, extend the Playwright check to also tap the sleep card and assert buy-app-modal renders the EXCLUSIVE PRICE chip + gold $4.99 + strikethrough $7.00.",
+  "rca_of_issue": "N/A — feature works as designed. The only gap is E2E coverage of the BuyAppModal override branch, blocked by the admin canOpenApp short-circuit rather than by any bug."
+}
