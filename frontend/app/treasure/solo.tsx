@@ -95,13 +95,22 @@ export default function SoloHunt() {
           Magnetometer.setUpdateInterval(120);
         } catch { /* setUpdateInterval can throw on Android 14 when the
                      sensor service is rate-limited — non-fatal. */ }
-        const sub = Magnetometer.addListener(({ x, y }) => {
-          // atan2 gives -π..π; convert to compass deg 0..360 (0 = north)
-          let deg = Math.atan2(y, x) * (180 / Math.PI);
-          deg = (deg + 360 + 90) % 360;
-          setHeading(deg);
-        });
-        magSubRef.current = sub;
+        let sub: { remove: () => void } | null = null;
+        try {
+          sub = Magnetometer.addListener(({ x, y }) => {
+            // atan2 gives -π..π; convert to compass deg 0..360 (0 = north)
+            let deg = Math.atan2(y, x) * (180 / Math.PI);
+            deg = (deg + 360 + 90) % 360;
+            setHeading(deg);
+          });
+        } catch (inner) {
+          // Some Android builds raise from inside addListener itself
+          // ("_nativeModule.addListener is not a function"); swallow so
+          // the screen mounts and the user can still hunt via GPS.
+          // eslint-disable-next-line no-console
+          console.warn('[solo] Magnetometer.addListener failed:', (inner as any)?.message || inner);
+        }
+        if (sub) magSubRef.current = sub;
       } catch (e) {
         // Final safety net — DO NOT propagate. Heading stays at 0 and
         // the compass arrow just points north until the user moves.
