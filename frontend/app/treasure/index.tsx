@@ -47,6 +47,15 @@ type PendingInvite = {
   created_at: string;
 };
 
+type PendingReport = {
+  report_id: string;
+  source: 'solo' | 'group';
+  group_name: string | null;
+  category: 'chest' | 'location';
+  reporter_name: string;
+  created_at: string;
+};
+
 export default function TreasureHome() {
   const router = useRouter();
   const [stage, setStage] = useState<Stage>('loading');
@@ -55,6 +64,7 @@ export default function TreasureHome() {
   // Persistent invites (Round B) — stay visible until the player opens
   // the group page, which calls /bt/invites/{id}/view to clear them.
   const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
+  const [pendingReports, setPendingReports] = useState<PendingReport[]>([]);
   // Persistent hunt area from /api/bt/settings. When set the picker is
   // skipped on every subsequent play; users edit it from the gear icon
   // top-right.
@@ -69,11 +79,12 @@ export default function TreasureHome() {
   const load = useCallback(async () => {
     setStage('loading');
     try {
-      const [s, g, settings, inv] = await Promise.all([
+      const [s, g, settings, inv, rep] = await Promise.all([
         api.btSoloCurrent().catch(() => ({ hunt: null })),
         api.btGroupsMine().catch(() => ({ groups: [] as BTGroup[] })),
         api.btGetSettings().catch(() => ({ area: null as any })),
         api.btInvitesPending().catch(() => ({ invites: [], count: 0 } as any)),
+        api.btReportsPending().catch(() => ({ reports: [], count: 0 } as any)),
       ]);
       setSoloHunt(s.hunt || null);
       setMyGroups(g.groups || []);
@@ -86,6 +97,11 @@ export default function TreasureHome() {
           : Array.isArray(inv) ? inv
           : [];
       setPendingInvites(rawInvites as PendingInvite[]);
+      const rawReports: any =
+        (rep && Array.isArray(rep.reports)) ? rep.reports
+          : Array.isArray(rep) ? rep
+          : [];
+      setPendingReports(rawReports as PendingReport[]);
       if (settings?.area) {
         setSavedArea({
           lat: settings.area.lat,
@@ -286,6 +302,34 @@ export default function TreasureHome() {
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={20} color="#0b0f15" />
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+
+        {/* ───────── PENDING ISSUE REPORTS (for creator/admin review) ─────────
+            One row per unviewed report. Tapping routes to the review
+            screen which clears it from the reviewer's banner list. */}
+        {pendingReports.length > 0 ? (
+          <View style={styles.invitesWrap} testID="bt-pending-reports">
+            {pendingReports.map((rp) => (
+              <TouchableOpacity
+                key={rp.report_id}
+                style={[styles.inviteBanner, { backgroundColor: '#FFE0E0', borderColor: '#FF3B30' }]}
+                onPress={() => router.push(`/treasure/reports/${rp.report_id}`)}
+                activeOpacity={0.9}
+                testID={`bt-report-${rp.report_id}`}
+              >
+                <View style={[styles.inviteIconBox, { backgroundColor: '#FF3B30' }]}>
+                  <Ionicons name="flag" size={22} color="#fff" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.inviteTitle, { color: '#7A0E0E' }]}>NEW ISSUE REPORT</Text>
+                  <Text style={[styles.inviteSub, { color: '#7A0E0E' }]} numberOfLines={2}>
+                    {rp.reporter_name} flagged the {rp.category === 'chest' ? 'chest' : 'location'}{rp.group_name ? ` in "${rp.group_name}"` : ''} — tap to review
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color="#7A0E0E" />
               </TouchableOpacity>
             ))}
           </View>

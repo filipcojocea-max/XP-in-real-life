@@ -1,0 +1,36 @@
+{
+  "summary": "Buried Treasure Issue Reporting System backend — 28/28 pytest cases PASS. Validated /api/bt/reports/can-report (no_hunt + already_reported), POST /reports validation (invalid source/category, group not found, group not hunting, non-member 403, no active solo 404), happy paths SOLO (admin self → recipients_count=0 with row still inserted; non-admin → recipients=[admin]), happy path GROUP (admin=creator dedupes recipients to 1), rate limit (409 second pending → succeeds after /ignore), /reports/pending banner feed clears on ignore, GET /reports/{rid} shape + viewed_by + 403 gating for non-recipient, /confirm inserts bt_blocked_coords (lat/lng/radius_m=30/source_report_id/added_by) and second call 400, /ignore writes no block doc and second call 400. Block-aware chest picker integration: seeded bt_blocked_coords at remote Arctic coord, ran /api/bt/solo/start centered on it 5× with 100m radius — every chest landed outside the 30 m block radius (haversine validated). Regression smoke 8/8 (/bt/settings, /schedule, /solo/current, /groups/mine, /groups/available, /friends-eligible, /invites/pending, /reports/pending, POST /location).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/bt/solo/start", "issue": "Overpass returns HTTP 406 repeatedly (3-4 retries) before falling back to random point — adds 30–60s latency on every solo start. Backend still serves the request correctly via _pick_safe_random_point fallback, but consider switching Overpass headers/server or caching to reduce p95 latency. Not blocking."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_reports.py",
+    "/app/test_reports/pytest/iter13_bt_reports.xml"
+  ],
+  "action_items": [
+    "No action items — backend Issue Reporting System is fully functional. Main agent can proceed to frontend wiring with confidence."
+  ],
+  "critical_code_review_comments": [
+    "Recipients are correctly deduped and the reporter is filtered (verified for admin-self-report → 0 recipients, and group-admin-creator → 1 recipient).",
+    "/confirm and /ignore use the find_one_and_update({status:'pending'}) atomic guard correctly; second call returns 400.",
+    "bt_blocked_coords row created on /confirm carries radius_m=30, source_report_id, added_by, added_at — block-aware picker honors it (validated via 5 fresh solo/start spawns)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_reports.py (new)"
+  ],
+  "success_rate": {"backend": "100% (28/28)", "frontend": "n/a (frontend out of scope)"},
+  "seed_data_creation": "Created 2 mongo-seeded test users (TEST_BT_RPT_U_*, TEST_BT_RPT_B_*) in users + profile collections; minted HS256 JWTs locally with JWT_SECRET. Teardown deletes both users + their bt_solo / bt_player_location / friend_requests / bt_issue_reports rows. Group test inserts TEST_BT_RPT_GRP_* docs directly into bt_groups and cleans up. Blocked-coord integration test inserts TEST_BT_BLK_* into bt_blocked_coords and removes it. Per-test autouse fixture also wipes any reports whose reporter or recipients match the TEST_BT_RPT_ prefix and any bt_blocked_coords added_by admin so the suite is order-independent.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 28 pytest cases for the Issue Reporting System pass against the live https://emergent-mobile-app-4.preview.emergentagent.com backend. To re-run: `pytest /app/backend/tests/test_bt_reports.py -v` (takes ~5 min due to live Overpass calls — bumped to 90s timeout on /api/bt/solo/start). Suite uses mongo-seeded TEST_BT_RPT_* users with minted JWTs (JWT_SECRET from env or default 'xp-real-life-dev-secret-change-in-prod-12345'). Admin login uses filip.cojocea122@gmail.com / XL98CZW5599 from /app/memory/test_credentials.md. The TestBlockedChestPicker test seeds a bt_blocked_coords at lat=70, lng=-130 (Arctic) where Overpass usually returns nothing, exercising the _pick_safe_random_point fallback branch; if that ever starts returning Overpass hits in the future, the test still validates haversine > 30m. The earlier iteration_12 verified Round A (15/15) — this iteration extends with the new /reports/* endpoints + block-picker integration.",
+  "rca_of_issue": "n/a — no failures."
+}
