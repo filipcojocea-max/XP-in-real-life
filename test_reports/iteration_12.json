@@ -1,0 +1,42 @@
+{
+  "summary": "Buried Treasure Round A + B backend regression — 15/15 pytest cases pass against the live preview ingress after the SyntaxError fix in /app/backend/buried_treasure.py. Verified: (1) GET /api/bt/friends-eligible OVERLAP rule end-to-end with three seeded friends — close (Sydney/800m, overlapping admin area) → eligible=true, reason=null, distance_km=0.0; far (Newcastle ~50km away) → eligible=false, reason='different_region', distance_km≈108.7; no-BT friend → has_bt=false, eligible=false, reason='no_app'; sort order verified (eligible first, then has_bt, then no_app — alpha within tier). (2) When admin's own bt_player_settings is deleted, has_my_area=false and BT-equipped friends switch to reason='no_my_area' while the no-BT friend still reports 'no_app' (no_app branch wins, matches spec). (3) Lonely user with no friends → friends:[], has_my_area:false. (4) Accept/Reject TOGGLE in lobby: accept→reject→accept all return 200 and flip member.status while responses_locked=false in /group_public payload; after the creator calls /bury, responses_locked flips to true and the next /accept returns 400 with 'locked' in the message. (5) Persistent invites lifecycle: invite call creates a bt_invites doc {requires_view:true, opened_at:null, creator_name, group_name}; GET /api/bt/invites/pending returns it; POST /api/bt/invites/{gid}/view is idempotent (two calls both return {ok:true}); after /view the invite no longer appears in /pending and the doc is requires_view=false with opened_at stamped; subsequent /accept leaves requires_view=false; re-inviting the same user (after removing them from members) restores requires_view=true and clears opened_at. (6) Regression smoke: 7 BT GET endpoints all 200, POST /bt/settings round-trips (response shape is {area:{lat,lng,radius_m,…}}), POST /bt/location → 200, POST /bt/solo/start non-5xx + /bt/solo/current → 200. Backend log confirms '[buried_treasure] routes attached (v2 — solo + groups)' — no import errors, no 5xx in this run. Auth-gate side-note (informational, NOT a regression): /api/bt/* uses get_user_or_legacy in server.py which falls back to anon/'main' user when no JWT is supplied, so unauthenticated calls return 200 with empty payloads ({friends:[], has_my_area:false} and {invites:[], count:0}) instead of 401/403; this is consistent with the rest of the BT router and the legacy app design — not a bug introduced by Round A.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/bt/friends-eligible & GET /api/bt/invites/pending", "issue": "No hard auth gate — falls back to 'main' anon user via get_user_or_legacy and returns 200 with empty payloads instead of 401/403 when JWT is missing. Consistent with every other /api/bt/* endpoint; flagging only because the review request asked us to verify the auth gate. Not a regression."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_round_ab.py",
+    "/app/backend/tests/test_bt_regression_iter12.py",
+    "/app/test_reports/pytest/iter12_bt_round_ab_retest.xml",
+    "/app/test_reports/pytest/iter12_bt_regression.xml",
+    "/app/test_reports/pytest/iter12_bt_full.xml"
+  ],
+  "action_items": [
+    "(Optional) If a strict auth gate is desired for /api/bt/friends-eligible and /api/bt/invites/pending (i.e. 401 when no JWT supplied), swap get_user_or_legacy → require_user dep — currently both endpoints are anon-tolerant in line with the rest of the BT router."
+  ],
+  "critical_code_review_comments": [
+    "SyntaxError fix verified — buried_treasure.py now imports cleanly; backend log shows '[buried_treasure] routes attached (v2 — solo + groups)' at startup and every /api/bt/* endpoint exercised returns < 500.",
+    "friends-eligible overlap math (buried_treasure.py:838) uses haversine + radius sum correctly; reason priority is no_app > no_my_area > different_region, matching the spec ('only when they themselves have BT settings — no_app still takes precedence').",
+    "Invite view endpoint (buried_treasure.py:748-755) is properly idempotent — uses $set on requires_view/opened_at and returns {ok:true} on every call; the bt_invites collection is created up-front by the invite path, so /view never has to upsert."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_regression_iter12.py (new — 10 regression smoke checks for existing BT endpoints; the POST /bt/settings assertion now unwraps the nested {area:{...}} response shape)"
+  ],
+  "success_rate": {
+    "backend": "100% (15/15 pytest passing — 5 Round A+B + 10 regression)",
+    "frontend": "n/a (backend-only run per request)"
+  },
+  "seed_data_creation": "test_bt_round_ab.py seeds three TEST_BT_* users (close/far/no-BT friend) with profile + accepted friend_requests + (for close/far) bt_player_settings, exercises the flow, and tears everything down — including admin bt_player_settings snapshot/restore and bt_invites cleanup. test_bt_regression_iter12.py touches the admin's own bt_player_settings via POST /api/bt/settings (Sydney, 800m); admin location updated via POST /api/bt/location (SF). No persistent test pollution.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "test_bt_round_ab.py and test_bt_regression_iter12.py are both reusable and idempotent. They hit EXPO_PUBLIC_BACKEND_URL (public ingress). The frontend api.ts reportedly still references a /api/bt/no-go-zones endpoint that is NOT implemented in buried_treasure.py — explicitly out of scope per main-agent note. If you need to add a strict auth gate to BT, you'll need to also fix the unauth fallback path in get_user_or_legacy (server.py:308) or switch BT endpoints to require_user.",
+  "rca_of_issue": "N/A — all Round A + Round B + regression behaviour confirmed working. Previous /api/bt/* 404s were resolved by deleting the orphaned docstring fragment + unreachable code (old line 282-290) that was preventing buried_treasure.py from importing; the router now binds normally and all 15 pytest cases pass."
+}

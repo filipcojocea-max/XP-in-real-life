@@ -279,15 +279,6 @@ async def _pick_public_chest_point(lat: float, lng: float, radius_m: float) -> t
         radius_m, lat, lng,
     )
     return _random_point_in_circle(lat, lng, radius_m)
-    centre. Pulls the spawn ~15 % short of the edge so the chest never
-    lands on the boundary line itself."""
-    # Square-root keeps the distribution uniform by area.
-    r = radius_m * math.sqrt(random.random()) * 0.85
-    theta = random.random() * 2 * math.pi
-    # 1° latitude  ≈ 111_320 m, longitude scales with cos(lat).
-    dlat = (r * math.cos(theta)) / 111_320.0
-    dlng = (r * math.sin(theta)) / (111_320.0 * max(0.01, math.cos(math.radians(center_lat))))
-    return center_lat + dlat, center_lng + dlng
 
 
 def _gen_group_code() -> str:
