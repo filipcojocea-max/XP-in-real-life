@@ -156,6 +156,129 @@ def _bearing_deg(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 def _random_point_in_circle(center_lat: float, center_lng: float, radius_m: float) -> tuple[float, float]:
     """Uniform-random point inside a circle of `radius_m` around the
+    centre. KEPT as a final-fallback when the Overpass public-land
+    filter returns nothing usable. Production callers should prefer
+    `_pick_public_chest_point` so chests never land on private land."""
+    import math, random as _r
+    # Uniform sampling in a disc: sqrt(u) for radial bias correction.
+    r = radius_m * math.sqrt(_r.random())
+    theta = 2 * math.pi * _r.random()
+    dlat_m = r * math.cos(theta)
+    dlng_m = r * math.sin(theta)
+    # ~111_111 m per degree of latitude; longitude scales by cos(lat).
+    lat = center_lat + (dlat_m / 111_111.0)
+    lng = center_lng + (dlng_m / (111_111.0 * math.cos(math.radians(center_lat)) or 1.0))
+    return lat, lng
+
+
+# ─── Public-land chest placement (Overpass / OSM) ────────────────────
+# Per 2026-06-04 product spec the chest MUST land on publicly-accessible
+# open land — parks, school ovals, beaches, recreation grounds — never
+# on a private residence, driveway, or fenced commercial lot. We query
+# the OSM Overpass API for matching ways inside the player's hunt area
+# and pick a centroid (with small jitter) of one of them. Falls back to
+# expanding the radius up to 2× before giving up.
+_OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",  # backup mirror
+]
+
+# Tags that designate publicly-accessible open land. Order-of-preference:
+# the more "leisure"-y, the better the hunt experience.
+_PUBLIC_TAGS_QUERY = """
+[out:json][timeout:12];
+(
+  way["leisure"~"^(park|recreation_ground|garden|playground|pitch|nature_reserve|common|dog_park)$"](around:{r},{lat},{lng});
+  way["landuse"~"^(park|recreation_ground|grass|village_green|forest|meadow)$"](around:{r},{lat},{lng});
+  way["natural"~"^(beach|wood|grassland|heath)$"](around:{r},{lat},{lng});
+  way["amenity"="school"](around:{r},{lat},{lng});
+  way["amenity"="public_park"](around:{r},{lat},{lng});
+);
+out center tags 60;
+"""
+
+
+def _is_forbidden_tags(tags: dict) -> bool:
+    """Reject ways tagged as private / residential / building no matter
+    what else they claim to be (e.g. a "garden" tagged inside a private
+    residence)."""
+    if not tags:
+        return False
+    if (tags.get("access") or "").lower() in ("private", "no", "permit"):
+        return True
+    if (tags.get("private") or "").lower() == "yes":
+        return True
+    if tags.get("landuse") == "residential":
+        return True
+    if tags.get("building"):
+        return True
+    return False
+
+
+async def _overpass_public_centers(lat: float, lng: float, radius_m: float) -> list[tuple[float, float, dict]]:
+    """Returns a list of (centre_lat, centre_lng, tags) for public-land
+    ways within `radius_m` of (lat, lng). Empty list on failure — the
+    caller is expected to fall back gracefully."""
+    import httpx as _httpx
+    query = _PUBLIC_TAGS_QUERY.format(r=int(radius_m), lat=lat, lng=lng)
+    for endpoint in _OVERPASS_ENDPOINTS:
+        try:
+            async with _httpx.AsyncClient(timeout=14.0) as client:
+                resp = await client.post(endpoint, data={"data": query})
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                results: list[tuple[float, float, dict]] = []
+                for el in (data.get("elements") or []):
+                    tags = el.get("tags") or {}
+                    if _is_forbidden_tags(tags):
+                        continue
+                    c = el.get("center") or {}
+                    c_lat = c.get("lat")
+                    c_lng = c.get("lon")
+                    if c_lat is None or c_lng is None:
+                        continue
+                    # Final safety: make sure the centre is still inside
+                    # the requested radius (Overpass `around` is
+                    # bounding-box based and can leak a few extra m).
+                    if _haversine_m(lat, lng, float(c_lat), float(c_lng)) > radius_m * 1.05:
+                        continue
+                    results.append((float(c_lat), float(c_lng), tags))
+                return results
+        except Exception:
+            # Try the next mirror.
+            continue
+    return []
+
+
+async def _pick_public_chest_point(lat: float, lng: float, radius_m: float) -> tuple[float, float]:
+    """Pick a chest location that's guaranteed to be on publicly
+    accessible land via OSM Overpass. Expands the search radius up to
+    2× when the initial query is empty, then falls back to the legacy
+    uniform-disc sampler only as a last resort (logged WARN). Adds a
+    small ±25 m jitter inside the matched way so two consecutive
+    chests don't spawn on the exact same picnic table."""
+    import math, random as _r
+    # Try at progressively wider radii. Cap at 2× the original.
+    for scale in (1.0, 1.4, 2.0):
+        r_try = max(50.0, radius_m * scale)
+        candidates = await _overpass_public_centers(lat, lng, r_try)
+        if not candidates:
+            continue
+        c_lat, c_lng, _tags = _r.choice(candidates)
+        # ±25 m jitter — small enough to stay inside most park polygons
+        # but large enough that re-buries don't reuse the same point.
+        jit_r = 25.0 * math.sqrt(_r.random())
+        theta = 2 * math.pi * _r.random()
+        j_lat = c_lat + (jit_r * math.cos(theta) / 111_111.0)
+        j_lng = c_lng + (jit_r * math.sin(theta) / (111_111.0 * math.cos(math.radians(c_lat)) or 1.0))
+        return j_lat, j_lng
+    # Last-resort fallback. Logged so we notice if Overpass is down.
+    logging.getLogger("buried_treasure").warning(
+        "[bt] Overpass returned no public land within %.0f m of %.5f,%.5f — falling back to random point.",
+        radius_m, lat, lng,
+    )
+    return _random_point_in_circle(lat, lng, radius_m)
     centre. Pulls the spawn ~15 % short of the edge so the chest never
     lands on the boundary line itself."""
     # Square-root keeps the distribution uniform by area.
@@ -814,7 +937,7 @@ def attach_routes(app, get_user_or_legacy):
         user_id: str = Depends(get_user_or_legacy),
     ):
         radius = _clamp_radius(body.radius_m)
-        clat, clng = _random_point_in_circle(body.lat, body.lng, radius)
+        clat, clng = await _pick_public_chest_point(body.lat, body.lng, radius)
         doc = {
             "_id": user_id,
             "area": {"lat": float(body.lat), "lng": float(body.lng), "radius_m": radius},
@@ -885,8 +1008,12 @@ def attach_routes(app, get_user_or_legacy):
         })
         # Auto-assign the next chest in the same area so the user can
         # keep playing without going back through the location picker.
+        # Per 2026-06-04 spec the new chest MUST also be on public land —
+        # use the Overpass-backed picker so the re-bury never lands on
+        # someone's house just because the player happens to live near
+        # a residential cluster.
         area = doc.get("area") or {}
-        new_lat, new_lng = _random_point_in_circle(
+        new_lat, new_lng = await _pick_public_chest_point(
             float(area["lat"]), float(area["lng"]), float(area["radius_m"]),
         )
         await _db.bt_solo.update_one(
