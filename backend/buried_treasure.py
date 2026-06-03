@@ -96,6 +96,7 @@ _db = None
 _now_iso = None
 _send_push = None        # async fn(token, title, body, data)
 _friend_ids_fn = None    # async fn(user_id) -> list[str]
+_admin_emails: list[str] = []  # populated from init; used to route solo issue reports
 
 # ── tuning constants (per product spec) ──────────────────────────────
 MIN_RADIUS_M = 100
@@ -108,6 +109,18 @@ GROUP_CODE_LEN = 6
 GROUP_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no easily-confused
 MAX_PHOTO_BYTES = 2_500_000      # ~2.5 MB after base64 (we store base64 raw)
 
+# ── Issue reporting (2026-06-04 spec) ────────────────────────────────
+# Players can flag a chest spawn as bad ("private property", inaccessible,
+# etc.) from the active hunt screen. The owner/admin reviews each report
+# and either ignores it or CONFIRMs it — confirmed reports add the chest
+# coord to `bt_blocked_coords` with a 30 m radius, preventing future
+# hunts from spawning a chest there. The currently-active chest is NOT
+# moved; the block is forward-looking only.
+BLOCK_RADIUS_M = 30
+MAX_BLOCK_PICK_RETRIES = 6
+REPORT_CATEGORIES = {"chest", "location"}
+REPORT_NOTES_MAX_CHARS = 500
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Init
@@ -117,18 +130,62 @@ def init_buried_treasure(
     db,
     is_admin_user=None,        # kept for backward-compat with server.py wiring
     now_iso,
-    admin_emails=None,         # ignored — kept for backward-compat
+    admin_emails=None,         # used to route solo issue reports to admin
     send_push,
     friend_ids_fn,
 ):
     """Wire up the module. Must be called once at server startup BEFORE
     attach_routes()."""
-    global _db, _now_iso, _send_push, _friend_ids_fn
+    global _db, _now_iso, _send_push, _friend_ids_fn, _admin_emails
     _db = db
     _now_iso = now_iso
     _send_push = send_push
     _friend_ids_fn = friend_ids_fn
+    _admin_emails = [str(e).strip().lower() for e in (admin_emails or []) if e]
     logger.info("[buried_treasure] initialized")
+
+
+async def _resolve_admin_ids() -> list[str]:
+    """Resolve the list of admin/creator user_ids by looking up the
+    admin emails in db.users. Cached implicitly per-call since the
+    admin set is tiny (usually 1)."""
+    if _db is None or not _admin_emails:
+        return []
+    try:
+        ids: list[str] = []
+        async for u in _db.users.find(
+            {"email": {"$in": _admin_emails}},
+            {"_id": 1},
+        ):
+            uid = u.get("_id")
+            if uid:
+                ids.append(str(uid))
+        return ids
+    except Exception:
+        return []
+
+
+async def _is_coord_blocked(lat: float, lng: float) -> bool:
+    """True iff (lat, lng) falls inside any active bt_blocked_coords
+    entry (haversine ≤ stored radius_m). Used by chest pickers so a
+    creator-confirmed report permanently prevents that spot from being
+    chosen again."""
+    if _db is None:
+        return False
+    try:
+        async for b in _db.bt_blocked_coords.find({}, {"lat": 1, "lng": 1, "radius_m": 1}):
+            blat = b.get("lat")
+            blng = b.get("lng")
+            if blat is None or blng is None:
+                continue
+            r = float(b.get("radius_m") or BLOCK_RADIUS_M)
+            if _haversine_m(lat, lng, float(blat), float(blng)) <= r:
+                return True
+    except Exception:
+        # Defensive: never crash chest-picking on a DB hiccup. The block
+        # filter is a quality-of-life feature, not a correctness gate.
+        pass
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -169,6 +226,17 @@ def _random_point_in_circle(center_lat: float, center_lng: float, radius_m: floa
     lat = center_lat + (dlat_m / 111_111.0)
     lng = center_lng + (dlng_m / (111_111.0 * math.cos(math.radians(center_lat)) or 1.0))
     return lat, lng
+
+
+async def _pick_safe_random_point(center_lat: float, center_lng: float, radius_m: float) -> tuple[float, float]:
+    """Uniform-random point that also avoids the blocked-coord list.
+    Falls back to the unfiltered point if all retries are blocked
+    (extremely unlikely unless the entire hunt area is blocked)."""
+    for _ in range(MAX_BLOCK_PICK_RETRIES):
+        lat, lng = _random_point_in_circle(center_lat, center_lng, radius_m)
+        if not await _is_coord_blocked(lat, lng):
+            return lat, lng
+    return _random_point_in_circle(center_lat, center_lng, radius_m)
 
 
 # ─── Public-land chest placement (Overpass / OSM) ────────────────────
@@ -257,7 +325,11 @@ async def _pick_public_chest_point(lat: float, lng: float, radius_m: float) -> t
     2× when the initial query is empty, then falls back to the legacy
     uniform-disc sampler only as a last resort (logged WARN). Adds a
     small ±25 m jitter inside the matched way so two consecutive
-    chests don't spawn on the exact same picnic table."""
+    chests don't spawn on the exact same picnic table.
+
+    2026-06-04: also filters out any candidate within 30 m of a
+    bt_blocked_coords entry (creator-confirmed bad-spot reports).
+    Candidate centres AND jittered final coords are both checked."""
     import math, random as _r
     # Try at progressively wider radii. Cap at 2× the original.
     for scale in (1.0, 1.4, 2.0):
@@ -265,20 +337,34 @@ async def _pick_public_chest_point(lat: float, lng: float, radius_m: float) -> t
         candidates = await _overpass_public_centers(lat, lng, r_try)
         if not candidates:
             continue
-        c_lat, c_lng, _tags = _r.choice(candidates)
-        # ±25 m jitter — small enough to stay inside most park polygons
-        # but large enough that re-buries don't reuse the same point.
-        jit_r = 25.0 * math.sqrt(_r.random())
-        theta = 2 * math.pi * _r.random()
-        j_lat = c_lat + (jit_r * math.cos(theta) / 111_111.0)
-        j_lng = c_lng + (jit_r * math.sin(theta) / (111_111.0 * math.cos(math.radians(c_lat)) or 1.0))
-        return j_lat, j_lng
+        # 2026-06-04: drop blocked centres before random.choice so we
+        # don't bias the distribution by reshuffling later.
+        unblocked: list[tuple[float, float, dict]] = []
+        for c in candidates:
+            if not await _is_coord_blocked(float(c[0]), float(c[1])):
+                unblocked.append(c)
+        pool = unblocked if unblocked else candidates  # if every centre is blocked, fall through to random
+        # Try up to N jitter rolls — the jitter can drift into a blocked
+        # zone even when the centre itself is clean.
+        for _ in range(MAX_BLOCK_PICK_RETRIES):
+            c_lat, c_lng, _tags = _r.choice(pool)
+            # ±25 m jitter — small enough to stay inside most park polygons
+            # but large enough that re-buries don't reuse the same point.
+            jit_r = 25.0 * math.sqrt(_r.random())
+            theta = 2 * math.pi * _r.random()
+            j_lat = c_lat + (jit_r * math.cos(theta) / 111_111.0)
+            j_lng = c_lng + (jit_r * math.sin(theta) / (111_111.0 * math.cos(math.radians(c_lat)) or 1.0))
+            if not await _is_coord_blocked(j_lat, j_lng):
+                return j_lat, j_lng
+        # All jitter attempts were blocked — return last attempted point
+        # so the hunt isn't completely broken (extremely unlikely).
+        return j_lat, j_lng  # type: ignore[name-defined]
     # Last-resort fallback. Logged so we notice if Overpass is down.
     logging.getLogger("buried_treasure").warning(
         "[bt] Overpass returned no public land within %.0f m of %.5f,%.5f — falling back to random point.",
         radius_m, lat, lng,
     )
-    return _random_point_in_circle(lat, lng, radius_m)
+    return await _pick_safe_random_point(lat, lng, radius_m)
 
 
 def _gen_group_code() -> str:
@@ -1535,6 +1621,320 @@ def attach_routes(app, get_user_or_legacy):
             "distance_m": round(dist, 1),
             "group": _group_public(doc, viewer_id=user_id),
         }
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Issue Reporting System (2026-06-04)
+    # ═══════════════════════════════════════════════════════════════════
+    # Players can flag a bad chest spawn ("private property", inaccessible,
+    # dangerous, etc.) from the active hunt screen. Two categories only:
+    #   "chest"    — the chest itself feels off (wrong/missing)
+    #   "location" — the spawn point is bad (inaccessible/private/etc.)
+    # Submitting auto-uses the active chest's coordinates (no manual pick).
+    # Recipients:
+    #   • Solo hunts  → admin/creator user_ids
+    #   • Group hunts → group creator + admin/creator (as backup)
+    # Rate limit: 1 active (pending) report per (reporter, hunt_id/group_id).
+    # Confirm flow: adds the chest coord to bt_blocked_coords with 30 m
+    # radius so future chests never spawn there. Active hunt is NOT moved.
+    @router.get("/bt/reports/can-report")
+    async def reports_can_report(
+        hunt_id: str | None = None,
+        group_id: str | None = None,
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        """Quick rate-limit probe used by the report button to know
+        whether to enable itself. Returns {can_report:bool, reason?}."""
+        if not hunt_id and not group_id:
+            return {"can_report": False, "reason": "no_hunt"}
+        q: dict = {"reporter_id": user_id, "status": "pending"}
+        if group_id:
+            q["group_id"] = group_id
+        else:
+            q["hunt_id"] = hunt_id
+            q["source"] = "solo"
+        existing = await _db.bt_issue_reports.find_one(q, {"_id": 1})
+        if existing:
+            return {"can_report": False, "reason": "already_reported"}
+        return {"can_report": True}
+
+    @router.post("/bt/reports")
+    async def reports_create(
+        body: dict = Body(...),
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        """Submit an issue report against the active chest. Body:
+            { source:'solo'|'group', hunt_id?, group_id?,
+              category:'chest'|'location', notes? }
+        Rate limit: 1 active pending report per reporter per hunt."""
+        source = (body.get("source") or "").strip().lower()
+        if source not in ("solo", "group"):
+            raise HTTPException(400, "source must be 'solo' or 'group'.")
+        category = (body.get("category") or "").strip().lower()
+        if category not in REPORT_CATEGORIES:
+            raise HTTPException(400, "category must be 'chest' or 'location'.")
+        notes = str(body.get("notes") or "").strip()[:REPORT_NOTES_MAX_CHARS]
+
+        # Resolve chest coord + recipients from the active hunt/group.
+        chest_lat: float | None = None
+        chest_lng: float | None = None
+        hunt_id: str | None = None
+        group_id: str | None = None
+        creator_id: str | None = None
+        group_name: str | None = None
+
+        if source == "solo":
+            hunt_id_in = (body.get("hunt_id") or "").strip()
+            # The solo collection is keyed by user_id — reporter must own it.
+            solo = await _db.bt_solo.find_one({"_id": user_id})
+            if not solo:
+                raise HTTPException(404, "No active solo hunt.")
+            # If the client passes a hunt_id we treat it as a sanity check;
+            # the canonical key is the user_id row.
+            hunt_id = hunt_id_in or str(solo.get("_id") or user_id)
+            chest = solo.get("chest") or {}
+            chest_lat = chest.get("lat")
+            chest_lng = chest.get("lng")
+            if chest_lat is None or chest_lng is None:
+                raise HTTPException(400, "No chest is currently buried.")
+        else:  # group
+            group_id = (body.get("group_id") or "").strip()
+            if not group_id:
+                raise HTTPException(400, "group_id is required for group reports.")
+            doc = await _db.bt_groups.find_one({"_id": group_id})
+            if not doc:
+                raise HTTPException(404, "Group not found.")
+            if doc.get("status") != "hunting":
+                raise HTTPException(400, "Chest isn't live yet — nothing to report.")
+            # Reporter must be an accepted member (creator can also report).
+            members = doc.get("members") or []
+            is_member = any(
+                m.get("user_id") == user_id and m.get("status") == "accepted"
+                for m in members
+            )
+            if not is_member and doc.get("creator_id") != user_id:
+                raise HTTPException(403, "You're not part of this hunt.")
+            chest_lat = doc.get("chest_lat")
+            chest_lng = doc.get("chest_lng")
+            if chest_lat is None or chest_lng is None:
+                raise HTTPException(400, "No chest is currently buried.")
+            creator_id = doc.get("creator_id")
+            group_name = doc.get("name")
+
+        # Rate limit: 1 active pending report per reporter per hunt/group.
+        dup_q: dict = {"reporter_id": user_id, "status": "pending"}
+        if source == "group":
+            dup_q["group_id"] = group_id
+        else:
+            dup_q["source"] = "solo"
+            dup_q["hunt_id"] = hunt_id
+        if await _db.bt_issue_reports.find_one(dup_q, {"_id": 1}):
+            raise HTTPException(
+                409,
+                "You already have an active report for this hunt. Start a new hunt to file another.",
+            )
+
+        # Resolve recipients: admin always, plus the group creator for
+        # group hunts (unless they ARE the admin, then dedupe).
+        admin_ids = await _resolve_admin_ids()
+        recipients: list[str] = list(admin_ids)
+        if creator_id and creator_id not in recipients:
+            recipients.append(creator_id)
+        # Never notify the reporter about their own report.
+        recipients = [r for r in recipients if r and r != user_id]
+
+        rid = str(uuid.uuid4())
+        now = _now_iso()
+        reporter_name = await _player_name(user_id)
+        doc_insert = {
+            "_id": rid,
+            "source": source,
+            "hunt_id": hunt_id,
+            "group_id": group_id,
+            "group_name": group_name,
+            "reporter_id": user_id,
+            "reporter_name": reporter_name,
+            "category": category,
+            "notes": notes,
+            "chest_lat": float(chest_lat),
+            "chest_lng": float(chest_lng),
+            "recipient_ids": recipients,
+            "viewed_by": [],
+            "status": "pending",
+            "reviewed_by": None,
+            "reviewed_at": None,
+            "created_at": now,
+        }
+        await _db.bt_issue_reports.insert_one(doc_insert)
+
+        # Persistent push to every recipient. The data payload includes
+        # report_id so the NotificationDeepLinker can open the review
+        # screen directly. requires_view-style persistence lives in the
+        # bt_issue_reports.recipient_ids/viewed_by fields — the
+        # frontend banner stays until the reviewer opens this report.
+        title = "🚩 Treasure issue reported"
+        target_desc = "the chest" if category == "chest" else "the location"
+        body_text = f"{reporter_name} flagged {target_desc} in {group_name or 'a solo hunt'}."
+        for r in recipients:
+            try:
+                await _push_to_user(
+                    r,
+                    title,
+                    body_text,
+                    {
+                        "type": "bt_report_received",
+                        "report_id": rid,
+                        "group_id": group_id,
+                        "category": category,
+                    },
+                )
+            except Exception:
+                # Push failures are non-fatal — the banner row is what
+                # ultimately drives reviewer attention.
+                pass
+
+        return {
+            "ok": True,
+            "report_id": rid,
+            "status": "pending",
+            "recipients_count": len(recipients),
+        }
+
+    @router.get("/bt/reports/pending")
+    async def reports_pending(user_id: str = Depends(get_user_or_legacy)):
+        """Return every pending report this user is supposed to review
+        AND hasn't yet viewed/dismissed. Drives the gold banner on the
+        Treasure home screen."""
+        cur = _db.bt_issue_reports.find({
+            "status": "pending",
+            "recipient_ids": user_id,
+            "viewed_by": {"$ne": user_id},
+        }).sort("created_at", -1)
+        out: list[dict] = []
+        async for d in cur:
+            out.append({
+                "report_id": d.get("_id"),
+                "source": d.get("source"),
+                "group_id": d.get("group_id"),
+                "group_name": d.get("group_name"),
+                "category": d.get("category"),
+                "notes": d.get("notes"),
+                "chest_lat": d.get("chest_lat"),
+                "chest_lng": d.get("chest_lng"),
+                "reporter_id": d.get("reporter_id"),
+                "reporter_name": d.get("reporter_name"),
+                "created_at": d.get("created_at"),
+            })
+        return {"reports": out, "count": len(out)}
+
+    @router.get("/bt/reports/{rid}")
+    async def reports_get(rid: str, user_id: str = Depends(get_user_or_legacy)):
+        """Open a single report. Adds the viewer to viewed_by (so the
+        persistent banner clears for them) AND returns the full payload
+        so the review screen can render Ignore/Confirm controls."""
+        d = await _db.bt_issue_reports.find_one({"_id": rid})
+        if not d:
+            raise HTTPException(404, "Report not found.")
+        recipients = d.get("recipient_ids") or []
+        is_admin = user_id in (await _resolve_admin_ids())
+        if user_id != d.get("reporter_id") and user_id not in recipients and not is_admin:
+            raise HTTPException(403, "Not your report to view.")
+        # Mark viewed (idempotent via $addToSet).
+        await _db.bt_issue_reports.update_one(
+            {"_id": rid},
+            {"$addToSet": {"viewed_by": user_id}},
+        )
+        return {
+            "report_id": d.get("_id"),
+            "source": d.get("source"),
+            "group_id": d.get("group_id"),
+            "group_name": d.get("group_name"),
+            "category": d.get("category"),
+            "notes": d.get("notes"),
+            "chest_lat": d.get("chest_lat"),
+            "chest_lng": d.get("chest_lng"),
+            "reporter_id": d.get("reporter_id"),
+            "reporter_name": d.get("reporter_name"),
+            "status": d.get("status"),
+            "reviewed_by": d.get("reviewed_by"),
+            "reviewed_at": d.get("reviewed_at"),
+            "created_at": d.get("created_at"),
+            "can_review": user_id in recipients or is_admin,
+        }
+
+    async def _review_report(rid: str, user_id: str, *, action: str) -> dict:
+        """Shared implementation for /confirm and /ignore. Atomic via
+        find_one_and_update so two reviewers can't double-resolve."""
+        if action not in ("confirm", "ignore"):
+            raise HTTPException(400, "Invalid action.")
+        d = await _db.bt_issue_reports.find_one({"_id": rid})
+        if not d:
+            raise HTTPException(404, "Report not found.")
+        if user_id not in (d.get("recipient_ids") or []):
+            # Allow admin override even if not in recipient_ids (e.g.
+            # an admin added after the report was created).
+            admin_ids = await _resolve_admin_ids()
+            if user_id not in admin_ids:
+                raise HTTPException(403, "You can't review this report.")
+        if d.get("status") != "pending":
+            raise HTTPException(400, f"Report is already {d.get('status')}.")
+        new_status = "confirmed" if action == "confirm" else "ignored"
+        now = _now_iso()
+        updated = await _db.bt_issue_reports.find_one_and_update(
+            {"_id": rid, "status": "pending"},
+            {"$set": {
+                "status": new_status,
+                "reviewed_by": user_id,
+                "reviewed_at": now,
+            },
+             "$addToSet": {"viewed_by": user_id}},
+            return_document=True,
+        )
+        if not updated:
+            raise HTTPException(409, "Report was just resolved by another reviewer.")
+        # Confirm path: persist the coord block.
+        if action == "confirm":
+            try:
+                await _db.bt_blocked_coords.insert_one({
+                    "_id": str(uuid.uuid4()),
+                    "lat": float(updated.get("chest_lat") or 0.0),
+                    "lng": float(updated.get("chest_lng") or 0.0),
+                    "radius_m": float(BLOCK_RADIUS_M),
+                    "source_report_id": rid,
+                    "added_by": user_id,
+                    "added_at": now,
+                })
+            except Exception:
+                logger.exception("[bt-reports] failed to insert bt_blocked_coords for report=%s", rid)
+        # Notify the reporter so they know it was handled.
+        try:
+            await _push_to_user(
+                updated.get("reporter_id"),
+                "Treasure report reviewed",
+                ("Your report was confirmed — that spot is now blocked from future hunts."
+                 if action == "confirm" else
+                 "Your report was reviewed and dismissed."),
+                {
+                    "type": "bt_report_resolved",
+                    "report_id": rid,
+                    "status": new_status,
+                },
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "report_id": rid,
+            "status": new_status,
+            "reviewed_at": now,
+        }
+
+    @router.post("/bt/reports/{rid}/confirm")
+    async def reports_confirm(rid: str, user_id: str = Depends(get_user_or_legacy)):
+        return await _review_report(rid, user_id, action="confirm")
+
+    @router.post("/bt/reports/{rid}/ignore")
+    async def reports_ignore(rid: str, user_id: str = Depends(get_user_or_legacy)):
+        return await _review_report(rid, user_id, action="ignore")
 
     app.include_router(router)
     logger.info("[buried_treasure] routes attached (v2 — solo + groups)")

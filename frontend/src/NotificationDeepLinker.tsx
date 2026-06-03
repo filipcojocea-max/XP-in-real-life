@@ -71,6 +71,22 @@ export function NotificationDeepLinker() {
               router.push(`/treasure/group/${gid}`);
             }, 0);
           }
+        } else if (type === 'bt_report_received') {
+          // 2026-06-04 (Issue Reporting): creator/admin tapped a report
+          // notification — open the review screen directly so they can
+          // Ignore or Confirm + block the coord.
+          const rid = (data?.report_id || data?.rid || '').toString();
+          if (rid) {
+            setTimeout(() => {
+              router.push(`/treasure/reports/${rid}`);
+            }, 0);
+          }
+        } else if (type === 'bt_report_resolved') {
+          // Reporter notified that their report was reviewed — bounce
+          // them to the treasure home so they can see it's cleared.
+          setTimeout(() => {
+            router.push('/treasure');
+          }, 0);
         }
         // Future: wire 'gift' / 'suspended' here.
       } catch (e) {

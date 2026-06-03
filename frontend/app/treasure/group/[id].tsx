@@ -36,6 +36,7 @@ import { CameraView, Camera } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
 import MapView, { Marker, Circle, IS_WEB_PLACEHOLDER } from '../../../src/components/MapShim';
 import { api, type BTCompassReading, type BTGroup } from '../../../src/api';
+import { BTReportIssueModal } from '../../../src/components/BTReportIssueModal';
 import { colors, radii, spacing } from '../../../src/theme';
 import { showAlert } from '../../../src/uiAlert';
 
@@ -50,6 +51,7 @@ export default function GroupScreen() {
   // Defaults to true (notifications on) until /bt/groups/prefs resolves.
   const [notifEnabled, setNotifEnabled] = useState(true);
   const [togglingNotif, setTogglingNotif] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
 
   // GPS shared by bury + hunting flows.
   const [gps, setGPS] = useState<{ lat: number; lng: number } | null>(null);
@@ -188,6 +190,23 @@ export default function GroupScreen() {
         />
       </View>
 
+      {/* "Found any issues? Report to Creator" — only shown while a
+          chest is live (status=hunting). Members AND the creator can
+          tap, but the creator's reports just go to admin since they
+          ARE the creator. */}
+      {group.status === 'hunting' && (group as any).chest_lat != null && (group as any).chest_lng != null ? (
+        <TouchableOpacity
+          style={styles.reportBar}
+          onPress={() => setReportOpen(true)}
+          activeOpacity={0.85}
+          testID="bt-group-report-issue"
+        >
+          <Ionicons name="flag-outline" size={16} color="#FF3B30" />
+          <Text style={styles.reportBarText}>Found any issues? Report to Creator</Text>
+          <Ionicons name="chevron-forward" size={14} color="#FF3B30" />
+        </TouchableOpacity>
+      ) : null}
+
       {group.status === 'lobby' ? (
         <LobbyView group={group} busy={busy} onAccept={() => respond(true)} onReject={() => respond(false)} onBegan={load} />
       ) : group.status === 'hunting' ? (
@@ -199,6 +218,20 @@ export default function GroupScreen() {
       ) : (
         <FinishedView group={group} />
       )}
+
+      {/* Issue report modal — group source. Chest coords are read off
+          the group doc (the LobbyView path doesn't expose them yet,
+          but the bar above is gated on chest_lat/lng so this is safe). */}
+      {(group as any).chest_lat != null && (group as any).chest_lng != null ? (
+        <BTReportIssueModal
+          visible={reportOpen}
+          onClose={() => setReportOpen(false)}
+          source="group"
+          group_id={group.id}
+          chest_lat={(group as any).chest_lat}
+          chest_lng={(group as any).chest_lng}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -729,6 +762,18 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderColor: colors.border,
   },
   toggleBarOff: { opacity: 0.55 },
+  reportBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginHorizontal: 12, marginTop: 6,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: '#1A0E10',
+    borderWidth: 1, borderColor: '#FF3B30',
+  },
+  reportBarText: {
+    flex: 1, color: '#FF3B30',
+    fontSize: 13, fontWeight: '700', letterSpacing: 0.3,
+  },
   toggleLabel: { color: colors.text, fontSize: 13, fontWeight: '800' },
   toggleLabelOff: { color: colors.textMuted },
   toggleHint: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },

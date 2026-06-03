@@ -1379,6 +1379,79 @@ export const api = {
     }>('/bt/invites/pending'),
   btInviteView: (gid: string) =>
     req<{ ok: boolean }>(`/bt/invites/${gid}/view`, { method: 'POST' }),
+
+  // ── Issue Reporting (2026-06-04) ─────────────────────────────────
+  /** Quick rate-limit probe — true iff the user can file a fresh
+   *  report for the current hunt (no pending one already exists). */
+  btReportsCanReport: (params: { hunt_id?: string; group_id?: string }) => {
+    const qs = new URLSearchParams();
+    if (params.hunt_id) qs.set('hunt_id', params.hunt_id);
+    if (params.group_id) qs.set('group_id', params.group_id);
+    return req<{ can_report: boolean; reason?: string }>(
+      `/bt/reports/can-report?${qs.toString()}`,
+    );
+  },
+  /** Submit a new report. Category is exactly 'chest' or 'location'.
+   *  Coordinates are pulled server-side from the active hunt — the
+   *  client never sends them. */
+  btReportsCreate: (body: {
+    source: 'solo' | 'group';
+    hunt_id?: string;
+    group_id?: string;
+    category: 'chest' | 'location';
+    notes?: string;
+  }) =>
+    req<{ ok: boolean; report_id: string; status: string; recipients_count: number }>(
+      '/bt/reports',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  /** Pending reports awaiting THIS user's review (creator or admin). */
+  btReportsPending: () =>
+    req<{
+      reports: {
+        report_id: string;
+        source: 'solo' | 'group';
+        group_id: string | null;
+        group_name: string | null;
+        category: 'chest' | 'location';
+        notes: string;
+        chest_lat: number;
+        chest_lng: number;
+        reporter_id: string;
+        reporter_name: string;
+        created_at: string;
+      }[];
+      count: number;
+    }>('/bt/reports/pending'),
+  /** Open a single report (also marks it viewed for the caller). */
+  btReportsGet: (rid: string) =>
+    req<{
+      report_id: string;
+      source: 'solo' | 'group';
+      group_id: string | null;
+      group_name: string | null;
+      category: 'chest' | 'location';
+      notes: string;
+      chest_lat: number;
+      chest_lng: number;
+      reporter_id: string;
+      reporter_name: string;
+      status: 'pending' | 'confirmed' | 'ignored';
+      reviewed_by: string | null;
+      reviewed_at: string | null;
+      created_at: string;
+      can_review: boolean;
+    }>(`/bt/reports/${rid}`),
+  btReportsConfirm: (rid: string) =>
+    req<{ ok: boolean; report_id: string; status: string; reviewed_at: string }>(
+      `/bt/reports/${rid}/confirm`,
+      { method: 'POST' },
+    ),
+  btReportsIgnore: (rid: string) =>
+    req<{ ok: boolean; report_id: string; status: string; reviewed_at: string }>(
+      `/bt/reports/${rid}/ignore`,
+      { method: 'POST' },
+    ),
   btGroupsMine: () => req<{ groups: BTGroup[] }>('/bt/groups/mine'),
   btGroupsAvailable: () => req<{ groups: BTGroup[] }>('/bt/groups/available'),
   btGroupAccept: (gid: string) =>

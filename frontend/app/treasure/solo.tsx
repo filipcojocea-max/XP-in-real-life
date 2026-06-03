@@ -32,6 +32,7 @@ import { Magnetometer } from 'expo-sensors';
 import * as FileSystem from 'expo-file-system';
 import { api, type BTCompassReading, type BTSoloHunt } from '../../src/api';
 import BTLeafletMap, { type BTLeafletMapHandle } from '../../src/components/BTLeafletMap';
+import { BTReportIssueModal } from '../../src/components/BTReportIssueModal';
 import { colors, radii, spacing } from '../../src/theme';
 import { showAlert } from '../../src/uiAlert';
 
@@ -51,6 +52,7 @@ export default function SoloHunt() {
   const [gps, setGPS] = useState<{ lat: number; lng: number } | null>(null);
   const [compass, setCompass] = useState<BTCompassReading | null>(null);
   const [hunt, setHunt] = useState<BTSoloHunt | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
   const [heading, setHeading] = useState(0);  // device facing (deg true-north)
   const [perm] = useCameraPermissions();
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -293,13 +295,25 @@ export default function SoloHunt() {
           <Ionicons name="chevron-back" size={22} color={colors.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Find the Treasure Chest</Text>
-        <TouchableOpacity
-          style={styles.headerBtn}
-          onPress={() => router.push('/treasure/solo-finds')}
-          testID="bt-past-finds"
-        >
-          <Ionicons name="file-tray-full-outline" size={20} color={colors.text} />
-        </TouchableOpacity>
+        <View style={styles.headerRightStack}>
+          {hunt?.chest_lat != null && hunt?.chest_lng != null && dailyStage !== 'gated' ? (
+            <TouchableOpacity
+              style={[styles.headerBtn, styles.headerReportBtn]}
+              onPress={() => setReportOpen(true)}
+              testID="bt-report-issue"
+              accessibilityLabel="Report an issue with this chest"
+            >
+              <Ionicons name="flag-outline" size={18} color="#FF3B30" />
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity
+            style={styles.headerBtn}
+            onPress={() => router.push('/treasure/solo-finds')}
+            testID="bt-past-finds"
+          >
+            <Ionicons name="file-tray-full-outline" size={20} color={colors.text} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {dailyStage === 'checking' ? (
@@ -515,6 +529,18 @@ export default function SoloHunt() {
           ) : null}
         </SafeAreaView>
       </Modal>
+
+      {/* Issue Report modal — opened from the header flag button. */}
+      {hunt?.chest_lat != null && hunt?.chest_lng != null ? (
+        <BTReportIssueModal
+          visible={reportOpen}
+          onClose={() => setReportOpen(false)}
+          source="solo"
+          hunt_id={String(hunt?.user_id || '')}
+          chest_lat={hunt.chest_lat}
+          chest_lng={hunt.chest_lng}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -528,6 +554,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   headerBtn: { width: 40, height: 36, alignItems: 'center', justifyContent: 'center' },
+  headerRightStack: { flexDirection: 'row', alignItems: 'center' },
+  headerReportBtn: {
+    borderWidth: 1, borderColor: '#FF3B30', borderRadius: 8,
+    marginRight: 6, width: 36, height: 32,
+  },
   headerTitle: { color: colors.text, fontSize: 15, fontWeight: '800', flex: 1, textAlign: 'center' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   loadingText: { color: colors.textSecondary, fontSize: 13 },
