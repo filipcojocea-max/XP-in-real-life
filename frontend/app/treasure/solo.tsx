@@ -31,7 +31,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
 import * as FileSystem from 'expo-file-system';
 import { api, type BTCompassReading, type BTSoloHunt } from '../../src/api';
-import BTLeafletMap from '../../src/components/BTLeafletMap';
+import BTLeafletMap, { type BTLeafletMapHandle } from '../../src/components/BTLeafletMap';
 import { colors, radii, spacing } from '../../src/theme';
 import { showAlert } from '../../src/uiAlert';
 

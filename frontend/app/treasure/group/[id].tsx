@@ -57,6 +57,12 @@ export default function GroupScreen() {
 
   const load = useCallback(async () => {
     if (!id) return;
+    // Round B (2026-06-04): clear the persistent invite BEFORE the
+    // group fetch so a stale/invalid group_id in bt_invites still
+    // gets cleared from the player's banner — otherwise a 404 here
+    // would short-circuit the Promise.all and the invite would never
+    // be marked viewed. Fire-and-forget — failure here is non-fatal.
+    api.btInviteView(String(id)).catch(() => {});
     setLoading(true);
     try {
       const [g, p] = await Promise.all([
@@ -67,12 +73,6 @@ export default function GroupScreen() {
       // Default to true when no preference is saved yet (notifs ON).
       const pref = p?.prefs?.[String(id)];
       setNotifEnabled(pref === undefined ? true : pref);
-      // Round B (2026-06-04): clear the persistent invite as soon as
-      // the player opens the group page. Per spec the notification
-      // "must NEVER disappear until the player explicitly opens and
-      // views it" — opening this screen IS that view. Fire-and-forget;
-      // failure here is non-fatal (next focus retries).
-      api.btInviteView(String(id)).catch(() => {});
     } catch (e: any) {
       showAlert('Failed to load group', String(e?.message || e));
     } finally {
