@@ -32,7 +32,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as FileSystem from 'expo-file-system';
-import { CameraView, Camera } from 'expo-camera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
 import MapView, { Marker, Circle, IS_WEB_PLACEHOLDER } from '../../../src/components/MapShim';
 import { api, type BTCompassReading, type BTGroup } from '../../../src/api';
@@ -411,6 +411,11 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
   }, []);
 
   const openCam = useCallback(async () => {
+    // expo-camera 17: static `Camera` symbol is unreliable on Android prod
+    // builds — the dynamic-import pattern (mirrored from /treasure/solo.tsx)
+    // is the battle-tested workaround and avoids `TypeError: Cannot read
+    // properties of undefined (reading 'requestCameraPermissionsAsync')`.
+    const { Camera } = await import('expo-camera');
     const r = await Camera.requestCameraPermissionsAsync();
     if (r.status !== 'granted') {
       showAlert('Camera blocked', 'Allow Camera so you can photograph the spot.');
@@ -596,6 +601,9 @@ function HuntingView({
       );
       return;
     }
+    // expo-camera 17: dynamic import avoids the static `Camera` symbol
+    // being undefined on Android prod builds (same pattern as solo.tsx).
+    const { Camera } = await import('expo-camera');
     const r = await Camera.requestCameraPermissionsAsync();
     if (r.status !== 'granted') {
       showAlert('Camera blocked', 'Allow Camera to confirm the find.');
