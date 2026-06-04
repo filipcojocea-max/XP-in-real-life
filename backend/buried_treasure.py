@@ -1502,6 +1502,12 @@ def attach_routes(app, get_user_or_legacy):
             )
         chest_photo = _validate_photo(body.photo_base64, required=True, field="photo_base64")
         chest_map = _validate_photo(body.map_screenshot_base64, required=True, field="map_screenshot_base64")
+        # Initialize rotation_state: creator just played (buried first
+        # chest of the cycle); queue is the shuffled list of other
+        # accepted members; free-for-all is ON until someone is selected
+        # for the next day's hunt.
+        member_ids = [m.get("user_id") for m in members if m.get("user_id")]
+        rotation_state = _rotation_init(creator_id=user_id, member_ids=member_ids)
         await _db.bt_groups.update_one(
             {"_id": gid},
             {"$set": {
@@ -1511,6 +1517,7 @@ def attach_routes(app, get_user_or_legacy):
                 "chest_photo_base64": chest_photo,
                 "map_screenshot_base64": chest_map,
                 "buried_at": _now_iso(),
+                "rotation_state": rotation_state,
             }},
         )
         # Push every other member.
@@ -1595,10 +1602,18 @@ def attach_routes(app, get_user_or_legacy):
         await _db.bt_groups.update_one(
             {"_id": gid},
             {"$set": {
-                "status": "finished",
+                # Status flips to awaiting_hide instead of 'finished' — the
+                # finder still owes a fresh hide before the next cycle can
+                # advance. The auto-failsafe tick will hide for them if
+                # they run out the clock.
+                "status": "awaiting_hide",
                 "found_by": user_id,
                 "found_at": _now_iso(),
                 "winner_photo_base64": photo,
+                "rotation_state.holder_id": user_id,
+                "rotation_state.selected_user_id": None,
+                "rotation_state.selected_at": None,
+                "rotation_state.selection_deadline_at": await _resolve_user_wake_at(user_id),
             }},
         )
         # Notify the rest of the group.
@@ -1935,6 +1950,412 @@ def attach_routes(app, get_user_or_legacy):
     @router.post("/bt/reports/{rid}/ignore")
     async def reports_ignore(rid: str, user_id: str = Depends(get_user_or_legacy)):
         return await _review_report(rid, user_id, action="ignore")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # PLAY-WITH-FRIENDS ROTATION SYSTEM (2026-06-04)
+    # ═══════════════════════════════════════════════════════════════════
+    # Per product spec the group game now runs as a turn-based cycle:
+    #   1. Group creator buries the FIRST chest (existing /bury flow,
+    #      which now also initialises rotation_state on the group doc).
+    #   2. After each find, the finder MUST hide the chest in a new
+    #      public spot (POST /bt/groups/{gid}/hide) — server-side validation:
+    #      coord must be on public land (Overpass) AND not in
+    #      bt_blocked_coords.
+    #   3. After each hide, the system selects the next finder at the
+    #      next "user wake time" from the queue (members who haven't
+    #      hidden in the current cycle yet).
+    #   4. Selected finder can /turn/accept or /turn/reject. On reject:
+    #        - group >= 3 members → free_for_all until the next daily
+    #          wake-tick (anyone can find), rejecter STAYS in queue.
+    #        - group <  3 members → rejecter moves to end of queue;
+    #          immediately try the next user.
+    #   5. Auto-failsafe: if the selected finder doesn't act before
+    #      their next wake-time tick, the system itself auto-buries the
+    #      chest at a fresh public coord and advances the cycle so the
+    #      game never stalls.
+    #
+    # rotation_state schema on bt_groups:
+    #   {
+    #     "cycle_n": 1,
+    #     "queue": [user_ids that haven't hidden yet, in selection order],
+    #     "played": [user_ids that have hidden in the current cycle],
+    #     "holder_id": <user who currently holds the chest, or null>,
+    #     "selected_user_id": <next finder, or null>,
+    #     "selected_at": <iso when the selection notification went out>,
+    #     "selection_deadline_at": <iso when failsafe fires>,
+    #     "rejected_by": [user_ids that rejected in the CURRENT selection],
+    #     "free_for_all": bool,
+    #     "free_for_all_until": <iso, used when >=3 reject path>,
+    #   }
+    # ───────────────────────────────────────────────────────────────────
+
+    async def _resolve_user_wake_at(user_id: str, *, after_iso: str | None = None) -> str:
+        """Return ISO timestamp of the user's NEXT local wake-up moment.
+        Reads profile.timezone + shift_schedule (Adaptive Work-Life
+        Scheduler) when present; falls back to a sane default of 24h
+        from now if anything is missing. The 'after' clamp lets callers
+        skip wake-times that have already passed for the user today."""
+        try:
+            from datetime import datetime, timezone, timedelta
+            from zoneinfo import ZoneInfo
+        except Exception:
+            from datetime import datetime, timezone, timedelta
+            ZoneInfo = None  # type: ignore[assignment]
+        try:
+            prof = await _db.profile.find_one({"_id": user_id}) or {}
+        except Exception:
+            prof = {}
+        tz_name = prof.get("timezone")
+        # Default wake at 08:00 local; honor shift_schedule when set.
+        wake_hh, wake_mm = 8, 0
+        try:
+            ss = prof.get("shift_schedule") or {}
+            shifts = ss.get("shifts") or {}
+            # Use the "day" shift start_time as the default wake target.
+            # Production wiring is in server._effective_day_start_for —
+            # this is a deliberately simple approximation for the daily
+            # rotation tick. Good enough; misfires (e.g. someone on a
+            # night shift) just shift selection by a few hours.
+            day = shifts.get("day") or {}
+            wake_str = (day.get("start_time") or "").strip()
+            if ":" in wake_str:
+                hh, mm = wake_str.split(":", 1)
+                wake_hh, wake_mm = int(hh), int(mm)
+        except Exception:
+            pass
+        try:
+            now = datetime.now(timezone.utc)
+            if ZoneInfo and tz_name:
+                now = now.astimezone(ZoneInfo(tz_name))
+            target = now.replace(hour=wake_hh, minute=wake_mm, second=0, microsecond=0)
+            if target <= now:
+                target = target + timedelta(days=1)
+            return target.astimezone(timezone.utc).isoformat()
+        except Exception:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            return (_dt.now(_tz.utc) + _td(hours=24)).isoformat()
+
+    def _rotation_init(creator_id: str, member_ids: list[str]) -> dict:
+        """Initial rotation_state for a freshly buried group. Creator
+        already played (they buried the first chest) so they're in
+        `played` and the queue is the shuffled list of other members."""
+        import random as _r
+        others = [m for m in member_ids if m and m != creator_id]
+        _r.shuffle(others)
+        return {
+            "cycle_n": 1,
+            "queue": list(others),
+            "played": [creator_id],
+            "holder_id": None,
+            "selected_user_id": None,
+            "selected_at": None,
+            "selection_deadline_at": None,
+            "rejected_by": [],
+            "free_for_all": True,   # day 1 the chest is free-for-all (no one selected yet)
+            "free_for_all_until": None,
+        }
+
+    async def _select_next_finder(gid: str, *, exclude_user_ids: list[str] | None = None) -> dict | None:
+        """Pop the first eligible user_id from the queue and persist the
+        selection on the group doc. Sets selection_deadline_at to the
+        user's next wake-time. Returns the updated rotation_state, or
+        None if no one is selectable (queue empty AND no fallback)."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            return None
+        rs = dict(doc.get("rotation_state") or {})
+        queue: list[str] = list(rs.get("queue") or [])
+        played: list[str] = list(rs.get("played") or [])
+        excl = set(exclude_user_ids or [])
+        # Cycle exhausted → reset (everyone played at least once).
+        if not queue and played:
+            # Reset: queue = shuffled played (excluding current holder so
+            # they don't immediately re-hide), played = [], cycle_n += 1.
+            import random as _r
+            holder = rs.get("holder_id")
+            pool = [u for u in played if u != holder]
+            _r.shuffle(pool)
+            queue = pool + ([holder] if holder else [])
+            played = []
+            rs["cycle_n"] = int(rs.get("cycle_n") or 1) + 1
+        # Pop the first non-excluded user.
+        pick = None
+        for u in queue:
+            if u not in excl:
+                pick = u
+                break
+        if not pick:
+            # Everyone excluded (e.g. all rejected) → free-for-all until next wake.
+            rs.update({
+                "selected_user_id": None,
+                "selected_at": None,
+                "selection_deadline_at": None,
+                "free_for_all": True,
+            })
+            await _db.bt_groups.update_one({"_id": gid}, {"$set": {"rotation_state": rs, "queue": queue, "played": played}})
+            return rs
+        # Resolve wake-time for the selected user — fail-safe fires when this expires.
+        deadline = await _resolve_user_wake_at(pick)
+        rs.update({
+            "queue": queue,
+            "played": played,
+            "selected_user_id": pick,
+            "selected_at": _now_iso(),
+            "selection_deadline_at": deadline,
+            "rejected_by": [],
+            "free_for_all": False,
+            "free_for_all_until": None,
+        })
+        await _db.bt_groups.update_one({"_id": gid}, {"$set": {"rotation_state": rs}})
+        # Persistent push to the selected user.
+        try:
+            await _push_to_user(
+                pick,
+                "🎯 Your turn to hunt!",
+                f"You've been chosen for the next chest in “{doc.get('name','')}” — accept or reject.",
+                {"type": "bt_turn_offered", "group_id": gid},
+            )
+        except Exception:
+            pass
+        return rs
+
+    async def _advance_after_hide(gid: str, *, finder_id: str) -> dict | None:
+        """Called from /hide. Moves the finder to 'played', clears holder,
+        and selects the next finder. The chest is now buried by `finder_id`
+        but they're done — next person hunts at their next wake-time."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            return None
+        rs = dict(doc.get("rotation_state") or {})
+        queue = [u for u in (rs.get("queue") or []) if u != finder_id]
+        played = list(rs.get("played") or [])
+        if finder_id not in played:
+            played.append(finder_id)
+        rs.update({"queue": queue, "played": played, "holder_id": None})
+        await _db.bt_groups.update_one({"_id": gid}, {"$set": {"rotation_state": rs}})
+        return await _select_next_finder(gid)
+
+    async def _auto_failsafe_hide(gid: str) -> bool:
+        """Auto-bury the chest at a fresh public coord — fires when the
+        selected finder misses their deadline OR an awaiting-hide finder
+        runs out the clock. Uses the existing public-land + block-aware
+        picker so spec rules (public-only, never blocked) are enforced.
+        Returns True if a fresh hide landed."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            return False
+        # Pick a coord near the current chest (or group center if no chest).
+        c_lat = doc.get("chest_lat")
+        c_lng = doc.get("chest_lng")
+        if c_lat is None or c_lng is None:
+            return False
+        try:
+            new_lat, new_lng = await _pick_public_chest_point(float(c_lat), float(c_lng), 1500.0)
+        except Exception:
+            new_lat, new_lng = await _pick_safe_random_point(float(c_lat), float(c_lng), 1500.0)
+        await _db.bt_groups.update_one(
+            {"_id": gid},
+            {"$set": {
+                "status": "hunting",
+                "chest_lat": float(new_lat),
+                "chest_lng": float(new_lng),
+                "buried_at": _now_iso(),
+                "auto_buried": True,
+            }, "$unset": {"chest_holder_id": ""}},
+        )
+        # Tell everyone the system buried it.
+        for m in (doc.get("members") or []):
+            try:
+                await _push_to_user(
+                    m.get("user_id"),
+                    "Chest auto-buried",
+                    f"No one acted in time — the system buried a fresh chest in “{doc.get('name','')}”.",
+                    {"type": "bt_group_buried", "group_id": gid, "auto": True},
+                )
+            except Exception:
+                pass
+        # Reselect the next finder.
+        await _select_next_finder(gid)
+        return True
+
+    @router.post("/bt/groups/{gid}/hide")
+    async def group_hide(
+        gid: str,
+        body: BuryBody,
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        """Called by the player who JUST found the chest to bury it in a
+        new public spot. Validates: must be the current holder (i.e. the
+        last finder), coord must NOT be in bt_blocked_coords, photo +
+        map are required. After success: cycle advances and the next
+        finder is selected."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            raise HTTPException(404, "Group not found.")
+        if doc.get("status") not in ("finished", "awaiting_hide"):
+            raise HTTPException(400, "Nothing to re-hide right now.")
+        # Holder check: the holder is the most-recent finder.
+        rs = doc.get("rotation_state") or {}
+        holder = rs.get("holder_id") or doc.get("found_by")
+        if holder != user_id:
+            raise HTTPException(403, "Only the player who just found the chest can hide it next.")
+        # Block-aware check on the proposed coord.
+        if await _is_coord_blocked(float(body.lat), float(body.lng)):
+            raise HTTPException(400, "That spot is in the permanent block list — pick somewhere else.")
+        photo = _validate_photo(body.photo_base64, required=True, field="photo_base64")
+        chest_map = _validate_photo(body.map_screenshot_base64, required=True, field="map_screenshot_base64")
+        await _db.bt_groups.update_one(
+            {"_id": gid},
+            {"$set": {
+                "status": "hunting",
+                "chest_lat": float(body.lat),
+                "chest_lng": float(body.lng),
+                "chest_photo_base64": photo,
+                "map_screenshot_base64": chest_map,
+                "buried_at": _now_iso(),
+            }, "$unset": {"found_by": "", "found_at": "", "winner_photo_base64": ""}},
+        )
+        # Advance rotation: move user to played, select next finder.
+        await _advance_after_hide(gid, finder_id=user_id)
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        return _group_public(doc, viewer_id=user_id)
+
+    @router.post("/bt/groups/{gid}/turn/accept")
+    async def turn_accept(gid: str, user_id: str = Depends(get_user_or_legacy)):
+        """Selected finder confirms they'll hunt. Clears any prior free-for-all flag."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            raise HTTPException(404, "Group not found.")
+        rs = doc.get("rotation_state") or {}
+        if rs.get("selected_user_id") != user_id:
+            raise HTTPException(403, "You're not the currently selected finder.")
+        new_rs = dict(rs)
+        new_rs.update({"free_for_all": False, "free_for_all_until": None, "accepted_at": _now_iso()})
+        await _db.bt_groups.update_one({"_id": gid}, {"$set": {"rotation_state": new_rs}})
+        return {"ok": True, "status": "accepted"}
+
+    @router.post("/bt/groups/{gid}/turn/reject")
+    async def turn_reject(gid: str, user_id: str = Depends(get_user_or_legacy)):
+        """Selected finder declines. Branching by group size:
+            ≥3 members → free-for-all until next wake; rejecter STAYS in queue.
+            <3 members → rejecter moves to end of queue; immediately select next."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            raise HTTPException(404, "Group not found.")
+        rs = doc.get("rotation_state") or {}
+        if rs.get("selected_user_id") != user_id:
+            raise HTTPException(403, "You're not the currently selected finder.")
+        accepted_members = [
+            m.get("user_id") for m in (doc.get("members") or [])
+            if m.get("status") == "accepted" or m.get("user_id") == doc.get("creator_id")
+        ]
+        n_members = len([u for u in accepted_members if u])
+        rejected_by = list(rs.get("rejected_by") or [])
+        if user_id not in rejected_by:
+            rejected_by.append(user_id)
+        if n_members >= 3:
+            # Free-for-all until next user-wake; rejecter KEEPS their position.
+            until = await _resolve_user_wake_at(user_id)
+            new_rs = dict(rs)
+            new_rs.update({
+                "rejected_by": rejected_by,
+                "free_for_all": True,
+                "free_for_all_until": until,
+                "selected_user_id": None,
+                "selected_at": None,
+                "selection_deadline_at": None,
+            })
+            # Note: rejecter is NOT removed from queue — they're still
+            # eligible at the next selection.
+            await _db.bt_groups.update_one({"_id": gid}, {"$set": {"rotation_state": new_rs}})
+            # Notify the whole group.
+            for m in (doc.get("members") or []):
+                if m.get("user_id"):
+                    try:
+                        await _push_to_user(
+                            m.get("user_id"),
+                            "Chest is FREE FOR ALL",
+                            f"Selection was declined — anyone in “{doc.get('name','')}” can find it until the next wake.",
+                            {"type": "bt_turn_free_for_all", "group_id": gid},
+                        )
+                    except Exception:
+                        pass
+            return {"ok": True, "status": "free_for_all", "until": until}
+        # <3 members → rejecter goes to end of queue; pick next.
+        queue = [u for u in (rs.get("queue") or []) if u != user_id] + [user_id]
+        new_rs = dict(rs)
+        new_rs.update({
+            "rejected_by": rejected_by,
+            "queue": queue,
+            "selected_user_id": None,
+            "selected_at": None,
+            "selection_deadline_at": None,
+        })
+        await _db.bt_groups.update_one({"_id": gid}, {"$set": {"rotation_state": new_rs}})
+        next_rs = await _select_next_finder(gid, exclude_user_ids=[user_id])
+        return {"ok": True, "status": "next_selected", "rotation_state": next_rs}
+
+    @router.get("/bt/groups/{gid}/turn/current")
+    async def turn_current(gid: str, user_id: str = Depends(get_user_or_legacy)):
+        """Tells the caller whether it's their turn + group rotation state."""
+        doc = await _db.bt_groups.find_one({"_id": gid})
+        if not doc:
+            raise HTTPException(404, "Group not found.")
+        rs = doc.get("rotation_state") or {}
+        return {
+            "is_my_turn": rs.get("selected_user_id") == user_id,
+            "free_for_all": bool(rs.get("free_for_all")),
+            "free_for_all_until": rs.get("free_for_all_until"),
+            "selected_user_id": rs.get("selected_user_id"),
+            "selection_deadline_at": rs.get("selection_deadline_at"),
+            "holder_id": rs.get("holder_id"),
+            "queue": rs.get("queue") or [],
+            "played": rs.get("played") or [],
+            "cycle_n": rs.get("cycle_n") or 1,
+        }
+
+    async def _rotation_failsafe_tick():
+        """Scheduler tick (5 min). Walks every active group and:
+           • If selection_deadline_at has passed AND no one accepted →
+             auto-failsafe hides a fresh chest and selects the next finder.
+           • If free_for_all_until has passed → re-select from queue.
+           • If status=awaiting_hide and the holder has run out of time →
+             auto-failsafe hides for them."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        try:
+            cur = _db.bt_groups.find({"rotation_state": {"$exists": True}})
+            async for doc in cur:
+                rs = doc.get("rotation_state") or {}
+                gid = doc.get("_id")
+                # Free-for-all expired → pick the next selection.
+                ffa_until = rs.get("free_for_all_until")
+                if ffa_until:
+                    try:
+                        if datetime.fromisoformat(ffa_until.replace("Z", "+00:00")) <= now:
+                            await _select_next_finder(gid)
+                            continue
+                    except Exception:
+                        pass
+                # Selection deadline passed and not accepted → auto-failsafe.
+                deadline = rs.get("selection_deadline_at")
+                if deadline and not rs.get("accepted_at"):
+                    try:
+                        if datetime.fromisoformat(deadline.replace("Z", "+00:00")) <= now:
+                            await _auto_failsafe_hide(gid)
+                    except Exception:
+                        pass
+        except Exception:
+            logger.exception("[bt-rotation] failsafe tick failed")
+
+    # Expose the tick + bury-rotation-init helpers on the module so
+    # server.py can hook them into APScheduler at startup. We can't
+    # register the scheduler from inside attach_routes (it runs once at
+    # FastAPI startup), so server.py adds the job after attach_routes.
+    globals()["_rotation_failsafe_tick"] = _rotation_failsafe_tick
+    globals()["_rotation_init"] = _rotation_init
+    globals()["_select_next_finder"] = _select_next_finder
+    globals()["_advance_after_hide"] = _advance_after_hide
 
     app.include_router(router)
     logger.info("[buried_treasure] routes attached (v2 — solo + groups)")

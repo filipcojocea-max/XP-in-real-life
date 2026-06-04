@@ -9891,6 +9891,27 @@ async def _start_notification_scheduler():
                 logger.info("[spot_groups_scheduler] tick registered (1m)")
         except Exception:
             logger.exception("[spot_groups_scheduler] tick registration failed")
+        # Buried-Treasure rotation failsafe tick (2026-06-04). Runs every
+        # 5 minutes. Auto-buries the chest at a fresh public coord and
+        # advances the cycle if the selected finder misses their
+        # wake-time deadline OR a free-for-all window expires. The
+        # helper is set on the buried_treasure module by attach_routes.
+        try:
+            import buried_treasure as _bt
+            tick = getattr(_bt, "_rotation_failsafe_tick", None)
+            if sched is not None and tick is not None:
+                sched.add_job(
+                    tick,
+                    "interval",
+                    minutes=5,
+                    id="bt_rotation_failsafe_tick",
+                    max_instances=1,
+                    coalesce=True,
+                    replace_existing=True,
+                )
+                logger.info("[buried_treasure] rotation failsafe tick registered (5m)")
+        except Exception:
+            logger.exception("[buried_treasure] rotation failsafe tick registration failed")
     except Exception as e:
         logger.warning("[scheduler] start failed: %s", e)
 
