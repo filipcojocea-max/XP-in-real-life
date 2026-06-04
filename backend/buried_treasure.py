@@ -1015,11 +1015,19 @@ def attach_routes(app, get_user_or_legacy):
     ):
         radius = _clamp_radius(body.radius_m)
         clat, clng = await _pick_public_chest_point(body.lat, body.lng, radius)
+        # Stamp `next_reset_at` so the daily-reset tick (in
+        # _rotation_failsafe_tick) knows when to give this player a
+        # fresh chest. Honors shift_schedule.day.start_time first,
+        # falling back to 08:00 in profile.timezone, then +24h UTC.
+        next_reset_iso = await _resolve_user_wake_at(user_id)
         doc = {
             "_id": user_id,
             "area": {"lat": float(body.lat), "lng": float(body.lng), "radius_m": radius},
             "chest": {"lat": clat, "lng": clng},
             "created_at": _now_iso(),
+            "buried_at": _now_iso(),
+            "found_today": False,
+            "next_reset_at": next_reset_iso,
         }
         await _db.bt_solo.replace_one({"_id": user_id}, doc, upsert=True)
         # Also stamp the player's location for the friend-area check.
@@ -2320,15 +2328,19 @@ def attach_routes(app, get_user_or_legacy):
              auto-failsafe hides a fresh chest and selects the next finder.
            • If free_for_all_until has passed → re-select from queue.
            • If status=awaiting_hide and the holder has run out of time →
-             auto-failsafe hides for them."""
+             auto-failsafe hides for them.
+           ALSO walks `bt_solo` and resets every player whose personal
+           wake-up time has passed since their last chest was set — picks
+           a fresh public coord (Overpass + block-aware) so each player
+           gets a NEW spot every day at their own schedule."""
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
+        # 1) Group rotations
         try:
             cur = _db.bt_groups.find({"rotation_state": {"$exists": True}})
             async for doc in cur:
                 rs = doc.get("rotation_state") or {}
                 gid = doc.get("_id")
-                # Free-for-all expired → pick the next selection.
                 ffa_until = rs.get("free_for_all_until")
                 if ffa_until:
                     try:
@@ -2337,7 +2349,6 @@ def attach_routes(app, get_user_or_legacy):
                             continue
                     except Exception:
                         pass
-                # Selection deadline passed and not accepted → auto-failsafe.
                 deadline = rs.get("selection_deadline_at")
                 if deadline and not rs.get("accepted_at"):
                     try:
@@ -2346,7 +2357,63 @@ def attach_routes(app, get_user_or_legacy):
                     except Exception:
                         pass
         except Exception:
-            logger.exception("[bt-rotation] failsafe tick failed")
+            logger.exception("[bt-rotation] failsafe tick (groups) failed")
+        # 2) Solo daily reset — every player gets a fresh chest at
+        # their own local wake-up time (shift_schedule.day.start_time or
+        # default 08:00 in profile.timezone). The next_reset_at field
+        # is recomputed after each successful reset.
+        try:
+            import random as _r
+            async for sdoc in _db.bt_solo.find({}):
+                uid = sdoc.get("_id")
+                next_reset = sdoc.get("next_reset_at")
+                # Backfill: if no next_reset_at yet, set it for tomorrow and skip.
+                if not next_reset:
+                    wake = await _resolve_user_wake_at(str(uid))
+                    await _db.bt_solo.update_one({"_id": uid}, {"$set": {"next_reset_at": wake}})
+                    continue
+                try:
+                    if datetime.fromisoformat(next_reset.replace("Z", "+00:00")) > now:
+                        continue  # not yet time
+                except Exception:
+                    continue
+                # Reset window has passed → pick a fresh chest.
+                area = sdoc.get("area") or {}
+                center_lat = area.get("lat")
+                center_lng = area.get("lng")
+                radius_m = float(area.get("radius_m") or 1500.0)
+                if center_lat is None or center_lng is None:
+                    # No saved area → can't reset; just push the next window.
+                    nxt = await _resolve_user_wake_at(str(uid))
+                    await _db.bt_solo.update_one({"_id": uid}, {"$set": {"next_reset_at": nxt}})
+                    continue
+                try:
+                    new_lat, new_lng = await _pick_public_chest_point(float(center_lat), float(center_lng), radius_m)
+                except Exception:
+                    new_lat, new_lng = await _pick_safe_random_point(float(center_lat), float(center_lng), radius_m)
+                next_reset_iso = await _resolve_user_wake_at(str(uid))
+                await _db.bt_solo.update_one(
+                    {"_id": uid},
+                    {"$set": {
+                        "chest": {"lat": float(new_lat), "lng": float(new_lng)},
+                        "buried_at": _now_iso(),
+                        "found_today": False,
+                        "next_reset_at": next_reset_iso,
+                        "auto_reset": True,
+                    }, "$unset": {"found_at": "", "winner_photo_base64": ""}},
+                )
+                # Notify the player so they know a new chest is live.
+                try:
+                    await _push_to_user(
+                        str(uid),
+                        "🌅 New treasure for the day!",
+                        "Your solo chest just respawned at a fresh spot — open the app to start hunting.",
+                        {"type": "bt_solo_reset"},
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("[bt-rotation] failsafe tick (solo daily) failed")
 
     # Expose the tick + bury-rotation-init helpers on the module so
     # server.py can hook them into APScheduler at startup. We can't
