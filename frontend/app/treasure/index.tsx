@@ -65,6 +65,7 @@ export default function TreasureHome() {
   // the group page, which calls /bt/invites/{id}/view to clear them.
   const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
   const [pendingReports, setPendingReports] = useState<PendingReport[]>([]);
+  const [turnOffers, setTurnOffers] = useState<{ group_id: string; group_name: string; free_for_all: boolean }[]>([]);
   // Persistent hunt area from /api/bt/settings. When set the picker is
   // skipped on every subsequent play; users edit it from the gear icon
   // top-right.
@@ -88,10 +89,26 @@ export default function TreasureHome() {
       ]);
       setSoloHunt(s.hunt || null);
       setMyGroups(g.groups || []);
-      // Defensive parsing for Round B invites: accept either the
-      // documented {invites:[...]} shape, a raw array (unlikely but
-      // safe), or a missing/null body — we never want a stale or
-      // bad response to silently zero out the gold banner state.
+      // 2026-06-04: also fetch turn-offer state for every group I'm in
+      // so we can render "It's your turn!" / "FREE FOR ALL" banner cards.
+      // Errors are swallowed per group — one stale group shouldn't blank
+      // the whole list.
+      try {
+        const offers = await Promise.all(
+          (g.groups || []).map(async (grp: BTGroup) => {
+            try {
+              const t = await api.btTurnCurrent(grp.id);
+              if (t.is_my_turn || t.free_for_all) {
+                return { group_id: grp.id, group_name: grp.name, free_for_all: !!t.free_for_all };
+              }
+            } catch {/* skip */}
+            return null;
+          }),
+        );
+        setTurnOffers(offers.filter(Boolean) as any);
+      } catch {
+        setTurnOffers([]);
+      }
       const rawInvites: any =
         (inv && Array.isArray(inv.invites)) ? inv.invites
           : Array.isArray(inv) ? inv
@@ -302,6 +319,47 @@ export default function TreasureHome() {
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={20} color="#0b0f15" />
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+
+        {/* ───────── TURN OFFERS / FREE-FOR-ALL (rotation system) ─────────
+            One row per group where it's currently the user's turn OR
+            the group is in FREE FOR ALL. Tap to land on the group page
+            where the Accept / Reject buttons live. */}
+        {turnOffers.length > 0 ? (
+          <View style={styles.invitesWrap} testID="bt-turn-offers">
+            {turnOffers.map((to) => (
+              <TouchableOpacity
+                key={`turn-${to.group_id}`}
+                style={[styles.inviteBanner, to.free_for_all
+                  ? { backgroundColor: '#FFE9C4', borderColor: '#FF9500' }
+                  : { backgroundColor: '#D4F4E6', borderColor: '#11C28F' }]}
+                onPress={() => router.push(`/treasure/group/${to.group_id}`)}
+                activeOpacity={0.9}
+                testID={`bt-turn-${to.group_id}`}
+              >
+                <View style={[styles.inviteIconBox, {
+                  backgroundColor: to.free_for_all ? '#FF9500' : '#11C28F',
+                }]}>
+                  <Ionicons name={to.free_for_all ? 'flash' : 'compass'} size={22} color="#fff" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.inviteTitle, {
+                    color: to.free_for_all ? '#7A4E0E' : '#0E7A55',
+                  }]}>
+                    {to.free_for_all ? 'FREE FOR ALL' : "YOUR TURN TO HUNT!"}
+                  </Text>
+                  <Text style={[styles.inviteSub, {
+                    color: to.free_for_all ? '#7A4E0E' : '#0E7A55',
+                  }]} numberOfLines={2}>
+                    {to.free_for_all
+                      ? `Anyone in "${to.group_name}" can find the chest — race to grab it!`
+                      : `You've been selected in "${to.group_name}" — tap to accept or reject.`}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color={to.free_for_all ? '#7A4E0E' : '#0E7A55'} />
               </TouchableOpacity>
             ))}
           </View>
