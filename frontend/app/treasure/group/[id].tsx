@@ -620,8 +620,12 @@ function HuntingView({
       const b64 = await FileSystem.readAsStringAsync(photo.uri, { encoding: FileSystem.EncodingType.Base64 });
       const res = await api.btGroupFind(group.id, gps.lat, gps.lng, b64);
       setCamOpen(false);
-      showAlert('+100 XP — chest found!', `New total: ${res.new_total_xp.toLocaleString()} XP.`);
-      onFound();
+      // 2026-06-04 rotation: backend flips to awaiting_hide + holder_id=user.
+      // Finder owes a fresh re-hide before the cycle advances — route them
+      // straight into /hide flow.
+      showAlert('+100 XP — chest found!', `New total: ${res.new_total_xp.toLocaleString()} XP. Now hide it in a NEW public spot for the next player!`);
+      router.replace(`/treasure/group/${group.id}/hide`);
+      return;
     } catch (e: any) {
       showAlert('Could not claim', String(e?.message || e));
     } finally {

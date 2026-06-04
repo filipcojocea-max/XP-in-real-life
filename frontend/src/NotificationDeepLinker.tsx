@@ -87,6 +87,18 @@ export function NotificationDeepLinker() {
           setTimeout(() => {
             router.push('/treasure');
           }, 0);
+        } else if (type === 'bt_turn_offered' || type === 'bt_turn_free_for_all' || type === 'bt_group_buried') {
+          // 2026-06-04 Play-with-Friends rotation: turn-offer +
+          // free-for-all + auto-bury all deep-link straight into the
+          // group page where the player can Accept/Reject or start
+          // hunting. The group page reads /turn/current on mount and
+          // shows the right banner.
+          const gid = (data?.group_id || data?.gid || '').toString();
+          if (gid) {
+            setTimeout(() => {
+              router.push(`/treasure/group/${gid}`);
+            }, 0);
+          }
         }
         // Future: wire 'gift' / 'suspended' here.
       } catch (e) {

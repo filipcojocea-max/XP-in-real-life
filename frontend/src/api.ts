@@ -1452,6 +1452,28 @@ export const api = {
       `/bt/reports/${rid}/ignore`,
       { method: 'POST' },
     ),
+
+  // ── Play-with-Friends Rotation (2026-06-04) ──────────────────────
+  /** Finder buries a fresh chest in a new public spot. Server validates
+   *  caller is the current holder + coord is not in bt_blocked_coords. */
+  btGroupHide: (gid: string, body: { lat: number; lng: number; photo_base64: string; map_screenshot_base64: string }) =>
+    req<any>(`/bt/groups/${gid}/hide`, { method: 'POST', body: JSON.stringify(body) }),
+  btTurnAccept: (gid: string) =>
+    req<{ ok: boolean; status: string }>(`/bt/groups/${gid}/turn/accept`, { method: 'POST' }),
+  btTurnReject: (gid: string) =>
+    req<{ ok: boolean; status: string; until?: string }>(`/bt/groups/${gid}/turn/reject`, { method: 'POST' }),
+  btTurnCurrent: (gid: string) =>
+    req<{
+      is_my_turn: boolean;
+      free_for_all: boolean;
+      free_for_all_until: string | null;
+      selected_user_id: string | null;
+      selection_deadline_at: string | null;
+      holder_id: string | null;
+      queue: string[];
+      played: string[];
+      cycle_n: number;
+    }>(`/bt/groups/${gid}/turn/current`),
   btGroupsMine: () => req<{ groups: BTGroup[] }>('/bt/groups/mine'),
   btGroupsAvailable: () => req<{ groups: BTGroup[] }>('/bt/groups/available'),
   btGroupAccept: (gid: string) =>
