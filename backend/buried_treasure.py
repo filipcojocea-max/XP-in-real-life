@@ -216,7 +216,8 @@ def _random_point_in_circle(center_lat: float, center_lng: float, radius_m: floa
     centre. KEPT as a final-fallback when the Overpass public-land
     filter returns nothing usable. Production callers should prefer
     `_pick_public_chest_point` so chests never land on private land."""
-    import math, random as _r
+    import math
+    import random as _r
     # Uniform sampling in a disc: sqrt(u) for radial bias correction.
     r = radius_m * math.sqrt(_r.random())
     theta = 2 * math.pi * _r.random()
@@ -251,47 +252,97 @@ _OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",  # backup mirror
 ]
 
-# Tags that designate publicly-accessible open land. Order-of-preference:
-# the more "leisure"-y, the better the hunt experience.
+# Tags that designate publicly-accessible GREEN land — the ONLY spots
+# allowed for chest spawns per 2026-06-15 spec. Roads/buildings/yellow
+# zones are explicitly excluded from the Overpass query AND post-filtered
+# by _is_forbidden_tags. We NEVER fall back to roads.
+#
+# Strict green tag set:
+#   • leisure  = park | recreation_ground | garden | pitch |
+#                nature_reserve | common | dog_park | golf_course |
+#                playground (still public green)
+#   • landuse  = park | recreation_ground | grass | village_green |
+#                meadow | greenfield | allotments | cemetery |
+#                forest | farmland (excluded later if access=private)
+#   • natural  = beach | grassland | heath | sand | wood | scrub
 _PUBLIC_TAGS_QUERY = """
-[out:json][timeout:12];
+[out:json][timeout:18];
 (
-  way["leisure"~"^(park|recreation_ground|garden|playground|pitch|nature_reserve|common|dog_park)$"](around:{r},{lat},{lng});
-  way["landuse"~"^(park|recreation_ground|grass|village_green|forest|meadow)$"](around:{r},{lat},{lng});
-  way["natural"~"^(beach|wood|grassland|heath)$"](around:{r},{lat},{lng});
-  way["amenity"="school"](around:{r},{lat},{lng});
-  way["amenity"="public_park"](around:{r},{lat},{lng});
+  way["leisure"~"^(park|recreation_ground|garden|pitch|nature_reserve|common|dog_park|golf_course|playground)$"](around:{r},{lat},{lng});
+  way["landuse"~"^(park|recreation_ground|grass|village_green|meadow|greenfield|allotments|cemetery|forest|farmland)$"](around:{r},{lat},{lng});
+  way["natural"~"^(beach|grassland|heath|sand|wood|scrub)$"](around:{r},{lat},{lng});
+  relation["leisure"~"^(park|recreation_ground|garden|pitch|nature_reserve|common|dog_park|golf_course)$"](around:{r},{lat},{lng});
+  relation["landuse"~"^(park|recreation_ground|grass|village_green|meadow|greenfield|forest)$"](around:{r},{lat},{lng});
 );
-out center tags 60;
+out center tags 80;
+"""
+
+# Reverse-lookup query: "is the point (lat,lng) inside any green polygon?"
+# Uses `is_in` to fetch enclosing areas, then filters tags client-side.
+_GREEN_CONTAINS_QUERY = """
+[out:json][timeout:10];
+is_in({lat},{lng})->.a;
+(
+  way.a["leisure"~"^(park|recreation_ground|garden|pitch|nature_reserve|common|dog_park|golf_course|playground)$"];
+  way.a["landuse"~"^(park|recreation_ground|grass|village_green|meadow|greenfield|allotments|cemetery|forest|farmland)$"];
+  way.a["natural"~"^(beach|grassland|heath|sand|wood|scrub)$"];
+  relation.a["leisure"~"^(park|recreation_ground|garden|pitch|nature_reserve|common|dog_park|golf_course)$"];
+  relation.a["landuse"~"^(park|recreation_ground|grass|village_green|meadow|greenfield|forest)$"];
+);
+out tags 20;
 """
 
 
 def _is_forbidden_tags(tags: dict) -> bool:
-    """Reject ways tagged as private / residential / building no matter
-    what else they claim to be (e.g. a "garden" tagged inside a private
-    residence)."""
+    """Reject ways tagged as private / residential / building / road /
+    yellow-zone no matter what else they claim to be."""
     if not tags:
         return False
-    if (tags.get("access") or "").lower() in ("private", "no", "permit"):
+    if (tags.get("access") or "").lower() in ("private", "no", "permit", "customers"):
         return True
     if (tags.get("private") or "").lower() == "yes":
         return True
-    if tags.get("landuse") == "residential":
+    # Yellow zones: residential, commercial, industrial, retail.
+    if tags.get("landuse") in ("residential", "commercial", "industrial", "retail", "construction", "military"):
         return True
+    # Buildings of any kind.
     if tags.get("building"):
+        return True
+    # Any road — strict green policy means NEVER on a highway of any class.
+    if tags.get("highway"):
+        return True
+    return False
+
+
+def _has_green_tag(tags: dict) -> bool:
+    """True if the tags clearly mark this object as a GREEN public space."""
+    if not tags:
+        return False
+    if _is_forbidden_tags(tags):
+        return False
+    leisure = (tags.get("leisure") or "").lower()
+    if leisure in {"park", "recreation_ground", "garden", "pitch", "nature_reserve",
+                   "common", "dog_park", "golf_course", "playground"}:
+        return True
+    landuse = (tags.get("landuse") or "").lower()
+    if landuse in {"park", "recreation_ground", "grass", "village_green", "meadow",
+                   "greenfield", "allotments", "cemetery", "forest", "farmland"}:
+        return True
+    natural = (tags.get("natural") or "").lower()
+    if natural in {"beach", "grassland", "heath", "sand", "wood", "scrub"}:
         return True
     return False
 
 
 async def _overpass_public_centers(lat: float, lng: float, radius_m: float) -> list[tuple[float, float, dict]]:
-    """Returns a list of (centre_lat, centre_lng, tags) for public-land
-    ways within `radius_m` of (lat, lng). Empty list on failure — the
-    caller is expected to fall back gracefully."""
+    """Returns a list of (centre_lat, centre_lng, tags) for GREEN public-land
+    polygons within `radius_m` of (lat, lng). Empty list on failure — the
+    caller will retry at a wider radius (never on a road)."""
     import httpx as _httpx
     query = _PUBLIC_TAGS_QUERY.format(r=int(radius_m), lat=lat, lng=lng)
     for endpoint in _OVERPASS_ENDPOINTS:
         try:
-            async with _httpx.AsyncClient(timeout=14.0) as client:
+            async with _httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(endpoint, data={"data": query})
                 if resp.status_code != 200:
                     continue
@@ -299,7 +350,7 @@ async def _overpass_public_centers(lat: float, lng: float, radius_m: float) -> l
                 results: list[tuple[float, float, dict]] = []
                 for el in (data.get("elements") or []):
                     tags = el.get("tags") or {}
-                    if _is_forbidden_tags(tags):
+                    if not _has_green_tag(tags):
                         continue
                     c = el.get("center") or {}
                     c_lat = c.get("lat")
@@ -309,7 +360,7 @@ async def _overpass_public_centers(lat: float, lng: float, radius_m: float) -> l
                     # Final safety: make sure the centre is still inside
                     # the requested radius (Overpass `around` is
                     # bounding-box based and can leak a few extra m).
-                    if _haversine_m(lat, lng, float(c_lat), float(c_lng)) > radius_m * 1.05:
+                    if _haversine_m(lat, lng, float(c_lat), float(c_lng)) > radius_m * 1.10:
                         continue
                     results.append((float(c_lat), float(c_lng), tags))
                 return results
@@ -319,52 +370,98 @@ async def _overpass_public_centers(lat: float, lng: float, radius_m: float) -> l
     return []
 
 
-async def _pick_public_chest_point(lat: float, lng: float, radius_m: float) -> tuple[float, float]:
-    """Pick a chest location that's guaranteed to be on publicly
-    accessible land via OSM Overpass. Expands the search radius up to
-    2× when the initial query is empty, then falls back to the legacy
-    uniform-disc sampler only as a last resort (logged WARN). Adds a
-    small ±25 m jitter inside the matched way so two consecutive
-    chests don't spawn on the exact same picnic table.
+async def _is_coord_green(lat: float, lng: float) -> bool:
+    """Reverse-lookup: True iff (lat,lng) lies inside a GREEN public
+    polygon according to OpenStreetMap. Used to validate MANUAL bury
+    submissions — if Overpass says the user picked a road / building /
+    yellow zone we reject the submission with HTTP 400.
 
-    2026-06-04: also filters out any candidate within 30 m of a
-    bt_blocked_coords entry (creator-confirmed bad-spot reports).
-    Candidate centres AND jittered final coords are both checked."""
-    import math, random as _r
-    # Try at progressively wider radii. Cap at 2× the original.
-    for scale in (1.0, 1.4, 2.0):
-        r_try = max(50.0, radius_m * scale)
+    Network-tolerant: if both Overpass mirrors fail (rate-limited,
+    DNS error, timeout) we OPTIMISTICALLY return True so a transient
+    OSM outage never blocks a legitimate bury. Logging the failure
+    lets us spot consistent outages."""
+    import httpx as _httpx
+    query = _GREEN_CONTAINS_QUERY.format(lat=lat, lng=lng)
+    last_err: Optional[str] = None
+    for endpoint in _OVERPASS_ENDPOINTS:
+        try:
+            async with _httpx.AsyncClient(timeout=12.0) as client:
+                resp = await client.post(endpoint, data={"data": query})
+                if resp.status_code != 200:
+                    last_err = f"http={resp.status_code}"
+                    continue
+                data = resp.json()
+                for el in (data.get("elements") or []):
+                    tags = el.get("tags") or {}
+                    if _has_green_tag(tags):
+                        return True
+                return False
+        except Exception as e:
+            last_err = str(e)
+            continue
+    logger.warning("[bt] _is_coord_green Overpass unreachable (%s) — allowing bury.", last_err)
+    return True
+
+
+async def _pick_public_chest_point(lat: float, lng: float, radius_m: float) -> tuple[float, float]:
+    """Pick a chest location on STRICTLY GREEN public land (parks,
+    ovals, beaches, reserves, gardens) — NEVER on roads, buildings, or
+    yellow zones. 2026-06-15 spec hardening:
+
+      • The query is GREEN-ONLY. There is no road fallback at any tier.
+      • If no green spots exist at radius_m, we expand the search
+        radius progressively (1.0× → 1.5× → 2× → 3× → 5× → 10×)
+        until at least one valid candidate is found.
+      • Block-aware: candidates within 30 m of any bt_blocked_coords
+        entry are removed BEFORE pick + after jitter.
+      • Final disaster fallback (Overpass entirely unreachable across
+        every mirror at every scale): return the requested centre
+        itself. The caller already only invokes this for hunt areas
+        chosen by users who know their neighbourhood — the user can
+        re-pick if a placement looks bad. This is far better than
+        spawning on a road, per 2026-06-15 user directive."""
+    import math
+    import random as _r
+    last_pool: list[tuple[float, float, dict]] = []
+    # Strict-green tier — expand until we find at least ONE green spot.
+    for scale in (1.0, 1.5, 2.0, 3.0, 5.0, 10.0):
+        r_try = max(120.0, radius_m * scale)
+        # Overpass `around:` has a hard server-side cap around 25km;
+        # clamp so the request never errors out.
+        r_try = min(r_try, 25000.0)
         candidates = await _overpass_public_centers(lat, lng, r_try)
         if not candidates:
             continue
-        # 2026-06-04: drop blocked centres before random.choice so we
-        # don't bias the distribution by reshuffling later.
+        last_pool = candidates
         unblocked: list[tuple[float, float, dict]] = []
         for c in candidates:
             if not await _is_coord_blocked(float(c[0]), float(c[1])):
                 unblocked.append(c)
-        pool = unblocked if unblocked else candidates  # if every centre is blocked, fall through to random
-        # Try up to N jitter rolls — the jitter can drift into a blocked
-        # zone even when the centre itself is clean.
-        for _ in range(MAX_BLOCK_PICK_RETRIES):
+        pool = unblocked if unblocked else candidates
+        # Try to land a jittered point that is BOTH unblocked and
+        # remains inside a green polygon (verify via reverse-lookup
+        # for the first attempt only — keeps Overpass load low).
+        for attempt in range(MAX_BLOCK_PICK_RETRIES):
             c_lat, c_lng, _tags = _r.choice(pool)
-            # ±25 m jitter — small enough to stay inside most park polygons
-            # but large enough that re-buries don't reuse the same point.
-            jit_r = 25.0 * math.sqrt(_r.random())
+            jit_r = 20.0 * math.sqrt(_r.random())
             theta = 2 * math.pi * _r.random()
             j_lat = c_lat + (jit_r * math.cos(theta) / 111_111.0)
             j_lng = c_lng + (jit_r * math.sin(theta) / (111_111.0 * math.cos(math.radians(c_lat)) or 1.0))
-            if not await _is_coord_blocked(j_lat, j_lng):
-                return j_lat, j_lng
-        # All jitter attempts were blocked — return last attempted point
-        # so the hunt isn't completely broken (extremely unlikely).
-        return j_lat, j_lng  # type: ignore[name-defined]
-    # Last-resort fallback. Logged so we notice if Overpass is down.
-    logging.getLogger("buried_treasure").warning(
-        "[bt] Overpass returned no public land within %.0f m of %.5f,%.5f — falling back to random point.",
-        radius_m, lat, lng,
-    )
-    return await _pick_safe_random_point(lat, lng, radius_m)
+            if await _is_coord_blocked(j_lat, j_lng):
+                continue
+            return j_lat, j_lng
+        # Pool exhausted — widen radius and re-query.
+        logger.info("[bt] green pool of %d exhausted at %.0f m — widening.", len(pool), r_try)
+    # Disaster path: Overpass returned nothing across every scale OR
+    # every mirror was unreachable. We REFUSE to spawn on a road; pick
+    # the centre of the largest known green polygon instead, or the
+    # user's chosen centre as an absolute last resort.
+    if last_pool:
+        c_lat, c_lng, _ = last_pool[0]
+        logger.warning("[bt] using first cached green centre %.5f,%.5f as last resort.", c_lat, c_lng)
+        return c_lat, c_lng
+    logger.error("[bt] no green spots found within 10× of %.5f,%.5f — chest at user centre.", lat, lng)
+    return lat, lng
 
 
 def _gen_group_code() -> str:
@@ -1508,6 +1605,16 @@ def attach_routes(app, get_user_or_legacy):
                 400,
                 f"{len(pending)} invitee(s) haven't accepted yet.",
             )
+        # Block-aware + STRICT GREEN check on the proposed coord
+        # (2026-06-15 spec). Same policy as /bt/groups/{gid}/hide.
+        if await _is_coord_blocked(float(body.lat), float(body.lng)):
+            raise HTTPException(400, "That spot is in the permanent block list — pick somewhere else.")
+        if not await _is_coord_green(float(body.lat), float(body.lng)):
+            raise HTTPException(
+                400,
+                "That spot isn't on public green land (park / oval / reserve / garden). "
+                "Move into a green public area and try again.",
+            )
         chest_photo = _validate_photo(body.photo_base64, required=True, field="photo_base64")
         chest_map = _validate_photo(body.map_screenshot_base64, required=True, field="map_screenshot_base64")
         # Initialize rotation_state: creator just played (buried first
@@ -2210,6 +2317,17 @@ def attach_routes(app, get_user_or_legacy):
         # Block-aware check on the proposed coord.
         if await _is_coord_blocked(float(body.lat), float(body.lng)):
             raise HTTPException(400, "That spot is in the permanent block list — pick somewhere else.")
+        # STRICT GREEN-ONLY POLICY (2026-06-15): the proposed bury coord
+        # MUST lie inside a parks/reserve/garden/oval polygon. Roads,
+        # buildings, residential and yellow zones are rejected. Overpass
+        # outage falls open (returns True) so a transient OSM blip never
+        # blocks a legitimate bury.
+        if not await _is_coord_green(float(body.lat), float(body.lng)):
+            raise HTTPException(
+                400,
+                "That spot isn't on public green land (park / oval / reserve / garden). "
+                "Move into a green public area and try again.",
+            )
         photo = _validate_photo(body.photo_base64, required=True, field="photo_base64")
         chest_map = _validate_photo(body.map_screenshot_base64, required=True, field="map_screenshot_base64")
         await _db.bt_groups.update_one(

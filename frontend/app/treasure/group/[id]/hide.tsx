@@ -3,16 +3,23 @@
  *
  * Reached automatically after a player finds the chest (group page
  * auto-routes here once /find returns awaiting_hide status). The finder
- * must bury the chest in a NEW public spot: take a fresh photo at the
- * intended location, the Leaflet map snapshot is captured behind the
- * scenes, and both are POSTed to /api/bt/groups/{gid}/hide. The
- * backend's block-aware + Overpass picker rejects bad spots; on
- * success the rotation advances and the next finder is selected.
+ * must bury the chest in a NEW public GREEN spot: take a fresh photo at
+ * the intended location, a tiny placeholder map image is sent inline
+ * (the backend just needs a valid value), and both are POSTed to
+ * /api/bt/groups/{gid}/hide. The backend's strict green-only Overpass
+ * check rejects roads / buildings / yellow zones; on success the
+ * rotation advances and the next finder is selected.
+ *
+ * 2026-06-15: rewritten to mirror solo.tsx EXACTLY — same GPS watcher,
+ * `useCameraPermissions` hook, dynamic Camera permission import, and a
+ * `<Modal>`-hosted camera (the underlying screen + map STAYS MOUNTED).
+ * The previous "swap whole view" version unmounted the WebView map and
+ * crashed ~2 s after opening the camera.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Platform,
+  Modal,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -21,7 +28,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { CameraView } from 'expo-camera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
 import * as FileSystem from 'expo-file-system';
 import { api } from '../../../../src/api';
@@ -29,116 +36,140 @@ import BTLeafletMap, { type BTLeafletMapHandle } from '../../../../src/component
 import { colors, radii, spacing } from '../../../../src/theme';
 import { showAlert } from '../../../../src/uiAlert';
 
+// Tiny transparent 1×1 PNG (~70 B). The backend requires a non-empty
+// `map_screenshot_base64`; this is the smallest valid value. The map is
+// still drawn for the user to visually confirm the spot — we just don't
+// rely on WebView snapshotting which used to deadlock on Android.
 const PLACEHOLDER_MAP =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkqAcAAIUAgUW0RjgAAAAASUVORK5CYII=';
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkqAcAAIUAgUW0RjgAAAAASUVORK5CYII=';
 
 export default function HideScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null);
-  const [camOpen, setCamOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const camRef = useRef<CameraView | null>(null);
+  const [perm] = useCameraPermissions();
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const cameraRef = useRef<any>(null);
   const mapRef = useRef<BTLeafletMapHandle | null>(null);
+  const watchRef = useRef<Location.LocationSubscription | null>(null);
 
-  // Acquire a fresh GPS fix on mount.
+  // ─── GPS watcher (same shape as solo.tsx) ────────────────────────
   useEffect(() => {
+    let cancelled = false;
     (async () => {
+      const cur = await Location.getForegroundPermissionsAsync();
+      let granted = cur.status === 'granted';
+      if (!granted && cur.canAskAgain) {
+        const r = await Location.requestForegroundPermissionsAsync();
+        granted = r.status === 'granted';
+      }
+      if (!granted) {
+        showAlert('Location needed', 'Allow Location so we can save the new hiding spot.');
+        return;
+      }
       try {
-        const perm = await Location.requestForegroundPermissionsAsync();
-        if (perm.status !== 'granted') {
-          showAlert('Location needed', 'Allow location so we can save the new hiding spot.');
-          return;
-        }
-        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
-        setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        const sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 1500 },
+          (pos) => {
+            if (cancelled) return;
+            setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+          },
+        );
+        watchRef.current = sub;
       } catch (e: any) {
         showAlert('GPS error', String(e?.message || e));
       }
-    })();
+    })().catch(() => {});
+    return () => {
+      cancelled = true;
+      try { watchRef.current?.remove(); } catch {}
+    };
   }, []);
 
-  const openCam = useCallback(async () => {
+  // Pipe every GPS tick into the embedded mini-map so the player sees
+  // their live "you are here" dot while standing on the spot.
+  useEffect(() => {
+    if (!gps) return;
+    try { mapRef.current?.setUserLocation(gps.lat, gps.lng); } catch {}
+  }, [gps]);
+
+  // ─── Camera open flow ────────────────────────────────────────────
+  const openCamera = useCallback(async () => {
     if (!gps) {
       showAlert('No GPS yet', 'Waiting for your location — try again in a moment.');
       return;
     }
-    // expo-camera 17: dynamic-import workaround (matches solo.tsx + group/[id].tsx)
-    const { Camera } = await import('expo-camera');
-    const r = await Camera.requestCameraPermissionsAsync();
-    if (r.status !== 'granted') {
+    let granted = perm?.granted ?? false;
+    if (!granted) {
+      // expo-camera 17: dynamic permission request matches solo.tsx.
+      const r = await (await import('expo-camera')).Camera.requestCameraPermissionsAsync();
+      granted = r.status === 'granted';
+    }
+    if (!granted) {
       showAlert('Camera blocked', 'Allow Camera so you can photograph the spot.');
       return;
     }
-    setCamOpen(true);
-  }, [gps]);
+    setCameraOpen(true);
+  }, [gps, perm]);
 
+  // ─── Snap + submit ───────────────────────────────────────────────
   const snapAndSubmit = useCallback(async () => {
-    if (!gps || !camRef.current || busy) return;
-    setBusy(true);
+    if (!gps || !cameraRef.current || submitting) return;
+    setSubmitting(true);
     try {
-      const pic = await camRef.current.takePictureAsync({
+      const photo = await cameraRef.current.takePictureAsync({
         quality: 0.55,
         skipProcessing: true,
       });
-      if (!pic?.uri) throw new Error('Camera returned no photo.');
-      const b64 = await FileSystem.readAsStringAsync(pic.uri, { encoding: FileSystem.EncodingType.Base64 });
-      // Map snapshot — soft-fails to a 1px placeholder so a failed Leaflet
-      // export never blocks the hide.
-      let mapB64 = PLACEHOLDER_MAP;
-      try {
-        const snap = await mapRef.current?.requestSnapshot?.();
-        if (snap && typeof snap === 'string' && snap.length > 100) {
-          mapB64 = snap;
-        }
-      } catch {
-        /* placeholder fallback */
-      }
+      const uri: string = photo?.uri;
+      if (!uri) throw new Error('Camera returned no photo.');
+      const b64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
       await api.btGroupHide(String(id), {
         lat: gps.lat,
         lng: gps.lng,
         photo_base64: b64,
-        map_screenshot_base64: mapB64,
+        // Send a tiny placeholder — backend just needs a non-empty value.
+        // (WebView snapshotting was the source of the ~2 s crash.)
+        map_screenshot_base64: PLACEHOLDER_MAP,
       });
+      setCameraOpen(false);
       showAlert('Hidden!', 'Fresh chest is live for the next finder. Your turn is over.');
       router.replace(`/treasure/group/${id}`);
     } catch (e: any) {
-      showAlert('Could not hide', String(e?.message || e));
+      const msg = String(e?.message || e);
+      // Surface server-side green-only rejection as a friendly hint.
+      if (/green|public/i.test(msg)) {
+        showAlert(
+          'Not a green spot',
+          "That spot isn't on a park, oval, garden or reserve. Move onto green public land and try again.",
+        );
+      } else {
+        showAlert('Could not hide', msg);
+      }
     } finally {
-      setBusy(false);
-      setCamOpen(false);
+      setSubmitting(false);
     }
-  }, [busy, gps, id, router]);
+  }, [gps, id, router, submitting]);
 
-  if (camOpen) {
-    return (
-      <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
-        <Stack.Screen options={{ headerShown: false }} />
-        <View style={styles.camWrap}>
-          <CameraView ref={camRef as any} style={{ flex: 1 }} facing="back" />
-          <View style={styles.camFooter}>
-            <TouchableOpacity onPress={() => setCamOpen(false)} style={styles.camCancel}>
-              <Text style={styles.camCancelText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={snapAndSubmit} style={styles.shutter} disabled={busy}>
-              {busy ? <ActivityIndicator color="#0b0f15" /> : <View style={styles.shutterInner} />}
-            </TouchableOpacity>
-            <View style={{ width: 80 }} />
-          </View>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
+  // ─── Render ──────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
-      <Stack.Screen options={{ title: 'Hide the chest', headerStyle: { backgroundColor: colors.bg }, headerTintColor: colors.text }} />
+      <Stack.Screen
+        options={{
+          title: 'Hide the chest',
+          headerStyle: { backgroundColor: colors.bg },
+          headerTintColor: colors.text,
+        }}
+      />
       <View style={styles.body}>
         <Text style={styles.title}>Bury the chest at this exact spot</Text>
         <Text style={styles.hint}>
-          Stand right where you want to hide it (public-land only: park, oval, beach, school
-          grounds, reserve). Snap a photo — we save your coords automatically and pass the
-          map + photo to the next player.
+          Stand on PUBLIC GREEN land only — park, oval, beach, garden, reserve.
+          Roads, footpaths, driveways and private yards will be rejected.
+          Snap a photo when you&apos;re ready.
         </Text>
         <View style={styles.mapWrap}>
           {gps ? (
@@ -153,6 +184,7 @@ export default function HideScreen() {
               markerColor="#FF3B30"
               markerShape="x"
               interactive={false}
+              style={StyleSheet.absoluteFill}
             />
           ) : (
             <View style={styles.mapPlaceholder}>
@@ -162,9 +194,9 @@ export default function HideScreen() {
           )}
         </View>
         <TouchableOpacity
-          style={[styles.cta, (!gps || busy) && styles.ctaDisabled]}
-          onPress={openCam}
-          disabled={!gps || busy}
+          style={[styles.cta, (!gps || submitting) && styles.ctaDisabled]}
+          onPress={openCamera}
+          disabled={!gps || submitting}
           activeOpacity={0.85}
           testID="bt-hide-open-cam"
         >
@@ -172,6 +204,39 @@ export default function HideScreen() {
           <Text style={styles.ctaText}>TAKE PHOTO &amp; HIDE</Text>
         </TouchableOpacity>
       </View>
+
+      {/* Camera lives inside a Modal — keeps the parent screen + map
+          MOUNTED behind it, exactly like solo.tsx. */}
+      <Modal
+        visible={cameraOpen}
+        animationType="slide"
+        onRequestClose={() => setCameraOpen(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: '#000' }}>
+          <CameraView ref={cameraRef as any} style={{ flex: 1 }} facing="back" />
+          <View style={styles.camControls}>
+            <TouchableOpacity
+              onPress={() => setCameraOpen(false)}
+              style={styles.camCancel}
+              disabled={submitting}
+            >
+              <Text style={{ color: '#fff', fontWeight: '800' }}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={snapAndSubmit}
+              disabled={submitting}
+              style={[styles.camShoot, submitting && { opacity: 0.5 }]}
+            >
+              {submitting ? (
+                <ActivityIndicator color="#0b0f15" />
+              ) : (
+                <Ionicons name="camera" size={32} color="#0b0f15" />
+              )}
+            </TouchableOpacity>
+            <View style={{ width: 80 }} />
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -182,29 +247,56 @@ const styles = StyleSheet.create({
   title: { color: colors.text, fontSize: 18, fontWeight: '700' },
   hint: { color: '#8C92A6', fontSize: 13, lineHeight: 18 },
   mapWrap: {
-    flex: 1, minHeight: 240, borderRadius: radii.md, overflow: 'hidden',
-    borderWidth: 1, borderColor: '#1A1A24',
+    flex: 1,
+    minHeight: 240,
+    borderRadius: radii.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#1A1A24',
+    backgroundColor: '#0F1218',
   },
-  mapPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#0F1218' },
+  mapPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#0F1218',
+  },
   cta: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    backgroundColor: '#FFD166', paddingVertical: 16, borderRadius: radii.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#FFD166',
+    paddingVertical: 16,
+    borderRadius: radii.md,
   },
   ctaDisabled: { backgroundColor: '#3A3A44' },
-  ctaText: { color: '#0b0f15', fontSize: 15, fontWeight: '800', letterSpacing: 0.5 },
-  camWrap: { flex: 1, backgroundColor: '#000' },
-  camFooter: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: spacing.md, paddingVertical: spacing.md,
-    backgroundColor: '#000',
+  ctaText: {
+    color: '#0b0f15',
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
-  camCancel: { paddingHorizontal: 14, paddingVertical: 10 },
-  camCancelText: { color: '#fff', fontSize: 14, fontWeight: '600' },
-  shutter: {
-    width: 72, height: 72, borderRadius: 36,
-    borderWidth: 4, borderColor: '#fff',
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: '#FFD166',
+  camControls: {
+    position: 'absolute',
+    bottom: 30,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 24,
   },
-  shutterInner: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#FFD166' },
+  camCancel: { width: 80, paddingVertical: 10 },
+  camShoot: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 4,
+    borderColor: '#22C55E',
+  },
 });
