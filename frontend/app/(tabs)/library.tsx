@@ -687,8 +687,11 @@ export default function Library() {
             </TouchableOpacity>
 
             {/* Buried Treasure — only shown when the user has it unlocked
-                (free OR purchased). Hidden otherwise per 2026-06-15 spec. */}
-            {isUnlocked('treasure') ? (
+                (free OR purchased OR Creator). Hidden otherwise per
+                2026-06-15 spec. `canOpenApp` is the helper defined at
+                line 118 — `isUnlocked` was a typo in the original edit
+                and crashed the screen with "isUnlocked is not defined". */}
+            {canOpenApp('treasure') ? (
               <TouchableOpacity
                 testID="library-mine-treasure"
                 activeOpacity={0.85}
