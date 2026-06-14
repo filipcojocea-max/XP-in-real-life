@@ -4219,6 +4219,24 @@ async def player_profile_details(other_id: str, user_id: str = Depends(get_user_
         spot_completed = await db.spot_entries.count_documents({"user_id": other_id, "success": True})
     except Exception:
         spot_completed = 0
+    # ── Buried Treasure mini-app status ──
+    # ACTIVE = user has played at least once (solo find OR is a member
+    # of any group OR has a saved hunt area). 2026-06-15: add Buried
+    # Treasure to the friend-profile mini-apps list so the creator can
+    # see who's actually using it.
+    try:
+        bt_solo_finds_count = await db.bt_solo_finds.count_documents({"user_id": other_id})
+    except Exception:
+        bt_solo_finds_count = 0
+    try:
+        bt_groups_count = await db.bt_groups.count_documents({"members.user_id": other_id})
+    except Exception:
+        bt_groups_count = 0
+    try:
+        bt_has_location = await db.bt_player_location.find_one({"_id": other_id}) is not None
+    except Exception:
+        bt_has_location = False
+    bt_active = (bt_solo_finds_count > 0) or (bt_groups_count > 0) or bt_has_location
 
     mini_apps = [
         {
@@ -4257,6 +4275,19 @@ async def player_profile_details(other_id: str, user_id: str = Depends(get_user_
                 else "No captures yet"
             ),
             "active": spot_completed > 0 or int(prof.get("spot_points", 0) or 0) > 0,
+        },
+        {
+            "id": "treasure",
+            "title": "Buried Treasure",
+            "icon": "map",
+            "color": "amber",
+            "description": "Daily compass-driven hunt for buried chests.",
+            "stat_label": (
+                f"{bt_solo_finds_count} chest{'s' if bt_solo_finds_count != 1 else ''} found"
+                + (f" · {bt_groups_count} group{'s' if bt_groups_count != 1 else ''}" if bt_groups_count else "")
+                if bt_active else "Not started yet"
+            ),
+            "active": bt_active,
         },
     ]
 

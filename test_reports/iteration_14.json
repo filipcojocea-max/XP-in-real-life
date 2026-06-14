@@ -1,0 +1,43 @@
+{
+  "summary": "Backend smoke + 2026-06-15 strict-green chest placement wiring verified. 15/15 pytest cases PASS against the live preview URL. Confirmed: (1) backend boots cleanly, all relevant /api/bt/* routes attached, scheduler ticks running every 20s/60s/5min. (2) Helpers _is_coord_green and _pick_public_chest_point import without error; _is_coord_green falls open with True when both Overpass mirrors are unreachable from the dev container (graceful degradation per spec). (3) GET /api/friends/profile/{uid}/details now includes 'treasure' as the last mini-app entry — active=False with stat_label 'Not started yet' when user has no bt_solo_finds/bt_groups/bt_player_location; active=True after seeding bt_player_location. (4) POST /api/bt/groups/{gid}/bury validates ordering: 404 on missing group → 403 on non-creator → 400 on pending invitees → 400 on blocked coord ('block list' message) → 200 happy path persisting chest_lat/lng (green-check falls open because Overpass unreachable in dev). (5) POST /api/bt/groups/{gid}/hide same wiring: 404 on missing → 400 on wrong status → 403 on non-holder (verifies holder-check runs BEFORE green-check) → 400 on blocked coord → 200 happy path. SPEC DISCREPANCY: review_request stated 'mini_apps now contains 5 items' but only 4 are emitted (sleep, challenges, spot, treasure). All semantic requirements met (treasure is last, has bool active flag, computed from bt_solo_finds + bt_groups + bt_player_location) — flagging for main agent to confirm 4 is intentional or whether a 5th entry was meant to be added.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/friends/profile/{uid}/details", "issue": "review_request stated mini_apps should contain 5 items but server.py emits only 4 (sleep, challenges, spot, treasure). Treasure is the last and the active flag is computed correctly — but if a 5th entry was intended (e.g. gifts/insights/focus), it is missing. Server.py:4241-4292."},
+      {"endpoint": "POST /api/bt/groups/{gid}/bury and /hide", "issue": "Overpass unreachable from dev container — both endpoints fall open and accept any coord (including roads) in dev. This is intentional graceful-degradation but means the strict-green policy CANNOT be validated end-to-end here; needs production-network or VPN testing once OSM is reachable. Backend logs 'Overpass unreachable — allowing bury' as designed."},
+      {"endpoint": "_pick_public_chest_point", "issue": "Worst-case latency on disaster path is ~240s (6 scales × 2 mirrors × 20s httpx timeout) before it returns the user-centre fallback. Solo/start endpoint already has 90s test timeout; consider tightening per-attempt timeout from 20s → 5s or breaking early after the first all-failed scale to reduce p95 in production if OSM has a long outage. Not blocking — function correctness verified."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bt_iter14_green_check.py",
+    "/app/test_reports/pytest/iter14_green_check.xml"
+  ],
+  "action_items": [
+    "CONFIRM expected mini_apps count: review_request said 5 but only 4 are returned. If a 5th entry was meant to be added alongside treasure (e.g. another mini-app), wire it in /app/backend/server.py lines 4241-4292. If 4 is correct, update the spec note.",
+    "When OSM reachability is restored (production/VPN), re-run TestGroupBury::test_happy_path_overpass_falls_open + TestGroupHide::test_holder_happy_overpass_falls_open and add an explicit on-road coord (e.g. 40.7580, -73.9855 inside Times Square road network) to verify 400 'isn't on public green land' is returned. Tests are already structured to accept either 200 (fall-open) or 400 (Overpass reachable + rejected).",
+    "Consider tightening _overpass_public_centers per-endpoint timeout from 20s to 8s — keeps total disaster-path latency under 100s instead of 240s."
+  ],
+  "critical_code_review_comments": [
+    "buried_treasure.py:1610-1617 — bury endpoint: block-check runs BEFORE green-check, so a blocked coord gets the precise 'block list' error rather than the green error. Correct ordering.",
+    "buried_treasure.py:2318-2330 — hide endpoint: holder-check (403) runs before block-check (400) before green-check (400). Correct ordering per spec; test_non_holder_403 verifies INV (non-holder) gets 403 before any geo validation.",
+    "buried_treasure.py:373-403 — _is_coord_green falls open with True on Overpass outage AND logs 'Overpass unreachable — allowing bury' as a WARNING. Good observability for production debugging.",
+    "buried_treasure.py:455-464 — _pick_public_chest_point disaster path returns user centre coords as absolute last resort (NEVER a road) — matches the 2026-06-15 user directive 'NO road fallback'.",
+    "server.py:4222-4239 — bt_active is computed as OR of three independent counts/lookups, each wrapped in try/except so a mongo blip on one collection can't break the whole profile fetch. Defensive and correct.",
+    "/app/frontend/app/(tabs)/library.tsx and /app/frontend/app/friends/index.tsx were referenced in the request but per instructions (testing_type: backend only) were not exercised — main agent should self-verify the conditional rendering on the Library+ My Library tab and the ACTIVE/INACTIVE badge on MiniAppRow."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bt_iter14_green_check.py (new — 15 tests)"
+  ],
+  "success_rate": {"backend": "100% (15/15)", "frontend": "n/a (backend only)"},
+  "seed_data_creation": "Two mongo-seeded TEST_BT_ITER14_CR_* and TEST_BT_ITER14_INV_* users (users + profile + minted HS256 JWTs). Per-test bt_groups inserts with _id prefix TEST_BT_ITER14_GRP_*. bt_blocked_coords inserts with _id prefix TEST_BT_ITER14_BLK_*. All cleaned in fixture teardown + per-test try/finally. friend_requests row added between admin and seeded CR user to allow friend-profile lookup; cleaned in teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run with: pytest /app/backend/tests/test_bt_iter14_green_check.py -v (takes ~42s). Suite is self-contained — does not depend on iteration_13 fixtures. Admin login uses filip.cojocea122@gmail.com / XL98CZW5599. JWT secret read from env JWT_SECRET (default 'xp-real-life-dev-secret-change-in-prod-12345'). Critical caveat: in this dev container, overpass-api.de + overpass.kumi.systems are BOTH unreachable, so the green-check ALWAYS falls open (returns True). End-to-end 'reject coord on road' cannot be validated here — would need either a reachable Overpass mirror or a test-only monkeypatch on _is_coord_green. Both bury and hide endpoints are correctly wired with the green-check call site as confirmed by code review at buried_treasure.py:1612 and 2325, and by the block-coord rejection tests which prove the validation block executes before write.",
+  "rca_of_issue": "n/a — no failures detected. The mini_apps 5-vs-4 count discrepancy is noted as a spec ambiguity, not a bug — the implementation is internally consistent."
+}

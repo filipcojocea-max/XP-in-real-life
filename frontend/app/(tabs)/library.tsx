@@ -685,6 +685,26 @@ export default function Library() {
               </View>
               <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
             </TouchableOpacity>
+
+            {/* Buried Treasure — only shown when the user has it unlocked
+                (free OR purchased). Hidden otherwise per 2026-06-15 spec. */}
+            {isUnlocked('treasure') ? (
+              <TouchableOpacity
+                testID="library-mine-treasure"
+                activeOpacity={0.85}
+                onPress={() => router.push('/treasure' as any)}
+                style={[styles.mineCard, { borderColor: '#FFC85755' }]}
+              >
+                <View style={[styles.featureIcon, { width: 48, height: 48, borderRadius: 12, backgroundColor: '#FFC85722', borderColor: '#FFC85788' }]}>
+                  <Ionicons name="map" size={24} color={'#FFC857'} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.mineTitle}>Buried Treasure</Text>
+                  <Text style={styles.mineDesc}>Daily compass hunt · Solo + Groups</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : null}
           </View>
         )}
       </ScrollView>

@@ -1498,7 +1498,7 @@ function MiniAppRow({ app }: { app: FriendMiniApp }) {
             </View>
           ) : (
             <View style={[styles.miniAppPill, { borderColor: colors.border }]}>
-              <Text style={[styles.miniAppPillText, { color: colors.textMuted }]}>NOT YET</Text>
+              <Text style={[styles.miniAppPillText, { color: colors.textMuted }]}>INACTIVE</Text>
             </View>
           )}
         </View>
