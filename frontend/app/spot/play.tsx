@@ -1,13 +1,28 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+/**
+ * Spot the Object — Play screen (Solo + Multiplayer random-challenge)
+ *
+ * 2026-06-15 photo-capture overhaul (per user spec):
+ *   • NO real-time AI scanning — the camera no longer pulls frames
+ *     every 2.5 s to pre-classify them.
+ *   • NO auto-capture — even when the timer hits 0 we do NOT secretly
+ *     snap a photo. The round simply ends.
+ *   • Camera screen ALWAYS shows a big "Take Photo" button below the
+ *     viewfinder. Tap → snap → AI verifies the SNAPPED photo only.
+ *   • Correct: confirm success + auto-submit + return.
+ *   • Incorrect: show "Incorrect object" + a "Try Again" button that
+ *     puts the player straight back on the camera screen. Repeats
+ *     until they get it right OR the round timer runs out.
+ *
+ * Scoring, timer length, and round rules are unchanged — only the
+ * capture + verification UX changes.
+ */
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
-  Animated,
-  Easing,
-  Platform,
   Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,93 +33,92 @@ import { api } from '../../src/api';
 import { showAlert } from '../../src/uiAlert';
 import { colors, spacing, radii } from '../../src/theme';
 
-type Phase = 'briefing' | 'scanning' | 'reviewing';
+/**
+ * Phase machine:
+ *   briefing   — pre-camera intro card with the target object.
+ *   capturing  — camera open + "Take Photo" button (no AI scanning).
+ *   verifying  — photo just snapped; AI verifying it.
+ *   incorrect  — AI rejected the snap; player taps "Try Again".
+ *   correct    — AI accepted; submit + show success.
+ *   timeout    — timer hit 0 with no correct snap; show failure.
+ */
+type Phase = 'briefing' | 'capturing' | 'verifying' | 'incorrect' | 'correct' | 'timeout';
 
 export default function SpotPlay() {
   const params = useLocalSearchParams<{ mode?: string; object?: string }>();
   const mode = (params.mode as 'solo_constant' | 'solo_random') || 'solo_constant';
+  // Multiplayer / random-mode challenges are timed (120 s). Practice
+  // solo mode is untimed.
   const isTimed = mode !== 'solo_constant';
 
   const [target, setTarget] = useState<string>(typeof params.object === 'string' ? params.object : '');
   const [phase, setPhase] = useState<Phase>('briefing');
   const [permission, requestPermission] = useCameraPermissions();
   const [secondsLeft, setSecondsLeft] = useState(isTimed ? 120 : 0);
-  const [canCapture, setCanCapture] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [reason, setReason] = useState<string>('');
-  const [confidence, setConfidence] = useState<number>(0);
   const [photoBase64, setPhotoBase64] = useState<string | null>(null);
+  // Server-supplied "why it was rejected" reason — surfaces under the
+  // "Incorrect object" headline so the player knows whether the AI
+  // could see the object at all vs. saw the wrong thing.
+  const [rejectReason, setRejectReason] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
 
   const camRef = useRef<CameraView | null>(null);
-  const scanY = useRef(new Animated.Value(0)).current;
-  const checkBusy = useRef(false);
 
-  // Fetch a new object on mount (if not provided via param)
+  // ── Target fetch ──────────────────────────────────────────────
+  // Solo constant + random both start with a target. If the route was
+  // opened without one (e.g. from the home shortcut) we ask the server
+  // for a random word.
   useEffect(() => {
     if (target) return;
     api.spotGetObject().then((r) => setTarget(r.object)).catch((e) => {
       showAlert('Could not start', String(e?.message || e));
     });
-  }, []);
+  }, [target]);
 
-  // Timer (only in timed modes)
+  // ── Round timer ───────────────────────────────────────────────
+  // Counts down ONLY while the player is actively trying to capture
+  // or verifying. Pauses on briefing/incorrect screens so the player
+  // has a chance to read the result. Reaching 0 → "timeout" phase.
   useEffect(() => {
-    if (phase !== 'scanning' || !isTimed) return;
+    if (!isTimed) return;
+    if (phase !== 'capturing' && phase !== 'verifying') return;
     if (secondsLeft <= 0) {
-      autoCapture();
+      setPhase('timeout');
+      // Auto-submit a FAILED entry so the round counts against the
+      // player's stats (same behaviour as the previous build).
+      void submitOutcome(false);
       return;
     }
     const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
     return () => clearTimeout(t);
   }, [phase, secondsLeft, isTimed]);
 
-  // Scanner line animation
-  useEffect(() => {
-    if (phase !== 'scanning') return;
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(scanY, { toValue: 1, duration: 1500, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-        Animated.timing(scanY, { toValue: 0, duration: 1500, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-      ])
-    ).start();
-  }, [phase, scanY]);
+  // ── Server submission ─────────────────────────────────────────
+  const submitOutcome = useCallback(
+    async (success: boolean) => {
+      if (submitting) return;
+      setSubmitting(true);
+      try {
+        await api.spotComplete({
+          target_object: target,
+          photo_base64: photoBase64 || '',
+          success,
+          remaining_seconds: isTimed ? Math.max(0, secondsLeft) : 0,
+          mode,
+        });
+      } catch (e: any) {
+        // Don't block the success/failure UX on a network blip — the
+        // user already got the verdict from the AI. Just log it.
+        console.log('[spot] complete failed', e?.message);
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [target, photoBase64, isTimed, secondsLeft, mode, submitting],
+  );
 
-  // Periodic frame check (every 2.5s while scanning)
-  useEffect(() => {
-    if (phase !== 'scanning' || !target) return;
-    const interval = setInterval(() => {
-      runFrameCheck();
-    }, 2500);
-    return () => clearInterval(interval);
-  }, [phase, target]);
-
-  const runFrameCheck = useCallback(async () => {
-    if (!camRef.current || checkBusy.current) return;
-    checkBusy.current = true;
-    setAnalyzing(true);
-    try {
-      const pic = await camRef.current.takePictureAsync({
-        base64: true,
-        quality: 0.4,
-        skipProcessing: true,
-      });
-      const b64 = pic?.base64;
-      if (!b64) return;
-      const r = await api.spotCheck(target, b64);
-      setCanCapture(!!r.can_capture);
-      setConfidence(r.confidence || 0);
-      setReason(r.reason || '');
-    } catch (e: any) {
-      // Soft fail — keep shutter locked
-      setCanCapture(false);
-    } finally {
-      setAnalyzing(false);
-      checkBusy.current = false;
-    }
-  }, [target]);
-
-  const startScanning = async () => {
+  // ── Start the round (briefing → capturing) ────────────────────
+  const startCapturing = async () => {
     if (!permission?.granted) {
       const r = await requestPermission();
       if (!r?.granted) {
@@ -116,81 +130,58 @@ export default function SpotPlay() {
       }
     }
     if (isTimed) setSecondsLeft(120);
-    setCanCapture(false);
-    setReason('');
     setPhotoBase64(null);
-    setPhase('scanning');
+    setRejectReason('');
+    setPhase('capturing');
   };
 
-  const capture = async () => {
-    if (!camRef.current || !canCapture) return;
+  // ── Manual snap + verify ──────────────────────────────────────
+  // Triggered ONLY by tapping the "Take Photo" button. No auto-snap,
+  // no real-time scan. The photo is base-64'd and sent to /spot/check
+  // for AI verification; the result decides the next phase.
+  const onTakePhoto = useCallback(async () => {
+    if (!camRef.current || phase !== 'capturing') return;
+    setPhase('verifying');
     try {
       const pic = await camRef.current.takePictureAsync({
         base64: true,
         quality: 0.7,
       });
-      if (pic?.base64) {
-        setPhotoBase64(pic.base64);
-        setPhase('reviewing');
+      const b64 = pic?.base64 || '';
+      if (!b64) {
+        setPhase('capturing');
+        showAlert('Capture failed', 'Could not read the photo. Try again.');
+        return;
+      }
+      setPhotoBase64(b64);
+      // Run the AI on the SNAPPED photo only — no live-frame scanning.
+      const r = await api.spotCheck(target, b64);
+      if (r.can_capture) {
+        // ✅ Correct — submit the success + show the success screen.
+        // We don't wait on submitOutcome before transitioning so the
+        // player sees the result instantly even on slow networks.
+        void submitOutcome(true);
+        setPhase('correct');
+      } else {
+        setRejectReason(r.reason || '');
+        setPhase('incorrect');
       }
     } catch (e: any) {
-      showAlert('Capture failed', String(e?.message || e));
+      // Network / camera error — treat as "verification failed" so
+      // the player can retry instead of losing the round.
+      setRejectReason(String(e?.message || e));
+      setPhase('incorrect');
     }
-  };
+  }, [phase, target, submitOutcome]);
 
-  const autoCapture = async () => {
-    if (!camRef.current) return;
-    try {
-      const pic = await camRef.current.takePictureAsync({ base64: true, quality: 0.7 });
-      if (pic?.base64) {
-        setPhotoBase64(pic.base64);
-        setPhase('reviewing');
-      }
-    } catch {}
-  };
-
-  const onSubmit = async (success: boolean) => {
-    if (!photoBase64) return;
-    setSubmitting(true);
-    try {
-      const r = await api.spotComplete({
-        target_object: target,
-        photo_base64: photoBase64,
-        success,
-        remaining_seconds: isTimed ? Math.max(0, secondsLeft) : 0,
-        mode,
-      });
-      showAlert(
-        success ? 'Found the object! 🎯' : "Didn't find the object",
-        success ? `+${r.points_delta} Spot Point. Total: ${r.spot_points}` : 'No points awarded.',
-      );
-      router.back();
-    } catch (e: any) {
-      showAlert('Could not save', String(e?.message || e));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const onTryAgain = async () => {
+  // ── "Try Again" — back into camera with the SAME target ───────
+  const onTryAgain = () => {
     setPhotoBase64(null);
-    setCanCapture(false);
-    setReason('');
-    if (mode === 'solo_constant') {
-      // Solo constant mode pulls a NEW random object on every retry —
-      // show the briefing screen so the user knows what to chase.
-      const r = await api.spotGetObject();
-      setTarget(r.object);
-      setPhase('briefing');
-      return;
-    }
-    // Same target → skip briefing and jump STRAIGHT back into the
-    // live camera for an instant second attempt. No loading screen,
-    // no extra tap.
-    setPhase('scanning');
+    setRejectReason('');
+    setPhase('capturing');
   };
 
-  // ───────── Briefing screen ─────────
+  // ── Briefing screen (unchanged copy) ──────────────────────────
   if (phase === 'briefing') {
     return (
       <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -212,22 +203,24 @@ export default function SpotPlay() {
           <Text style={styles.briefingKicker}>YOUR CHALLENGE</Text>
           <Text style={styles.briefingTarget}>Take a Photo of...</Text>
           <Text style={styles.briefingObject} numberOfLines={2}>
-            {target ? target : '...'}
+            {target || '...'}
           </Text>
           {isTimed ? (
-            <Text style={styles.briefingHint}>You have 2 minutes. Go!</Text>
+            <Text style={styles.briefingHint}>You have 2 minutes. Tap the green button when you&apos;ve framed it.</Text>
           ) : (
-            <Text style={styles.briefingHint}>No timer in solo practice — take your time.</Text>
+            <Text style={styles.briefingHint}>No timer in solo practice — take your time and tap when ready.</Text>
           )}
         </View>
         <TouchableOpacity
           style={[styles.bigBtn, !target && { opacity: 0.5 }]}
-          onPress={startScanning}
+          onPress={startCapturing}
           disabled={!target}
           testID="spot-start-scan"
         >
           <Ionicons name="camera" size={20} color={colors.bg} />
-          <Text style={styles.bigBtnText}>Take a Photo of {target ? `"${target}"` : '...'}</Text>
+          <Text style={styles.bigBtnText}>
+            {target ? `Open camera` : '...'}
+          </Text>
         </TouchableOpacity>
         {isTimed ? (
           <View style={styles.briefingTimerLine}>
@@ -238,8 +231,8 @@ export default function SpotPlay() {
     );
   }
 
-  // ───────── Scanning screen ─────────
-  if (phase === 'scanning') {
+  // ── Capturing + verifying screen (single camera surface) ──────
+  if (phase === 'capturing' || phase === 'verifying') {
     if (!permission?.granted) {
       return (
         <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -253,11 +246,12 @@ export default function SpotPlay() {
         </SafeAreaView>
       );
     }
+    const verifying = phase === 'verifying';
     return (
       <SafeAreaView style={styles.safe} edges={['top']}>
         <View style={styles.scanHeader}>
-          <TouchableOpacity onPress={() => router.back()} hitSlop={10}>
-            <Ionicons name="close" size={26} color={colors.text} />
+          <TouchableOpacity onPress={() => router.back()} hitSlop={10} disabled={verifying}>
+            <Ionicons name="close" size={26} color={verifying ? colors.textMuted : colors.text} />
           </TouchableOpacity>
           <Text style={styles.scanTitle} numberOfLines={1}>
             Find: <Text style={{ color: colors.green }}>{target}</Text>
@@ -278,107 +272,186 @@ export default function SpotPlay() {
             facing="back"
             mute
           />
-          {/* Green scanner line */}
+          {/* Static framing corners — no live scanner line any more
+              (the user spec calls for no real-time AI activity here). */}
           <View pointerEvents="none" style={styles.scannerOverlay}>
-            <Animated.View
-              style={[
-                styles.scanLine,
-                {
-                  transform: [
-                    { translateY: scanY.interpolate({ inputRange: [0, 1], outputRange: [0, 320] }) },
-                  ],
-                },
-              ]}
-            />
             <View style={styles.scanCorners}>
               <View style={[styles.corner, styles.cornerTL]} />
               <View style={[styles.corner, styles.cornerTR]} />
               <View style={[styles.corner, styles.cornerBL]} />
               <View style={[styles.corner, styles.cornerBR]} />
             </View>
+            {/* Verifying overlay sits ON TOP of the camera while the
+                AI thinks. Camera stays mounted so we can immediately
+                retake on rejection without a re-init. */}
+            {verifying ? (
+              <View style={styles.verifyDim}>
+                <ActivityIndicator size="large" color={colors.green} />
+                <Text style={styles.verifyText}>Checking your photo…</Text>
+              </View>
+            ) : null}
           </View>
         </View>
-        <View style={styles.statusBar}>
-          {analyzing ? (
-            <ActivityIndicator size="small" color={colors.cyan} />
-          ) : canCapture ? (
-            <Ionicons name="checkmark-circle" size={16} color={colors.green} />
-          ) : (
-            <Ionicons name="search" size={16} color={colors.textMuted} />
-          )}
-          <Text style={[styles.statusText, canCapture && { color: colors.green }]} numberOfLines={1}>
-            {analyzing
-              ? 'Scanning…'
-              : canCapture
-                ? `Got it! Confidence ${Math.round(confidence * 100)}% — tap to snap`
-                : reason || 'Move closer or center the object in the frame'}
+        <View style={styles.captureHint}>
+          <Ionicons name="information-circle-outline" size={14} color={colors.textMuted} />
+          <Text style={styles.captureHintText} numberOfLines={2}>
+            Frame the {target} clearly, then tap the button below.
           </Text>
         </View>
         <TouchableOpacity
-          style={[styles.shutter, !canCapture && styles.shutterLocked]}
-          onPress={capture}
-          disabled={!canCapture}
-          testID="spot-shutter"
+          style={[styles.takePhotoBtn, verifying && styles.takePhotoBtnBusy]}
+          onPress={onTakePhoto}
+          disabled={verifying}
+          activeOpacity={0.85}
+          testID="spot-take-photo"
         >
-          {!canCapture ? (
-            <Ionicons name="lock-closed" size={26} color={colors.textMuted} />
+          {verifying ? (
+            <>
+              <ActivityIndicator color={colors.bg} />
+              <Text style={styles.takePhotoBtnText}>Verifying…</Text>
+            </>
           ) : (
-            <View style={styles.shutterInner} />
+            <>
+              <Ionicons name="camera" size={22} color={colors.bg} />
+              <Text style={styles.takePhotoBtnText}>Take Photo</Text>
+            </>
           )}
         </TouchableOpacity>
       </SafeAreaView>
     );
   }
 
-  // ───────── Reviewing screen ─────────
+  // ── Incorrect — show snap + "Try Again" ───────────────────────
+  if (phase === 'incorrect') {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.scanHeader}>
+          <TouchableOpacity onPress={() => router.back()} hitSlop={10}>
+            <Ionicons name="close" size={26} color={colors.text} />
+          </TouchableOpacity>
+          <Text style={styles.scanTitle} numberOfLines={1}>Verdict</Text>
+          {isTimed ? (
+            <View style={[styles.timerPill, secondsLeft <= 30 && { borderColor: colors.red, backgroundColor: colors.red + '22' }]}>
+              <Ionicons name="timer-outline" size={12} color={secondsLeft <= 30 ? colors.red : colors.amber} />
+              <Text style={[styles.timerPillText, secondsLeft <= 30 && { color: colors.red }]}>
+                {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, '0')}
+              </Text>
+            </View>
+          ) : <View style={{ width: 60 }} />}
+        </View>
+        {photoBase64 ? (
+          <Image
+            source={{ uri: `data:image/jpeg;base64,${photoBase64}` }}
+            style={styles.reviewImage}
+            resizeMode="cover"
+          />
+        ) : null}
+        <View style={styles.reviewBody}>
+          <View style={styles.verdictRow}>
+            <Ionicons name="close-circle" size={28} color={colors.red} />
+            <Text style={styles.verdictTitleBad}>Incorrect object</Text>
+          </View>
+          {rejectReason ? (
+            <Text style={styles.verdictSub} numberOfLines={3}>{rejectReason}</Text>
+          ) : (
+            <Text style={styles.verdictSub}>
+              The AI didn&apos;t see a &quot;{target}&quot; in that photo.
+            </Text>
+          )}
+          {isTimed && secondsLeft <= 0 ? (
+            <Text style={[styles.verdictSub, { color: colors.red, marginTop: 4 }]}>
+              Time&apos;s up — no points this round.
+            </Text>
+          ) : null}
+          <TouchableOpacity
+            style={[styles.takePhotoBtn, { marginTop: spacing.lg }]}
+            onPress={onTryAgain}
+            disabled={isTimed && secondsLeft <= 0}
+            activeOpacity={0.85}
+            testID="spot-try-again"
+          >
+            <Ionicons name="refresh" size={20} color={colors.bg} />
+            <Text style={styles.takePhotoBtnText}>
+              {isTimed && secondsLeft <= 0 ? 'Round over' : 'Try Again'}
+            </Text>
+          </TouchableOpacity>
+          {isTimed ? (
+            <Text style={styles.tryAgainHint}>
+              {secondsLeft > 0 ? `${secondsLeft}s left — tap to head straight back to the camera.` : ''}
+            </Text>
+          ) : null}
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Correct — confirm + auto-back ─────────────────────────────
+  if (phase === 'correct') {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.scanHeader}>
+          <View style={{ width: 26 }} />
+          <Text style={styles.scanTitle} numberOfLines={1}>Verdict</Text>
+          <View style={{ width: 60 }} />
+        </View>
+        {photoBase64 ? (
+          <Image
+            source={{ uri: `data:image/jpeg;base64,${photoBase64}` }}
+            style={styles.reviewImage}
+            resizeMode="cover"
+          />
+        ) : null}
+        <View style={styles.reviewBody}>
+          <View style={styles.verdictRow}>
+            <Ionicons name="checkmark-circle" size={28} color={colors.green} />
+            <Text style={styles.verdictTitleGood}>Found it!</Text>
+          </View>
+          <Text style={styles.verdictSub}>
+            +1 Spot Point. Nice eye for a &quot;{target}&quot;.
+          </Text>
+          <TouchableOpacity
+            style={[styles.takePhotoBtn, { marginTop: spacing.lg, backgroundColor: colors.green }]}
+            onPress={() => router.back()}
+            disabled={submitting}
+            activeOpacity={0.85}
+            testID="spot-correct-done"
+          >
+            {submitting ? (
+              <ActivityIndicator color={colors.bg} />
+            ) : (
+              <>
+                <Ionicons name="checkmark" size={20} color={colors.bg} />
+                <Text style={styles.takePhotoBtnText}>Done</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Timeout — round ended without a correct photo ─────────────
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.scanHeader}>
         <TouchableOpacity onPress={() => router.back()} hitSlop={10}>
           <Ionicons name="close" size={26} color={colors.text} />
         </TouchableOpacity>
-        <Text style={styles.scanTitle} numberOfLines={1}>Review</Text>
-        <View style={{ width: 26 }} />
+        <Text style={styles.scanTitle} numberOfLines={1}>Time&apos;s up</Text>
+        <View style={{ width: 60 }} />
       </View>
-      {photoBase64 ? (
-        <Image
-          source={{ uri: `data:image/jpeg;base64,${photoBase64}` }}
-          style={styles.reviewImage}
-          resizeMode="cover"
-        />
-      ) : null}
-      <View style={styles.reviewBody}>
-        <Text style={styles.reviewQ}>Did you find a "{target}"?</Text>
-        <Text style={styles.reviewSub}>Save your spot — friends can like and comment.</Text>
-        <View style={styles.reviewBtns}>
-          <TouchableOpacity
-            style={[styles.reviewBtn, { backgroundColor: colors.red + '22', borderColor: colors.red }]}
-            onPress={() => onSubmit(false)}
-            disabled={submitting}
-          >
-            <Ionicons name="close-circle" size={18} color={colors.red} />
-            <Text style={[styles.reviewBtnTxt, { color: colors.red }]}>Didn't find it</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.reviewBtn, { backgroundColor: colors.green + '22', borderColor: colors.green }]}
-            onPress={() => onSubmit(true)}
-            disabled={submitting}
-          >
-            <Ionicons name="checkmark-circle" size={18} color={colors.green} />
-            <Text style={[styles.reviewBtnTxt, { color: colors.green }]}>Found it (+1)</Text>
-          </TouchableOpacity>
-        </View>
-        {isTimed && secondsLeft > 0 ? (
-          <TouchableOpacity onPress={() => setPhase('scanning')} style={styles.retakeBtn}>
-            <Ionicons name="refresh" size={14} color={colors.cyan} />
-            <Text style={styles.retakeText}>Retake — {secondsLeft}s left</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity onPress={onTryAgain} style={styles.retakeBtn}>
-            <Ionicons name="refresh" size={14} color={colors.cyan} />
-            <Text style={styles.retakeText}>Try a different object</Text>
-          </TouchableOpacity>
-        )}
+      <View style={styles.center}>
+        <Ionicons name="timer" size={56} color={colors.red} />
+        <Text style={[styles.verdictTitleBad, { marginTop: spacing.md }]}>Out of time</Text>
+        <Text style={[styles.verdictSub, { textAlign: 'center', maxWidth: 280 }]}>
+          No points this round — the AI never got a winning photo of a &quot;{target}&quot;.
+        </Text>
+        <TouchableOpacity
+          style={[styles.bigBtn, { marginTop: spacing.lg, alignSelf: 'stretch' }]}
+          onPress={() => router.back()}
+        >
+          <Text style={styles.bigBtnText}>Back to Spot</Text>
+        </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
@@ -442,14 +515,7 @@ const styles = StyleSheet.create({
     borderColor: colors.green + '55',
   },
   camera: { width: '100%', height: '100%' },
-  scannerOverlay: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'flex-start' },
-  scanLine: {
-    width: '100%',
-    height: 3,
-    backgroundColor: colors.green,
-    opacity: 0.85,
-    elevation: 8,
-  },
+  scannerOverlay: { ...StyleSheet.absoluteFillObject },
   scanCorners: { ...StyleSheet.absoluteFillObject, padding: 16 },
   corner: { position: 'absolute', width: 30, height: 30, borderColor: colors.green },
   cornerTL: { top: 16, left: 16, borderTopWidth: 3, borderLeftWidth: 3 },
@@ -457,44 +523,42 @@ const styles = StyleSheet.create({
   cornerBL: { bottom: 16, left: 16, borderBottomWidth: 3, borderLeftWidth: 3 },
   cornerBR: { bottom: 16, right: 16, borderBottomWidth: 3, borderRightWidth: 3 },
 
-  statusBar: {
+  verifyDim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  verifyText: { color: '#fff', fontWeight: '800', fontSize: 14 },
+
+  captureHint: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
   },
-  statusText: { color: colors.textSecondary, fontSize: 12, flex: 1 },
+  captureHintText: { color: colors.textMuted, fontSize: 12, flex: 1 },
 
-  shutter: {
-    width: 78, height: 78, borderRadius: 39,
-    alignSelf: 'center', marginBottom: spacing.lg,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: colors.green + '22',
-    borderWidth: 4, borderColor: colors.green,
-  },
-  shutterLocked: {
-    backgroundColor: colors.surfaceGlass,
-    borderColor: colors.border,
-  },
-  shutterInner: {
-    width: 56, height: 56, borderRadius: 28,
+  takePhotoBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
     backgroundColor: colors.green,
+    marginHorizontal: spacing.lg, marginBottom: spacing.lg,
+    paddingVertical: 16,
+    borderRadius: radii.pill,
+    minHeight: 56,
   },
+  takePhotoBtnBusy: { backgroundColor: colors.green + 'cc' },
+  takePhotoBtnText: { color: colors.bg, fontWeight: '900', fontSize: 15, letterSpacing: 0.4 },
 
   reviewImage: {
     width: '100%', aspectRatio: 1,
     backgroundColor: '#000',
   },
   reviewBody: { flex: 1, padding: spacing.lg, gap: 8 },
-  reviewQ: { color: colors.text, fontWeight: '900', fontSize: 18, textAlign: 'center', textTransform: 'capitalize' },
-  reviewSub: { color: colors.textSecondary, fontSize: 13, textAlign: 'center' },
-  reviewBtns: { flexDirection: 'row', gap: 10, marginTop: spacing.md },
-  reviewBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    paddingVertical: 14, borderRadius: radii.pill, borderWidth: 1,
-  },
-  reviewBtnTxt: { fontWeight: '900', fontSize: 13, letterSpacing: 0.4 },
-  retakeBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    marginTop: spacing.md,
-  },
-  retakeText: { color: colors.cyan, fontWeight: '700', fontSize: 13 },
+
+  verdictRow: { flexDirection: 'row', alignItems: 'center', gap: 10, justifyContent: 'center', marginTop: 6 },
+  verdictTitleBad: { color: colors.red, fontWeight: '900', fontSize: 20 },
+  verdictTitleGood: { color: colors.green, fontWeight: '900', fontSize: 20 },
+  verdictSub: { color: colors.textSecondary, fontSize: 13, textAlign: 'center' },
+
+  tryAgainHint: { color: colors.textMuted, fontSize: 11, textAlign: 'center', marginTop: spacing.sm },
 });
