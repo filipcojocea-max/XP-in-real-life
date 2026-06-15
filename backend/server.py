@@ -37,6 +37,28 @@ db = client[os.environ['DB_NAME']]
 app = FastAPI(title="LevelUp API")
 api_router = APIRouter(prefix="/api")
 
+# ──────────────────────────────────────────────────────────────────
+# Cross-module helper stubs (2026-06-15)
+# ──────────────────────────────────────────────────────────────────
+# These globals are referenced throughout the file via the
+# `if X is not None: await X(...)` pattern. They were intended to be
+# overwritten by helper modules (admin_player_tools, duo_discounts,
+# chat_preferences, etc.) at import time, but those wirings were
+# never added — so every call site raised `NameError`. Initialising
+# them as `None` here makes the existing optional-feature checks
+# behave exactly as intended (i.e. silently skip when the helper
+# module isn't available) and removes the 500 errors that surfaced
+# once `app.include_router(api_router)` was moved to the EOF.
+_admin_price_override_for = None  # admin_player_tools.get_price_override_for
+_duo_active_offer = None          # duo_discounts.active_offer_for_app
+_duo_validate_payment = None      # duo_discounts.validate_group_payment
+_duo_record_payment = None        # duo_discounts.record_group_payment
+_chat_pref_for_pair = None        # chat_preferences.pref_for_pair
+_chat_blocked_for = None          # chat_preferences.blocked_users_for
+_push_to_user = None              # notif_scheduler.push_to_user
+
+
+
 # ------------------------------------------------------------------
 # Auth (JWT + bcrypt + email verification code)
 # ------------------------------------------------------------------
@@ -6411,7 +6433,18 @@ async def spot_match_capture(
 # ------------------------------------------------------------------
 # Final app wiring (must be AFTER all api_router routes are declared)
 # ------------------------------------------------------------------
-app.include_router(api_router)
+# 2026-06-15: the actual `app.include_router(api_router)` call has been
+# moved to the very END of this file. FastAPI snapshots routes at the
+# moment include_router runs, so any @api_router.* decorator declared
+# AFTER that call is silently dropped. The previous placement here
+# (line 6414) hid every endpoint defined below — /library/pricing,
+# /library/purchase, /boosts/pricing, /boosts/purchase, /payments/*,
+# etc — which is what surfaced as "404 Not Found" when the Creator
+# tried to save Stripe boost payment links.
+# DO NOT re-add the include_router call here — the canonical location
+# is now the very last line of the file. Middleware setup below stays
+# put; FastAPI applies middleware to the whole app regardless of when
+# routes are added.
 
 app.add_middleware(
     CORSMiddleware,
@@ -9089,6 +9122,177 @@ async def library_pricing_discount(
     doc = await db.library_pricing.find_one({"app_id": app_id}, {"_id": 0})
     return {"saved": True, "pricing": _pricing_doc_to_pub(doc, app_id, False)}
 
+# ──────────────────────────────────────────────────────────────────
+# Boost pricing endpoints (2026-06-15 fix)
+# ──────────────────────────────────────────────────────────────────
+# The frontend has always called these paths via api.boostsPricing /
+# api.boostsPricingSet / api.boostsPricingDiscount / api.boostsPurchase
+# but the matching server-side handlers were never wired up — every
+# request returned HTTP 404 "Not Found", which the user (Creator)
+# reported as "Payment link rejected" when trying to save Stripe links
+# for the 3 XP boosts.
+#
+# URL validation here is INTENTIONALLY permissive — accept ANY URL
+# that starts with http:// or https://, including all three Stripe
+# formats (buy.stripe.com, checkout.stripe.com, Stripe Connect custom
+# domains) AND Ko-fi (ko-fi.com). We do NOT pattern-match the host:
+# Stripe + Ko-fi each refuse bad requests on their end, and pattern-
+# matching just creates false rejections without real safety benefit.
+
+def _boost_pricing_to_pub(doc, boost_id: str, purchased: bool = False) -> dict:
+    """Same shape as `_pricing_doc_to_pub` but keyed on `boost_id`."""
+    pub = _pricing_doc_to_pub(doc or {}, boost_id, purchased)
+    pub["boost_id"] = boost_id
+    pub.pop("app_id", None)
+    return pub
+
+
+@api_router.get("/boosts/pricing")
+async def boosts_pricing_get(user_id: str = Depends(get_user_or_legacy)):
+    """Returns pricing config for all 3 boosts. Public per-user."""
+    rows = await db.boost_pricing.find({}, {"_id": 0}).to_list(20)
+    by_bid = {r.get("boost_id"): r for r in rows if r.get("boost_id") in BOOST_IDS}
+    out = {bid: _boost_pricing_to_pub(by_bid.get(bid), bid, False) for bid in BOOST_IDS}
+    return {"pricing": out, "currencies": SUPPORTED_PRICE_CURRENCIES}
+
+
+@api_router.post("/boosts/pricing/{boost_id}")
+async def boosts_pricing_set(
+    boost_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Creator-only: set price + currency + purchase URL for a boost.
+    purchase_url validation accepts ANY http(s) URL — Stripe Payment
+    Links, Stripe Checkout, Stripe Connect custom domains, and Ko-fi
+    all save correctly."""
+    if boost_id not in BOOST_IDS:
+        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator only.")
+    try:
+        price = float(body.get("price") if body.get("price") is not None else 0.0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "price must be a number")
+    if price < 0 or price > 100000:
+        raise HTTPException(400, "price out of range (0..100000)")
+    currency = (body.get("currency") or DEFAULT_PRICE_CURRENCY).upper()
+    if currency not in SUPPORTED_PRICE_CURRENCIES:
+        raise HTTPException(400, f"currency must be one of {SUPPORTED_PRICE_CURRENCIES}")
+    purchase_url = (body.get("purchase_url") or "").strip()[:500]
+    if purchase_url and not (purchase_url.startswith("http://") or purchase_url.startswith("https://")):
+        raise HTTPException(400, "purchase_url must start with http:// or https://")
+    await db.boost_pricing.update_one(
+        {"boost_id": boost_id},
+        {
+            "$set": {
+                "boost_id": boost_id,
+                "price": round(price, 2),
+                "currency": currency,
+                "purchase_url": purchase_url,
+                "updated_at": now_iso(),
+            },
+            "$setOnInsert": {"_id": str(uuid.uuid4())},
+        },
+        upsert=True,
+    )
+    doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
+    return {"saved": True, "pricing": _boost_pricing_to_pub(doc, boost_id, False)}
+
+
+@api_router.post("/boosts/pricing/{boost_id}/discount")
+async def boosts_pricing_discount(
+    boost_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Creator-only: set/clear time-limited discount on a boost."""
+    if boost_id not in BOOST_IDS:
+        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator only.")
+    try:
+        pct = int(body.get("percent") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "percent must be an integer 0..99")
+    if pct < 0 or pct > 99:
+        raise HTTPException(400, "percent must be 0..99")
+    set_doc = {"boost_id": boost_id, "updated_at": now_iso()}
+    if pct == 0:
+        set_doc["discount_percent"] = 0
+        set_doc["discount_starts_at"] = None
+        set_doc["discount_ends_at"] = None
+    else:
+        try:
+            dur_val = int(body.get("duration_value") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "duration_value must be a positive integer")
+        if dur_val <= 0 or dur_val > 1000:
+            raise HTTPException(400, "duration_value must be 1..1000")
+        unit = (body.get("duration_unit") or "days").lower().strip()
+        if unit not in ("days", "weeks", "months"):
+            raise HTTPException(400, "duration_unit must be days|weeks|months")
+        days = {"days": 1, "weeks": 7, "months": 30}[unit] * dur_val
+        now = datetime.utcnow()
+        set_doc["discount_percent"] = pct
+        set_doc["discount_starts_at"] = now.isoformat()
+        set_doc["discount_ends_at"] = (now + timedelta(days=days)).isoformat()
+    await db.boost_pricing.update_one(
+        {"boost_id": boost_id},
+        {"$set": set_doc, "$setOnInsert": {"_id": str(uuid.uuid4())}},
+        upsert=True,
+    )
+    doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
+    return {"saved": True, "pricing": _boost_pricing_to_pub(doc, boost_id, False)}
+
+
+@api_router.post("/boosts/purchase")
+async def boosts_purchase_record(
+    body: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Trust-based fallback after returning from the Creator-configured
+    Stripe / Ko-fi payment URL — frontend POSTs here once the external
+    payment is confirmed. Adds one inventory entry of the matching
+    boost type. Idempotent within a 60-second window so a double-tap
+    on the Claim button never grants two boosts."""
+    boost_id = (body.get("boost_id") or "").strip()
+    if boost_id not in BOOST_IDS:
+        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
+    pricing_doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
+    pricing_pub = _boost_pricing_to_pub(pricing_doc, boost_id, False)
+    if pricing_pub["is_free"]:
+        entry = _make_inventory_entry(boost_id, source="free")
+        await db.profile.update_one({"_id": user_id}, {"$push": {"boost_inventory": entry}})
+        prof = await db.profile.find_one({"_id": user_id})
+        return {"saved": True, "is_free": True, "profile": serialize_profile(prof)}
+    prof = await db.profile.find_one({"_id": user_id})
+    inv = (prof or {}).get("boost_inventory") or []
+    # Idempotency: ignore a second purchase POST for the SAME boost
+    # within 60 s of the most recent shop-source grant.
+    try:
+        cutoff = datetime.utcnow() - timedelta(seconds=60)
+        for it in reversed(inv):
+            if it.get("type") != boost_id:
+                continue
+            iso = it.get("granted_at") or it.get("created_at")
+            if not iso:
+                continue
+            try:
+                got = datetime.fromisoformat(str(iso).replace("Z", ""))
+                if got > cutoff and (it.get("source") or "") == "shop":
+                    return {"saved": True, "is_free": False, "profile": serialize_profile(prof)}
+            except Exception:
+                pass
+    except Exception:
+        pass
+    entry = _make_inventory_entry(boost_id, source="shop")
+    await db.profile.update_one({"_id": user_id}, {"$push": {"boost_inventory": entry}})
+    prof = await db.profile.find_one({"_id": user_id})
+    return {"saved": True, "is_free": False, "profile": serialize_profile(prof)}
+
+
+
 
 @api_router.post("/library/purchase/{app_id}")
 async def library_purchase_record(
@@ -9561,3 +9765,14 @@ async def stripe_return(status: str = "success", session_id: str = ""):
   }}, 250);
 </script>
 </body></html>"""
+
+
+# ──────────────────────────────────────────────────────────────────
+# CANONICAL include_router CALL (MUST stay at the END of this file).
+# Moved here 2026-06-15 to fix the silent 404s for every endpoint
+# defined past line ~6414 (library/pricing, library/purchase,
+# boosts/pricing, boosts/purchase, payments/*). FastAPI snapshots
+# routes at include_router time — adding routes AFTER won't be picked
+# up. Keep new @api_router.* decorations ABOVE this line.
+# ──────────────────────────────────────────────────────────────────
+app.include_router(api_router)
