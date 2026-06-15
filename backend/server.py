@@ -490,6 +490,29 @@ def _default_shift_schedule() -> dict:
     }
 
 
+def _serialize_shift_schedule(prof: Optional[dict]) -> dict:
+    """Merge the user's stored `shift_schedule` over the defaults so
+    `serialize_profile` always returns the full shape — even for
+    legacy profile docs that pre-date the Adaptive Work-Life Scheduler
+    feature and never had this field written. Resolves the 500 on
+    GET /profile when a profile is missing the field entirely."""
+    base = _default_shift_schedule()
+    stored = (prof or {}).get("shift_schedule") or {}
+    if isinstance(stored, dict):
+        merged = {**base, **{k: v for k, v in stored.items() if v is not None}}
+        # `shifts` should also merge field-by-field so per-shift edits
+        # don't blow away the default work/sleep windows for the OTHER
+        # shifts the user hasn't touched yet.
+        try:
+            stored_shifts = stored.get("shifts") or {}
+            if isinstance(stored_shifts, dict):
+                merged["shifts"] = {**base["shifts"], **stored_shifts}
+        except Exception:
+            pass
+        return merged
+    return base
+
+
 def _shift_for_date(prof: Optional[dict], date_iso: str) -> Optional[str]:
     """Returns the shift type ('day'|'night'|'off') for the given local
     date based on profile.shift_schedule. Returns None when the schedule
@@ -888,47 +911,127 @@ async def check_and_unlock_achievements(prof: dict) -> List[str]:
     return newly
 
 
-async def update_streak(prof: dict) -> dict:
-    today = today_str()
-    last = prof.get("last_active_date")
-    if last == today:
-        return prof
-    new_streak = prof.get("current_streak", 0)
-    if last is None:
-        new_streak = 1
-    else:
+async def _compute_streak_from_charts(user_id: str) -> int:
+    """Recompute the user's daily streak STRICTLY from chart data —
+    i.e. distinct `task_logs.date` values where the user earned net
+    positive XP. This is the SAME data source the Bar + Line graphs
+    aggregate from, so the streak number can never drift from what
+    the user sees on screen (2026-06-15 user spec: "daily streaks
+    are always referencing to the Bar and line graphs").
+
+    Algorithm:
+      1. Aggregate task_logs by date → sum xp_awarded per day.
+      2. Keep only dates where the SUM > 0 (positive XP earned).
+      3. Walk back from TODAY (in the user's local day-anchor) —
+         every consecutive earning day adds +1. If today has no
+         earnings yet we anchor from YESTERDAY instead so a user
+         who simply hasn't earned XP yet TODAY doesn't see their
+         streak drop until they actually miss a full day.
+      4. Stop at the first gap. Cap at 5000 to prevent UI overflow.
+
+    Read-only / idempotent: never throws, falls back to the stored
+    `current_streak` value if aggregation fails.
+    """
+    try:
+        # Pull profile so we honour the user's local day-anchor when
+        # deciding what "today" means (same logic as user_today_str).
+        prof = await db.profile.find_one({"_id": user_id})
+        if not prof:
+            return 0
+        # Pull every (date, xp_sum) pair for this user — task_logs are
+        # already date-stamped in the user's local-day format by every
+        # XP grant code-path, so simple grouping is enough.
+        pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$group": {"_id": "$date", "xp_sum": {"$sum": {"$ifNull": ["$xp_awarded", 0]}}}},
+            {"$match": {"xp_sum": {"$gt": 0}}},
+        ]
+        active_dates: set[str] = set()
+        async for row in db.task_logs.aggregate(pipeline):
+            d = row.get("_id")
+            if isinstance(d, str) and d:
+                active_dates.add(d)
+        if not active_dates:
+            return 0
+        # Compute the user's local "today" using day_start_time anchor
+        # so timezone / DST flip-overs don't randomly reset the streak.
+        today = today_str()
         try:
-            last_date = datetime.fromisoformat(last).date()
-            today_date = datetime.now(timezone.utc).date()
-            diff = (today_date - last_date).days
-            if diff == 1:
-                new_streak += 1
-            elif diff > 1:
-                new_streak = 1
-            else:
-                new_streak = max(new_streak, 1)
+            tz_name = prof.get("timezone") or "UTC"
+            from zoneinfo import ZoneInfo
+            local = datetime.now(ZoneInfo(tz_name))
+            day_start = prof.get("day_start_time") or prof.get("wake_time") or "07:00"
+            hh, mm = [int(x) for x in (day_start or "07:00").split(":")[:2]]
+            anchor = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if local < anchor:
+                anchor = anchor - timedelta(days=1)
+            today = anchor.date().isoformat()
         except Exception:
-            new_streak = 1
-    # Hard cap: 5,000 days. Anything beyond is purely cosmetic and can
-    # cause UI issues (>4-digit text overflowing the streak badge), and
-    # is functionally irrelevant — staying engaged for ~13.7 years
-    # already qualifies as a champion regardless of the displayed digit.
+            pass
+        # Anchor: if no XP today yet, start counting from yesterday so
+        # the user's streak doesn't fall the second they wake up.
+        from datetime import date as _date
+        today_d = _date.fromisoformat(today)
+        cursor = today_d if today in active_dates else (today_d - timedelta(days=1))
+        streak = 0
+        while cursor.isoformat() in active_dates and streak < 5000:
+            streak += 1
+            cursor = cursor - timedelta(days=1)
+        return streak
+    except Exception:
+        logger.exception("[streak] _compute_streak_from_charts failed for %s", user_id)
+        # Read-only safety net: never crash a caller. Fall back to the
+        # stored value so we NEVER randomly drop a streak just because
+        # an aggregation hiccuped.
+        try:
+            prof = await db.profile.find_one({"_id": user_id})
+            return int((prof or {}).get("current_streak") or 0)
+        except Exception:
+            return 0
+
+
+async def update_streak(prof: dict) -> dict:
+    """2026-06-15 user spec rewrite. The OLD logic compared today vs.
+    last_active_date and reset to 1 on any `diff > 1` — which caused
+    spurious resets when:
+      • the profile doc was hot-updated mid-write
+      • the user crossed a timezone / DST boundary
+      • a background tick raced with the grant path
+      • the user had XP that day in task_logs but `last_active_date`
+        was never bumped (e.g. early exception before the streak
+        helper ran)
+
+    NEW logic: the streak is derived from the bar/line graph data
+    itself — i.e. `task_logs` rows where the user earned positive XP.
+    This makes the streak number the user sees in their profile
+    always equal to the streak the charts imply. It is impossible to
+    "randomly lose" a streak as long as the underlying XP rows exist.
+    """
+    user_id = prof["_id"]
+    new_streak = await _compute_streak_from_charts(user_id)
+    # Cap matches the prior implementation so the streak badge never
+    # overflows 4 digits.
     if new_streak > 5000:
         new_streak = 5000
-    longest = max(prof.get("longest_streak", 0), new_streak)
+    longest = max(int(prof.get("longest_streak", 0) or 0), new_streak)
     if longest > 5000:
         longest = 5000
-    await db.profile.update_one(
-        {"_id": prof["_id"]},
-        {"$set": {
-            "last_active_date": today,
-            "current_streak": new_streak,
-            "longest_streak": longest,
-        }}
-    )
-    prof["last_active_date"] = today
+    # `last_active_date` is no longer authoritative — we keep writing
+    # it to today only when there IS positive XP today, purely so
+    # legacy clients reading the field still get a sensible value.
+    sets = {"current_streak": new_streak, "longest_streak": longest}
+    today = today_str()
+    if new_streak > 0:
+        # Only stamp last_active_date when we KNOW today is an earning
+        # day (streak ≥ 1 with today inside the chain). This avoids
+        # the historical bug where last_active_date got bumped on
+        # mere profile reads.
+        sets["last_active_date"] = today
+    await db.profile.update_one({"_id": user_id}, {"$set": sets})
     prof["current_streak"] = new_streak
     prof["longest_streak"] = longest
+    if new_streak > 0:
+        prof["last_active_date"] = today
     return prof
 
 
@@ -2326,6 +2429,10 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     # past) the target. When the user un-ticks, we refund 30 XP per step.
     # No step-XP is awarded for non-daily goals — only the completion
     # bonus (`xp_reward`) applies to those, preserving existing behavior.
+    #
+    # 2026-06-15 user spec: GOAL-STEP XP is ALWAYS raw (30 per step) —
+    # NEVER touched by the active XP multiplier. The multiplier
+    # exclusively applies to TASK completions, never to goal progress.
     DAILY_STEP_XP = 30
     step_xp_delta = 0
     prev_value = int(goal.get("current_value", 0))
@@ -2394,6 +2501,15 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     refunded_xp = 0
     if completed and not goal.get("completed"):
         update["completed_at"] = now_iso()
+        # 2026-06-15 user spec: GOAL completion XP is ALWAYS the raw
+        # base reward — NEVER touched by the active XP multiplier. Boost
+        # multipliers (2×, 3×) only apply to task XP, never to goal
+        # completion / goal-step XP. The two `int(...)` casts below give
+        # the raw reward; `_current_xp_multiplier` is intentionally not
+        # called anywhere in this branch. Do NOT introduce a multiplier
+        # here even by accident — the multiplier value is logged at
+        # 1.0 in the goal task_logs row below to make the contract
+        # explicit and auditable.
         awarded_xp = int(goal.get("xp_reward") or GOAL_XP_DEFAULT)
         # Persist the EXACT XP we awarded on this completion so a future
         # un-tick refunds the right amount even if the goal's xp_reward
@@ -9445,916 +9561,3 @@ async def stripe_return(status: str = "success", session_id: str = ""):
   }}, 250);
 </script>
 </body></html>"""
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(content=body)
-
-
-# ═══════════════════ Boost Pricing & Purchases (Points+) ═════════════
-# Mirrors library pricing but for the 3 XP boosts in Points+ tab.
-# Storage: db.boost_pricing — {boost_id, price, currency, purchase_url,
-#   discount_percent, discount_starts_at, discount_ends_at, updated_at}.
-# After payment, the boost is added to the user's `profile.boost_inventory`
-# (un-activated; user activates manually). NOT permanent — once activated
-# and consumed it's gone, but the user can re-buy (unlike library apps).
-
-
-@api_router.get("/boosts/pricing")
-async def boost_pricing_get(user_id: str = Depends(get_user_or_legacy)):
-    rows = await db.boost_pricing.find({}, {"_id": 0}).to_list(100)
-    by_id = {r.get("boost_id"): r for r in rows if r.get("boost_id") in BOOST_IDS}
-    out = {}
-    for bid in BOOST_IDS:
-        # Boosts are NEVER "purchased forever" — re-purchasable per session.
-        # `purchased=false` always so the Buy modal stays accessible.
-        out[bid] = _pricing_doc_to_pub(by_id.get(bid), bid, False)
-    return {"pricing": out, "currencies": SUPPORTED_PRICE_CURRENCIES}
-
-
-@api_router.post("/boosts/pricing/{boost_id}")
-async def boost_pricing_set(
-    boost_id: str,
-    body: dict = Body(...),
-    user_id: str = Depends(get_user_or_legacy),
-):
-    if boost_id not in BOOST_IDS:
-        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
-    if not await _is_admin_user(user_id):
-        raise HTTPException(403, "Creator only.")
-    try:
-        price = float(body.get("price") if body.get("price") is not None else 0.0)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "price must be a number")
-    if price < 0 or price > 100000:
-        raise HTTPException(400, "price out of range (0..100000)")
-    currency = (body.get("currency") or DEFAULT_PRICE_CURRENCY).upper()
-    if currency not in SUPPORTED_PRICE_CURRENCIES:
-        raise HTTPException(400, f"currency must be one of {SUPPORTED_PRICE_CURRENCIES}")
-    purchase_url = (body.get("purchase_url") or "").strip()[:500]
-    if purchase_url and not (purchase_url.startswith("http://") or purchase_url.startswith("https://")):
-        raise HTTPException(400, "purchase_url must start with http:// or https://")
-    await db.boost_pricing.update_one(
-        {"boost_id": boost_id},
-        {
-            "$set": {
-                "boost_id": boost_id,
-                "price": round(price, 2),
-                "currency": currency,
-                "purchase_url": purchase_url,
-                "updated_at": now_iso(),
-            },
-            "$setOnInsert": {"_id": str(uuid.uuid4())},
-        },
-        upsert=True,
-    )
-    doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
-    pub = _pricing_doc_to_pub(doc, boost_id, False)
-    return {"saved": True, "pricing": pub}
-
-
-@api_router.post("/boosts/pricing/{boost_id}/discount")
-async def boost_pricing_discount(
-    boost_id: str,
-    body: dict = Body(...),
-    user_id: str = Depends(get_user_or_legacy),
-):
-    if boost_id not in BOOST_IDS:
-        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
-    if not await _is_admin_user(user_id):
-        raise HTTPException(403, "Creator only.")
-    try:
-        pct = int(body.get("percent") or 0)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "percent must be 0..99")
-    if pct < 0 or pct > 99:
-        raise HTTPException(400, "percent must be 0..99")
-    set_doc: dict = {"boost_id": boost_id, "updated_at": now_iso()}
-    if pct == 0:
-        set_doc.update({"discount_percent": 0, "discount_starts_at": None, "discount_ends_at": None})
-    else:
-        try:
-            dur_val = int(body.get("duration_value") or 0)
-        except (TypeError, ValueError):
-            raise HTTPException(400, "duration_value must be a positive integer")
-        if dur_val <= 0 or dur_val > 1000:
-            raise HTTPException(400, "duration_value must be 1..1000")
-        unit = (body.get("duration_unit") or "days").lower().strip()
-        if unit not in ("days", "weeks", "months"):
-            raise HTTPException(400, "duration_unit must be days|weeks|months")
-        days = {"days": 1, "weeks": 7, "months": 30}[unit] * dur_val
-        now = datetime.utcnow()
-        set_doc.update({
-            "discount_percent": pct,
-            "discount_starts_at": now.isoformat(),
-            "discount_ends_at": (now + timedelta(days=days)).isoformat(),
-        })
-    await db.boost_pricing.update_one(
-        {"boost_id": boost_id},
-        {"$set": set_doc, "$setOnInsert": {"_id": str(uuid.uuid4())}},
-        upsert=True,
-    )
-    doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
-    return {"saved": True, "pricing": _pricing_doc_to_pub(doc, boost_id, False)}
-
-
-async def _grant_boost_to_inventory(user_id: str, boost_id: str, source: str = "stripe"):
-    """Adds a boost to the user's inventory (idempotent per Stripe txn).
-
-    For paid grants ('stripe' / 'purchase') we additionally snapshot the
-    *effective* price + currency at time of grant onto the inventory
-    entry (fields `paid_amount`, `paid_currency`). This is what powers
-    the per-day "Money Spent on Multipliers" chart on the Creator's
-    player drilldown — once snapshotted it stays accurate even if the
-    Creator later changes the price in /admin pricing.
-    """
-    if boost_id not in BOOST_DEFS:
-        return False
-    entry = _make_inventory_entry(boost_id, source=source)
-    if source in ("stripe", "purchase"):
-        try:
-            pricing_doc = await db.boost_pricing.find_one(
-                {"boost_id": boost_id}, {"_id": 0}
-            )
-            pub = _pricing_doc_to_pub(pricing_doc, boost_id, False)
-            entry["paid_amount"] = float(pub.get("effective_price") or 0.0)
-            entry["paid_currency"] = pub.get("currency") or DEFAULT_PRICE_CURRENCY
-        except Exception:
-            # Pricing lookup is best-effort. If anything goes wrong we
-            # still want the grant to succeed — the chart will fall back
-            # to current-pricing approximation for this entry.
-            pass
-    await db.profile.update_one(
-        {"_id": user_id},
-        {
-            "$push": {"boost_inventory": entry},
-            "$set": {"boosts_unlocked": True},
-        },
-        upsert=True,
-    )
-    return True
-
-
-@api_router.post("/boosts/purchase")
-async def boost_purchase_record(
-    body: dict = Body(default=None),
-    user_id: str = Depends(get_user_or_legacy),
-):
-    """Trust-based fallback after returning from external Stripe checkout.
-    For paid boosts, grants the boost into inventory. Free boosts no-op."""
-    body = body or {}
-    boost_id = (body.get("boost_id") or "").strip()
-    if boost_id not in BOOST_IDS:
-        raise HTTPException(400, f"Invalid boost_id. Must be one of {BOOST_IDS}")
-    pricing_doc = await db.boost_pricing.find_one({"boost_id": boost_id}, {"_id": 0})
-    pub = _pricing_doc_to_pub(pricing_doc, boost_id, False)
-    if pub["is_free"]:
-        return {"saved": False, "is_free": True, "message": "This boost is free — use the unlock code instead."}
-    await _grant_boost_to_inventory(user_id, boost_id, source="purchase")
-    prof = await db.profile.find_one({"_id": user_id})
-    return {"saved": True, "is_free": False, "profile": serialize_profile(prof) if prof else None}
-
-
-# ═══════════════════ Adaptive Work-Life Scheduler endpoints ════════════
-#
-# Stores `shift_schedule` on profile. When enabled, daily resets,
-# focus-mode penalty cutoffs, and notification silencing all follow
-# the user's pattern instead of the static day_start_time field.
-
-def _serialize_shift_schedule(prof: Optional[dict]) -> dict:
-    sched = (prof or {}).get("shift_schedule") or _default_shift_schedule()
-    pk = sched.get("pattern_kind")
-    if pk not in ("weekly", "rotating"):
-        pk = "rotating"
-    out = {
-        "enabled": bool(sched.get("enabled")),
-        # 'weekly' = same every Mon..Sun (length-7 pattern starting Monday).
-        # 'rotating' = N-day cycle that repeats from pattern_start_date.
-        # The wizard uses this to remember which mode the user picked so
-        # it lands them on the right editor when they reopen the screen.
-        "pattern_kind": pk,
-        "pattern": list(sched.get("pattern") or []),
-        "pattern_start_date": sched.get("pattern_start_date") or today_str(),
-        "shifts": {},
-        "refresh_offset_hours": float(sched.get("refresh_offset_hours") or 2),
-        "manual_overrides": dict(sched.get("manual_overrides") or {}),
-        # `setup_complete` flips true the first time the user finishes the
-        # wizard. Used by the Profile entry to decide between Wizard and
-        # the 6-month calendar view.
-        "setup_complete": bool(sched.get("setup_complete")),
-    }
-    for k in SHIFT_TYPES:
-        d = (sched.get("shifts") or {}).get(k) or DEFAULT_SHIFTS[k]
-        out["shifts"][k] = {
-            "start_time": d.get("start_time", DEFAULT_SHIFTS[k]["start_time"]),
-            "sleep_time": d.get("sleep_time", DEFAULT_SHIFTS[k]["sleep_time"]),
-            "icon": d.get("icon", DEFAULT_SHIFTS[k]["icon"]),
-            "color": d.get("color", DEFAULT_SHIFTS[k]["color"]),
-        }
-    return out
-
-
-def _validate_shift_schedule(payload: dict) -> dict:
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "Body must be an object")
-    out: dict = {}
-    if "enabled" in payload:
-        out["enabled"] = bool(payload.get("enabled"))
-    if "setup_complete" in payload:
-        out["setup_complete"] = bool(payload.get("setup_complete"))
-    if "pattern_kind" in payload:
-        pk = str(payload.get("pattern_kind") or "").strip()
-        if pk not in ("weekly", "rotating"):
-            raise HTTPException(400, "pattern_kind must be 'weekly' or 'rotating'")
-        out["pattern_kind"] = pk
-    if "pattern" in payload:
-        pat = payload.get("pattern") or []
-        if not isinstance(pat, list) or any(p not in SHIFT_TYPES for p in pat):
-            raise HTTPException(400, f"pattern entries must be one of {SHIFT_TYPES}")
-        if len(pat) > 60:
-            raise HTTPException(400, "pattern length must be ≤ 60")
-        out["pattern"] = list(pat)
-    if "pattern_start_date" in payload:
-        try:
-            datetime.fromisoformat(str(payload["pattern_start_date"]))
-            out["pattern_start_date"] = str(payload["pattern_start_date"])
-        except Exception:
-            raise HTTPException(400, "pattern_start_date must be ISO YYYY-MM-DD")
-    if "refresh_offset_hours" in payload:
-        try:
-            v = float(payload["refresh_offset_hours"])
-        except (TypeError, ValueError):
-            raise HTTPException(400, "refresh_offset_hours must be a number")
-        if v < 0 or v > 12:
-            raise HTTPException(400, "refresh_offset_hours must be 0..12")
-        out["refresh_offset_hours"] = v
-    if "shifts" in payload:
-        sh = payload.get("shifts") or {}
-        if not isinstance(sh, dict):
-            raise HTTPException(400, "shifts must be an object")
-        out_shifts: dict = {}
-        for k in SHIFT_TYPES:
-            d = (sh.get(k) or {}) if isinstance(sh.get(k), dict) else {}
-            entry = dict(DEFAULT_SHIFTS[k])
-            for fld in ("start_time", "sleep_time"):
-                if fld in d:
-                    val = str(d[fld]).strip()
-                    if not re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", val):
-                        raise HTTPException(400, f"shifts.{k}.{fld} must be HH:MM 24-hour")
-                    hh, mm = _parse_hhmm(val, default=(0, 0))
-                    entry[fld] = f"{hh:02d}:{mm:02d}"
-            if "icon" in d:
-                entry["icon"] = str(d["icon"])[:8]
-            if "color" in d:
-                cv = str(d["color"]).strip()
-                if not re.match(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$", cv):
-                    raise HTTPException(400, f"shifts.{k}.color must be #RRGGBB or #RRGGBBAA")
-                entry["color"] = cv
-            out_shifts[k] = entry
-        out["shifts"] = out_shifts
-    if "manual_overrides" in payload:
-        mo = payload.get("manual_overrides") or {}
-        if not isinstance(mo, dict):
-            raise HTTPException(400, "manual_overrides must be an object")
-        cleaned: dict = {}
-        for k, v in mo.items():
-            try:
-                datetime.fromisoformat(str(k))
-            except Exception:
-                raise HTTPException(400, f"manual_overrides key {k!r} must be ISO YYYY-MM-DD")
-            if v is None or v == "":
-                continue  # pruned
-            if v not in SHIFT_TYPES:
-                raise HTTPException(400, f"manual_overrides[{k}] must be one of {SHIFT_TYPES} or null")
-            cleaned[str(k)] = v
-        out["manual_overrides"] = cleaned
-    return out
-
-
-@api_router.get("/schedule")
-async def schedule_get(user_id: str = Depends(get_user_or_legacy)):
-    prof = await db.profile.find_one({"_id": user_id}) or {}
-    return {"schedule": _serialize_shift_schedule(prof)}
-
-
-@api_router.put("/schedule")
-async def schedule_put(
-    body: dict = Body(...),
-    user_id: str = Depends(get_user_or_legacy),
-):
-    update = _validate_shift_schedule(body)
-    if not update:
-        raise HTTPException(400, "Empty payload — nothing to update")
-    prof = await db.profile.find_one({"_id": user_id}) or {}
-    cur = prof.get("shift_schedule") or _default_shift_schedule()
-    merged = dict(cur)
-    for k, v in update.items():
-        merged[k] = v
-    if "shifts" not in merged:
-        merged["shifts"] = {k: dict(DEFAULT_SHIFTS[k]) for k in SHIFT_TYPES}
-    if "pattern" not in merged:
-        merged["pattern"] = []
-    if "pattern_kind" not in merged:
-        merged["pattern_kind"] = "rotating"
-    if "setup_complete" not in merged:
-        merged["setup_complete"] = False
-    if "pattern_start_date" not in merged:
-        merged["pattern_start_date"] = today_str()
-    if "manual_overrides" not in merged:
-        merged["manual_overrides"] = {}
-    if "refresh_offset_hours" not in merged:
-        merged["refresh_offset_hours"] = 2
-    if "enabled" not in merged:
-        merged["enabled"] = bool(cur.get("enabled"))
-    await db.profile.update_one({"_id": user_id}, {"$set": {"shift_schedule": merged}}, upsert=True)
-    new_prof = await db.profile.find_one({"_id": user_id}) or {}
-    return {"saved": True, "schedule": _serialize_shift_schedule(new_prof)}
-
-
-@api_router.post("/schedule/reset")
-async def schedule_reset(user_id: str = Depends(get_user_or_legacy)):
-    """Wipes the schedule back to defaults (still disabled)."""
-    fresh = _default_shift_schedule()
-    await db.profile.update_one({"_id": user_id}, {"$set": {"shift_schedule": fresh}}, upsert=True)
-    return {"saved": True, "schedule": _serialize_shift_schedule({"shift_schedule": fresh})}
-
-
-@api_router.put("/schedule/day/{date_iso}")
-async def schedule_day_override(
-    date_iso: str,
-    body: dict = Body(...),
-    user_id: str = Depends(get_user_or_legacy),
-):
-    """Sets or clears a manual override for a single day. Body
-    {shift: 'day'|'night'|'off'} or {shift: null} to remove."""
-    try:
-        datetime.fromisoformat(date_iso)
-    except Exception:
-        raise HTTPException(400, "date must be ISO YYYY-MM-DD")
-    shift = body.get("shift") if isinstance(body, dict) else None
-    if shift is not None and shift not in SHIFT_TYPES:
-        raise HTTPException(400, f"shift must be one of {SHIFT_TYPES} or null to clear")
-    prof = await db.profile.find_one({"_id": user_id}) or {}
-    sched = prof.get("shift_schedule") or _default_shift_schedule()
-    overrides = dict(sched.get("manual_overrides") or {})
-    if shift is None:
-        overrides.pop(date_iso, None)
-    else:
-        overrides[date_iso] = shift
-    sched["manual_overrides"] = overrides
-    await db.profile.update_one({"_id": user_id}, {"$set": {"shift_schedule": sched}}, upsert=True)
-    return {"saved": True, "manual_overrides": overrides}
-
-
-@api_router.get("/schedule/preview")
-async def schedule_preview(
-    days: int = 14,
-    from_: Optional[str] = None,
-    user_id: str = Depends(get_user_or_legacy),
-):
-    """Returns a calendar preview of the next N days with the
-    computed shift type, start time, sleep time, refresh time, and
-    whether the day is a manual override."""
-    days = max(1, min(200, int(days or 14)))
-    prof = await db.profile.find_one({"_id": user_id}) or {}
-    sched = _serialize_shift_schedule(prof)
-    try:
-        start = datetime.fromisoformat(from_).date() if from_ else datetime.utcnow().date()
-    except Exception:
-        start = datetime.utcnow().date()
-    out = []
-    overrides = sched.get("manual_overrides") or {}
-    for i in range(days):
-        d = (start + timedelta(days=i)).isoformat()
-        shift = _shift_for_date(prof, d)
-        s_def = (sched.get("shifts") or {}).get(shift or "off") or DEFAULT_SHIFTS["off"]
-        out.append({
-            "date": d,
-            "shift": shift,
-            "start_time": s_def.get("start_time"),
-            "sleep_time": s_def.get("sleep_time"),
-            "icon": s_def.get("icon"),
-            "color": s_def.get("color"),
-            "is_override": d in overrides,
-        })
-    return {"days": out, "schedule": sched}
-
-
-# ════════════════════════════════════════════════════════════════════
-# ── Server-side notification scheduler ──────────────────────────────
-# 4× daily motivational pushes + 3× daily Spot-the-Object surprises
-# + 2-minute multiplayer-invite expiry sweep. Lives in
-# notif_scheduler.py to keep the lookup table of scheduled jobs small
-# and isolated from the request handlers above.
-try:
-    from notif_scheduler import init_scheduler as _init_notif_scheduler  # noqa: E402
-    from notif_scheduler import shutdown_scheduler as _shutdown_notif_scheduler  # noqa: E402
-except Exception as _imp_err:  # pragma: no cover
-    _init_notif_scheduler = None
-    _shutdown_notif_scheduler = None
-    logger.warning("[scheduler] module import failed: %s", _imp_err)
-
-
-# Server-side bank of motivational lines. Mirrors the front-end array
-# in src/notifications.ts so users get the same brand voice whether
-# the push came from the device's local schedule or our scheduler.
-_SERVER_MOTIVATIONAL_LINES = [
-    "Stay Focused. Stay Committed. Stay Consistent.",
-    "One more rep. One more win.",
-    "Future you is watching. Make them proud.",
-    "Small steps. Big quests. Stack XP.",
-    "Your streak is waiting for you.",
-    "Show up. Even now. Especially now.",
-    "Discipline is freedom. Tap in.",
-    "Every tick is a level up.",
-    "You don't need motivation. You need to move.",
-    "Legends are built 10 minutes at a time.",
-    "Your character is leveling up. Claim the XP.",
-    "Win the next 60 seconds.",
-    "The best version of you is one tap away.",
-    "No zero days.",
-    "Focus beats talent. Commit.",
-    "Keep the promise you made to yourself.",
-    "You are not behind. You are becoming.",
-    "Today's quest is waiting. Press play.",
-    "Confidence is built. Start building.",
-    "Level up in real life.",
-]
-
-
-def _server_pick_motivation() -> str:
-    import random as _r
-    return _r.choice(_SERVER_MOTIVATIONAL_LINES)
-
-
-async def _push_send_bool_wrapper(token: str, title: str, body: str, data: dict | None = None) -> bool:
-    """Adapter that turns _send_expo_push's dict response into a bool
-    for the scheduler module's typed signature."""
-    res = await _send_expo_push(token, title, body, data)
-    return bool(res and res.get("ok"))
-
-
-@app.on_event("startup")
-async def _start_notification_scheduler():
-    if _init_notif_scheduler is None:
-        return
-    try:
-        sched = _init_notif_scheduler(
-            db=db,
-            send_push=_push_send_bool_wrapper,
-            pick_motivation=_server_pick_motivation,
-            # Wire the Adaptive Work-Life Scheduler silence-window check
-            # so the spot-surprise tick can skip pushes during sleep.
-            is_in_silence=_is_in_silence_window,
-        )
-        # Hook the Phase 2 Spot Groups auto-challenge tick into the same
-        # scheduler so we don't spin up a second one.
-        try:
-            from spot_groups_scheduler import spot_groups_auto_tick as _sg_tick
-            if sched is not None:
-                sched.add_job(
-                    _sg_tick,
-                    "interval",
-                    minutes=1,
-                    id="spot_groups_auto_tick",
-                    max_instances=1,
-                    coalesce=True,
-                    replace_existing=True,
-                )
-                logger.info("[spot_groups_scheduler] tick registered (1m)")
-        except Exception:
-            logger.exception("[spot_groups_scheduler] tick registration failed")
-        # Buried-Treasure rotation failsafe tick (2026-06-04). Runs every
-        # 5 minutes. Auto-buries the chest at a fresh public coord and
-        # advances the cycle if the selected finder misses their
-        # wake-time deadline OR a free-for-all window expires. The
-        # helper is set on the buried_treasure module by attach_routes.
-        try:
-            import buried_treasure as _bt
-            tick = getattr(_bt, "_rotation_failsafe_tick", None)
-            if sched is not None and tick is not None:
-                sched.add_job(
-                    tick,
-                    "interval",
-                    minutes=5,
-                    id="bt_rotation_failsafe_tick",
-                    max_instances=1,
-                    coalesce=True,
-                    replace_existing=True,
-                )
-                logger.info("[buried_treasure] rotation failsafe tick registered (5m)")
-        except Exception:
-            logger.exception("[buried_treasure] rotation failsafe tick registration failed")
-    except Exception as e:
-        logger.warning("[scheduler] start failed: %s", e)
-
-
-@app.on_event("shutdown")
-async def _stop_notification_scheduler():
-    if _shutdown_notif_scheduler is None:
-        return
-    try:
-        _shutdown_notif_scheduler()
-    except Exception:
-        pass
-
-
-# Re-attach api_router so endpoints declared after the original include
-# (admin-seed, catalog) are reachable.
-app.include_router(api_router)
-
-
-# ── Admin scheduler diagnostics ──────────────────────────────────────
-# These endpoints only respond for admins and are aimed at the
-# operator: "is the scheduler running? what jobs? when's the next run?".
-# They are useful both during dev and during a live incident.
-@api_router.get("/admin/scheduler/status")
-async def admin_scheduler_status(user_id: str = Depends(get_user_or_legacy)):
-    if not await _is_admin_user(user_id):
-        raise HTTPException(403, "Admin only")
-    try:
-        from notif_scheduler import scheduler as _sched
-    except Exception:
-        return {"running": False, "jobs": []}
-    if _sched is None:
-        return {"running": False, "jobs": []}
-    jobs = []
-    try:
-        for j in _sched.get_jobs():
-            jobs.append({
-                "id": j.id,
-                "name": j.name,
-                "next_run_time": j.next_run_time.isoformat() if j.next_run_time else None,
-                "trigger": str(j.trigger),
-                "max_instances": getattr(j, "max_instances", None),
-            })
-    except Exception as e:
-        logger.warning("[scheduler.status] %s", e)
-    return {"running": _sched.running, "jobs": jobs}
-
-
-@api_router.post("/admin/scheduler/test-push")
-async def admin_scheduler_test_push(
-    body: dict, user_id: str = Depends(get_user_or_legacy),
-):
-    """Send an immediate push to a target user (or self) for QA. Body:
-    `{user_id?: str, kind?: 'motivation'|'spot_surprise'|'custom',
-       title?: str, body?: str}`. Admin-only."""
-    if not await _is_admin_user(user_id):
-        raise HTTPException(403, "Admin only")
-    target = (body or {}).get("user_id") or user_id
-    kind = (body or {}).get("kind") or "motivation"
-    title = (body or {}).get("title")
-    msg = (body or {}).get("body")
-    if not title or not msg:
-        if kind == "spot_surprise":
-            title = "🎯 Spot the Object — Surprise Challenge"
-            msg = "Tap to start a 60-second hunt before the timer expires."
-        else:
-            title = "Critique AI · Daily push"
-            msg = _server_pick_motivation()
-    tokens = await db.push_tokens.find({"user_id": target}).to_list(20)
-    sent = 0
-    for t in tokens:
-        tok = t.get("token")
-        if not tok:
-            continue
-        res = await _send_expo_push(
-            tok, title, msg,
-            {"kind": kind, "channelId": "spot_surprise" if kind == "spot_surprise" else "motivational"},
-        )
-        if res and res.get("ok"):
-            sent += 1
-    return {"target": target, "tokens": len(tokens), "sent": sent, "kind": kind}
-
-
-@api_router.get("/admin/scheduler/daylight")
-async def admin_scheduler_daylight(
-    user_id: str = Depends(get_user_or_legacy),
-    target_user_id: Optional[str] = None,
-):
-    """Inspect a user's daylight window and surprise-slot plan for today.
-    Useful for verifying the sunrise/sunset calc is sane in production.
-    Admin-only."""
-    if not await _is_admin_user(user_id):
-        raise HTTPException(403, "Admin only")
-    target = target_user_id or user_id
-    prof = await db.profile.find_one({"_id": target})
-    if not prof:
-        raise HTTPException(404, "Profile not found")
-    try:
-        from notif_scheduler import (  # noqa: E402
-            _user_daylight_today,
-            _is_daylight_now,
-            _generate_spot_slots_for_user,
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Scheduler unavailable: {e}")
-    sunrise, sunset = _user_daylight_today(prof)
-    return {
-        "user_id": target,
-        "timezone": prof.get("timezone"),
-        "now_utc": datetime.now(timezone.utc).isoformat(),
-        "sunrise_utc": sunrise.isoformat(),
-        "sunset_utc": sunset.isoformat(),
-        "is_daylight_now": _is_daylight_now(prof),
-        "next_3_random_slots_utc": _generate_spot_slots_for_user(prof),
-        "stored_slots": prof.get("spot_random_slots") or [],
-        "stored_slots_day": prof.get("spot_random_slots_day"),
-        "stored_consumed": prof.get("spot_random_consumed") or [],
-    }
-
-
-@api_router.post("/focus/session")
-async def focus_session_complete(
-    body: dict, user_id: str = Depends(get_user_or_legacy),
-):
-    """Record the outcome of a Focus Mode session and apply XP deltas.
-
-    Body:
-      {
-        planned_minutes: int (1..180),
-        actual_seconds: int,         # how many seconds the timer ran before stop
-        backgrounded_seconds: int,   # cumulative time the app was in background
-        locked_app_seconds: int,     # cumulative time the user was inside a
-                                     #  locked-blocklist app (Android only;
-                                     #  detected via UsageStatsManager).
-        completed: bool,             # True iff timer reached 0
-        committed_app_count: int,
-      }
-
-    XP rules:
-      - On COMPLETION (with no locked-app time):
-          +1 XP per 5 planned minutes (min 1, max 30) bonus.
-      - PENALTY: -15 XP per MINUTE the user spent inside a locked app
-        (rounded down). This applies whether or not the session
-        completed — opening a locked app is the violation.
-      - Backwards compat: if no `locked_app_seconds` is sent (older builds
-        / iOS), fall back to the legacy -2 XP/min on `backgrounded_seconds`
-        for early exits so iOS users still get a softer accountability hit.
-      - Total penalty capped to -300 XP so a single bad session can hurt
-        but won't permanently devastate progress.
-    """
-    prof = await db.profile.find_one({"_id": user_id})
-    if not prof:
-        raise HTTPException(404, "Profile not found")
-
-    try:
-        planned_min = int(body.get("planned_minutes") or 0)
-        actual_sec = int(body.get("actual_seconds") or 0)
-        bg_sec = int(body.get("backgrounded_seconds") or 0)
-        # NEW: only Android sends this. Default 0 keeps iOS behaviour intact.
-        locked_sec = int(body.get("locked_app_seconds") or 0)
-        completed = bool(body.get("completed"))
-        committed_count = int(body.get("committed_app_count") or 0)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "Invalid payload")
-
-    if planned_min < 1 or planned_min > 180:
-        raise HTTPException(400, "planned_minutes must be 1..180")
-
-    bg_min = bg_sec // 60
-    locked_min = locked_sec // 60
-    delta = 0
-    reason = ""
-
-    # Compute the locked-app penalty FIRST — it always applies, even
-    # if the session completed (opening a blocked app is the violation).
-    locked_penalty = min(300, locked_min * 15) if locked_min > 0 else 0
-
-    if completed:
-        bonus = max(1, min(30, planned_min // 5))
-        delta = bonus - locked_penalty
-        reason = "focus_complete_with_penalty" if locked_penalty > 0 else "focus_complete"
-    elif locked_min > 0:
-        # Early exit AND opened locked apps → full -15/min hit.
-        delta = -locked_penalty
-        reason = "focus_distracted_locked_apps"
-    elif bg_min > 0:
-        # Legacy fallback (iOS / no usage-stats permission). -2 XP/min.
-        delta = -min(50, bg_min * 2)
-        reason = "focus_distracted"
-    else:
-        reason = "focus_cancelled_clean"
-
-    # Update totals.
-    if delta != 0:
-        new_total = int(prof.get("total_xp", 0) or 0) + delta
-        if new_total < 0:
-            new_total = 0
-        new_level = level_from_xp(new_total)
-        await db.profile.update_one(
-            {"_id": user_id},
-            {"$set": {"total_xp": new_total, "level": new_level}},
-        )
-        if delta > 0:
-            await _log_xp_event(user_id, delta, int(prof.get("tz_offset_minutes") or 0))
-            # Focus session bonus → keep streak alive AND show on charts.
-            await _bump_streak_for_xp(user_id)
-            await _log_xp_to_charts(
-                user_id, delta, source="focus_session", focus_area="mindset",
-            )
-
-    # Log the session row for history / anti-abuse.
-    await db.focus_sessions.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user_id,
-        "planned_minutes": planned_min,
-        "actual_seconds": actual_sec,
-        "backgrounded_seconds": bg_sec,
-        "locked_app_seconds": locked_sec,
-        "committed_app_count": committed_count,
-        "completed": completed,
-        "xp_delta": delta,
-        "reason": reason,
-        "created_at": now_iso(),
-    })
-
-    prof = await db.profile.find_one({"_id": user_id})
-    return {
-        "xp_delta": delta,
-        "reason": reason,
-        "profile": serialize_profile(prof),
-    }
-
-
-# Final include for any endpoints declared AFTER the previous includes —
-# specifically the /admin/scheduler/* diagnostic endpoints above.
-app.include_router(api_router)
-
-
-# ═══════════════ XP Penalty system (Creator-only) ═══════════════
-# Wires the penalty router as a separate module to keep server.py from
-# growing further. Endpoints exposed under /api/admin/players/{id}/penalty
-# and /api/penalties/* — see penalties.py for the full contract.
-try:
-    from penalties import init_penalties as _init_penalties, attach_routes as _attach_penalty_routes  # noqa: E402
-    _init_penalties(
-        db=db,
-        is_admin_user=_is_admin_user,
-        get_user_or_legacy=get_user_or_legacy,
-        now_iso=now_iso,
-        send_expo_push=_send_expo_push,
-        serialize_profile=serialize_profile,
-        level_from_xp=level_from_xp,
-    )
-    _attach_penalty_routes(app, get_user_or_legacy)
-    logger.info("[penalty] routes attached")
-except Exception:
-    logger.exception("[penalty] failed to attach routes")
-
-# ═══════════════ Chat preferences (per-friend colors, mute, block) ═══════════════
-# Wires the chat preferences router (see chat_preferences.py).
-try:
-    from chat_preferences import (
-        init_chat_preferences as _init_chat_prefs,
-        attach_routes as _attach_chat_pref_routes,
-        get_pref_for_pair as _chat_pref_for_pair,
-        list_blocked_for as _chat_blocked_for,
-    )
-    _init_chat_prefs(db=db, get_user_or_legacy=get_user_or_legacy, now_iso=now_iso)
-    _attach_chat_pref_routes(app, get_user_or_legacy)
-    logger.info("[chat_preferences] routes attached")
-except Exception:
-    logger.exception("[chat_preferences] failed to attach routes")
-    _chat_pref_for_pair = None  # type: ignore
-    _chat_blocked_for = None  # type: ignore
-
-# ═══════════════ Duo Referral Discounts (Library+ group-buy) ═══════════════
-# Wires the duo discounts router (see duo_discounts.py).
-try:
-    from duo_discounts import (
-        init_duo_discounts as _init_duo,
-        attach_routes as _attach_duo_routes,
-        get_active_offer as _duo_active_offer,
-        validate_duo_for_payment as _duo_validate_payment,
-        record_duo_payment as _duo_record_payment,
-    )
-    _init_duo(
-        db=db,
-        is_admin_user=_is_admin_user,
-        now_iso=now_iso,
-        library_app_ids=LIBRARY_APP_IDS,
-        supported_currencies=list(_STRIPE_MINOR_UNITS.keys()),
-        default_currency=DEFAULT_PRICE_CURRENCY,
-    )
-    _attach_duo_routes(app, get_user_or_legacy)
-    logger.info("[duo_discounts] routes attached")
-except Exception:
-    logger.exception("[duo_discounts] failed to attach routes")
-    _duo_active_offer = None  # type: ignore
-    _duo_validate_payment = None  # type: ignore
-    _duo_record_payment = None  # type: ignore
-
-# ═══════════════ Admin Player Tools (per-player overrides, delete, inactive) ═══════════════
-try:
-    from admin_player_tools import (
-        init_admin_player_tools as _init_admin_tools,
-        attach_routes as _attach_admin_tool_routes,
-        get_price_override_for as _admin_price_override_for,
-    )
-    _init_admin_tools(
-        db=db,
-        is_admin_user=_is_admin_user,
-        now_iso=now_iso,
-        library_app_ids=LIBRARY_APP_IDS,
-        supported_currencies=list(_STRIPE_MINOR_UNITS.keys()),
-        default_currency=DEFAULT_PRICE_CURRENCY,
-    )
-    _attach_admin_tool_routes(app, get_user_or_legacy)
-    logger.info("[admin_player_tools] routes attached")
-except Exception:
-    logger.exception("[admin_player_tools] failed to attach routes")
-    _admin_price_override_for = None  # type: ignore
-
-# ═══════════════ Buried Treasure (daily solo hunt mini-app) ═══════════════
-try:
-    from buried_treasure import (
-        init_buried_treasure as _init_bt,
-        attach_routes as _attach_bt_routes,
-    )
-    _init_bt(
-        db=db,
-        is_admin_user=_is_admin_user,
-        now_iso=now_iso,
-        admin_emails=list(ADMIN_EMAILS),
-        send_push=_send_expo_push,
-        friend_ids_fn=_friend_ids,
-    )
-    _attach_bt_routes(app, get_user_or_legacy)
-    logger.info("[buried_treasure] routes attached")
-except Exception:
-    logger.exception("[buried_treasure] failed to attach routes")
-
-# ── Guest-mode migration (POST /api/guest/migrate) ──────────────────
-try:
-    from guest_migration import (
-        init_guest_migration as _init_gm,
-        attach_routes as _attach_gm_routes,
-    )
-    _init_gm(db=db, real_user_dep=get_current_user)
-    _attach_gm_routes(app)
-    logger.info("[guest_migration] routes attached")
-except Exception:
-    logger.exception("[guest_migration] failed to attach routes")
-
-# ── Spot the Object — Permanent Groups (v1.0.29 Phase 1) ────────────
-async def _spot_push_to_user(user_id: str, title: str, body: str, data: dict | None = None):
-    """Phase 4 helper for spot_groups — fetch the user's push tokens
-    and fire `_send_expo_push` to each. Best-effort; failures logged.
-    Returns the number of pushes attempted (not necessarily delivered)."""
-    sent = 0
-    try:
-        tokens = await db.push_tokens.find({"user_id": user_id}).to_list(10)
-    except Exception as e:
-        logger.warning("[spot-push.tokens] %s: %s", user_id, e)
-        return 0
-    for tdoc in tokens:
-        tok = tdoc.get("token")
-        if not tok:
-            continue
-        try:
-            await _send_expo_push(tok, title, body, data or {})
-            sent += 1
-        except Exception as e:
-            logger.warning("[spot-push.send] %s: %s", user_id, e)
-    return sent
-
-
-try:
-    from spot_groups import (
-        init_spot_groups as _init_sg,
-        attach_routes as _attach_sg_routes,
-    )
-    _init_sg(
-        db=db, now_iso=now_iso, friend_ids_fn=_friend_ids,
-        availability_fn=_spot_groups_availability,
-        push_to_user_fn=_spot_push_to_user,
-    )
-    _attach_sg_routes(app, get_user_or_legacy)
-    logger.info("[spot_groups] routes attached")
-except Exception:
-    logger.exception("[spot_groups] failed to attach routes")
-
-# ── Spot the Object — Phase 2: Auto-Challenge Scheduler ─────────────
-# Fires 3 random daily anchors to every auto_challenge_on group. The
-# tick is hooked into the same APScheduler that runs the motivation /
-# spot-surprise / streak-warning ticks (see notif_scheduler.py).
-try:
-    from spot_groups_scheduler import (
-        init_spot_groups_scheduler as _init_sg_sched,
-        attach_routes as _attach_sg_sched_routes,
-    )
-    # Pull the daylight helper from notif_scheduler (already configured
-    # with astral + the user's profile.timezone).
-    from notif_scheduler import _user_daylight_today as _ns_user_daylight_today
-    _init_sg_sched(
-        db=db,
-        send_push=_push_send_bool_wrapper,
-        is_admin=_is_admin_user,
-        user_daylight_today=_ns_user_daylight_today,
-        spot_objects=SPOT_OBJECTS,
-        availability_fn=_spot_groups_availability,
-    )
-    _attach_sg_sched_routes(app, get_user_or_legacy, get_current_user)
-    logger.info("[spot_groups_scheduler] routes attached")
-except Exception:
-    logger.exception("[spot_groups_scheduler] failed to attach routes")

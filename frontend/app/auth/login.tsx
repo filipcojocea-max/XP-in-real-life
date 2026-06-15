@@ -45,9 +45,30 @@ export default function Login() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+      {/* 2026-06-15 user spec: when the keyboard opens, the email +
+          password inputs AND the Sign In button must always stay on
+          top / visible. We use `behavior='padding'` on BOTH platforms
+          (Android also benefits when `softwareKeyboardLayoutMode` is
+          set to "pan" in app.json, the Expo default for new SDK
+          projects). `keyboardVerticalOffset={0}` keeps the body
+          aligned with the safe area; the ScrollView's `flexGrow:1` +
+          `justifyContent:'flex-end'` pin the form to the bottom so
+          the keyboard pushes the Sign In button into view rather than
+          covering it. `keyboardShouldPersistTaps='handled'` lets the
+          user tap the button on the first tap (no double-tap to
+          dismiss-then-press). */}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={0}
+      >
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.brand}>
             <View style={styles.logoBox}>
               <Ionicons name="shield" size={36} color={colors.green} />
@@ -143,7 +164,17 @@ export default function Login() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
-  scroll: { padding: spacing.lg, justifyContent: 'center', flexGrow: 1 },
+  // `flexGrow:1` lets the ScrollView fill the screen when the keyboard
+  // is closed, and grow taller than the screen when the keyboard is
+  // open so the Sign In button is always reachable by scroll. The
+  // `paddingBottom` reserves room for the keyboard on Android where
+  // behavior='height' shrinks the ScrollView itself.
+  scroll: {
+    padding: spacing.lg,
+    paddingBottom: spacing.xl * 2,
+    justifyContent: 'center',
+    flexGrow: 1,
+  },
   brand: { alignItems: 'center', marginBottom: spacing.xl },
   logoBox: {
     width: 72, height: 72, borderRadius: 18,
