@@ -371,6 +371,13 @@ function LobbyView({
 function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void }) {
   const router = useRouter();
   const [gps, setGPS] = useState<{ lat: number; lng: number } | null>(null);
+  // 2026-06-17: stable initial centre — captured from the FIRST GPS
+  // fix only and never mutated, so BTLeafletMap's WebView mounts ONCE
+  // and finishes tile-loading reliably. The Buried-Treasure Groups
+  // screen was crashing on open because each parent re-render (the
+  // 4-second poll in GroupScreen) was bouncing `initialLat` and
+  // forcing the WebView to remount mid-tile-fetch on Android.
+  const [initialCenter, setInitialCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [mapShot, setMapShot] = useState<string | null>(null);
   const [spotPhoto, setSpotPhoto] = useState<string | null>(null);
   const [camOpen, setCamOpen] = useState(false);
@@ -383,7 +390,12 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
     (async () => {
       await Location.requestForegroundPermissionsAsync();
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }).catch(() => null);
-      if (!cancelled && pos) setGPS({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      if (!cancelled && pos) {
+        const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setGPS(next);
+        // Lock the initial map centre on FIRST fix only (idempotent).
+        setInitialCenter((prev) => prev || next);
+      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -467,17 +479,25 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
       {/* Map preview + capture */}
       <View style={styles.card}>
         <Text style={styles.cardKicker}>1 · MAP SNAPSHOT</Text>
-        {gps ? (
+        {initialCenter ? (
           <View style={styles.miniMap}>
             <BTLeafletMap
               ref={mapRef}
               mode="static"
-              initialLat={gps.lat}
-              initialLng={gps.lng}
+              initialLat={initialCenter.lat}
+              initialLng={initialCenter.lng}
               initialZoom={17}
               initialRadius={15}
               ringColor="#FFD166"
               markerColor="#FFD166"
+              onReady={() => {
+                // Drop the live "you are here" dot immediately on
+                // first WebView ready — keeps the map mount stable
+                // (no prop-change re-render).
+                if (gps) {
+                  try { mapRef.current?.setUserLocation(gps.lat, gps.lng); } catch {}
+                }
+              }}
               style={StyleSheet.absoluteFill}
             />
           </View>
