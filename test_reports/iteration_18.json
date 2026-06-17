@@ -1,0 +1,34 @@
+{
+  "summary": "Iter18 backend-only verification of POST /api/tasks per-player quest cap fix. All 6 in-scope scenarios + iter17 regression pass (7/7 tests, 100% backend success). Default cap=11 enforced for fresh users; admin-raised goal_quest_max=20 honored (21st blocked with '20-quest limit'); lowered cap=5 blocks new creates without deleting existing quests; admin (filip.cojocea122@gmail.com) bypasses the cap entirely (13/13 quests created). Goal-cap regression intact (8-active default). Iter17 endpoints /api/spot/finds + /api/bt/no-go-zones still 200. Backend reload during test execution did not break any flow.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter18_quest_cap.py",
+    "/app/test_reports/pytest/iter18_quest_cap.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "create_task uses profile.goal_quest_max with safe fallback to MAX_CUSTOM_TASKS (11) and a <1 guard — clean.",
+    "Note: admin-set endpoint allows 1..500 but spec mentions 'up to 20' — this is a deliberate range, not a bug. Confirmed by existing comment at server.py:4540.",
+    "Lowering cap is non-destructive (no delete of existing quests) — matches the 'blocked from adding more' spec. Verified by GET /api/tasks before/after."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter18_quest_cap.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (7/7)",
+    "frontend": "n/a (backend-only request)"
+  },
+  "seed_data_creation": "Created 3 fresh non-admin test users (TEST_<scenario>_<uuid>@gmail.com): defcap (11 quests), raised (20 quests), lowered (7 quests). Admin's 13 TEST_admin_bypass_* quests are cleaned up in test teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Test file /app/backend/tests/test_iter18_quest_cap.py covers the POST /api/tasks per-user quest cap. It expects BASE_URL from EXPO_PUBLIC_BACKEND_URL or EXPO_BACKEND_URL; supervisor doesn't auto-export these so prepend the env var when running: EXPO_PUBLIC_BACKEND_URL=https://emergent-mobile-app-4.preview.emergentagent.com pytest backend/tests/test_iter18_quest_cap.py -v. GET /api/tasks returns {date, tasks:[...], order_source_date, adaptive_order} — not a bare list. Goal cap detail is a structured dict {error, message, limit}; quest cap detail is a plain string."
+}

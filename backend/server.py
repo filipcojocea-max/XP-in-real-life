@@ -1844,12 +1844,23 @@ async def list_tasks(date: Optional[str] = None, user_id: str = Depends(get_user
 
 @api_router.post("/tasks")
 async def create_task(body: TaskCreate, user_id: str = Depends(get_user_or_legacy)):
-    # enforce 11-custom-task limit per-user (defaults don't count)
+    # Per-user quest cap. Default is MAX_CUSTOM_TASKS (11), but Creator
+    # can raise this to anything up to 20 via /admin/players/{id}/goal-quest-max
+    # which writes profile.goal_quest_max. Admins themselves bypass entirely.
+    is_admin = await _is_admin_user(user_id)
+    user_prof = await db.profile.find_one({"_id": user_id}, {"goal_quest_max": 1}) or {}
+    try:
+        quest_limit = int(user_prof.get("goal_quest_max") or MAX_CUSTOM_TASKS)
+    except (TypeError, ValueError):
+        quest_limit = MAX_CUSTOM_TASKS
+    if quest_limit < 1:
+        quest_limit = MAX_CUSTOM_TASKS
+
     custom_count = await db.tasks.count_documents({"user_id": user_id, "is_default": {"$ne": True}})
-    if custom_count >= MAX_CUSTOM_TASKS:
+    if custom_count >= quest_limit and not is_admin:
         raise HTTPException(
             400,
-            f"You've hit the {MAX_CUSTOM_TASKS}-quest limit. Delete a custom quest before adding another.",
+            f"You've hit the {quest_limit}-quest limit. Delete a custom quest before adding another.",
         )
     task = {
         "id": str(uuid.uuid4()),
