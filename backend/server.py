@@ -5988,6 +5988,27 @@ async def spot_complete(body: SpotCompletePayload, user_id: str = Depends(get_us
     }
 
 
+@api_router.get("/spot/finds")
+async def spot_finds(user_id: str = Depends(get_user_or_legacy), limit: int = 100):
+    """Return the caller's own Spot-the-Object completions (past finds).
+    Mirrors /spot/feed but filtered to the calling user, used by the
+    'My Past Finds' grid in the Spot mini-app."""
+    cur = (
+        db.spot_completions.find({"user_id": user_id})
+        .sort("taken_at", -1)
+        .limit(int(max(1, min(500, limit))))
+    )
+    finds: list = []
+    async for e in cur:
+        e.pop("_id", None)
+        e["liked_by_you"] = user_id in (e.get("likes") or [])
+        e["like_count"] = len(e.get("likes") or [])
+        e["comment_count"] = len(e.get("comments") or [])
+        e["is_self"] = True
+        finds.append(e)
+    return {"finds": finds, "count": len(finds)}
+
+
 @api_router.get("/spot/feed")
 async def spot_feed(user_id: str = Depends(get_user_or_legacy), limit: int = 50):
     """Return recent Spot entries from self + accepted friends (gallery)."""

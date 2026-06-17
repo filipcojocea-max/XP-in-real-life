@@ -1,0 +1,38 @@
+{
+  "summary": "Validated two new endpoint sets: GET /api/spot/finds and the no-go-zones CRUD (GET/POST/DELETE /api/bt/no-go-zones). Discovered & fixed one CRITICAL backend bug: the POST /api/bt/no-go-zones route's Pydantic body model (_NoGoZoneBody / _ZonePoint) was defined locally inside attach_routes() — under FastAPI 0.110 + pydantic 2.13 this breaks ForwardRef resolution and FastAPI silently re-classified the body param as a query parameter, returning 422 'missing body' on every POST. Moved both models to module level (renamed NoGoZonePoint / NoGoZoneBody) and added explicit Body(...) annotation. After the fix all 13 tests in the new suite pass, and the full iter16 P1 suite (14 tests) still passes — no regressions.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter17_spot_finds_no_go_zones.py",
+    "/app/test_reports/pytest/iter17_spot_finds_no_go_zones.xml"
+  ],
+  "action_items": [
+    "Fix applied in /app/backend/buried_treasure.py: moved Pydantic models to module level (NoGoZonePoint, NoGoZoneBody) and added Body(...) on POST handler. Main agent should review the diff and confirm naming is acceptable; the underscored-private names were dropped because they are now part of the module API surface.",
+    "Consider adding this 'always declare FastAPI BaseModels at module scope' rule to coding guidelines — same trap could bite other locally-scoped routes in buried_treasure.py if any get added later."
+  ],
+  "critical_code_review_comments": [
+    "Pydantic v2 + FastAPI: BaseModel subclasses used as route-body types MUST be module-level. Defining them inside a function leads to silent 422 responses (FastAPI falls back to treating the param as a query) — production-critical bug.",
+    "/app/backend/buried_treasure.py is 2614 lines — well over the 700-line guideline. Recommend splitting into submodules (routes/, models/, rotation/) in a future refactor."
+  ],
+  "updated_files": [
+    "/app/backend/buried_treasure.py",
+    "/app/backend/tests/test_iter17_spot_finds_no_go_zones.py"
+  ],
+  "success_rate": {
+    "backend": "100% (13/13 new tests + 14/14 iter16 regression)",
+    "frontend": "N/A — backend-only test scope"
+  },
+  "seed_data_creation": "Test creates and then deletes its own no-go-zone (TEST_zone_iter17). One throwaway non-admin user registered per test run (TEST_nogo_<uuid>@gmail.com) for the 403 auth checks — left in DB but harmless.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 17 validates /api/spot/finds and /api/bt/no-go-zones CRUD with admin + non-admin auth. Fixed pydantic ForwardRef bug. Re-running /app/backend/tests/test_iter17_spot_finds_no_go_zones.py provides full coverage of the two new endpoint sets plus iter16 P1 regression.",
+  "rca_of_issue": "BUG: POST /api/bt/no-go-zones returned 422 'missing body' (and 500 with Body(...) hint added) because Pydantic models _ZonePoint and _NoGoZoneBody were declared inside attach_routes(). REPRO: send valid POST with admin token → 422 with loc=['query','body']. ROOT CAUSE: FastAPI 0.110 calls pydantic.TypeAdapter on the param annotation; pydantic 2.13 cannot resolve ForwardRef('_NoGoZoneBody') because it lives in a closed function namespace, so it raises PydanticUserError 'class-not-fully-defined' and FastAPI falls back to treating the param as a query string. MITIGATION: moved both models to module scope (renamed NoGoZonePoint, NoGoZoneBody) and added explicit Body(...) on the POST signature for clarity. Backend reloaded; all 13 tests now pass."
+}

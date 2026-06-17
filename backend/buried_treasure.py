@@ -91,6 +91,19 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+
+# ── shared Pydantic models (must be module-level for FastAPI/Pydantic v2
+#    ForwardRef resolution to work; locally-defined BaseModels break) ──
+class NoGoZonePoint(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
+
+
+class NoGoZoneBody(BaseModel):
+    name: str = Field(default="", max_length=200)
+    polygon: list[NoGoZonePoint] = Field(default_factory=list)
+
+
 # ── module-level wiring (set by init_buried_treasure) ────────────────
 _db = None
 _now_iso = None
@@ -2541,6 +2554,69 @@ def attach_routes(app, get_user_or_legacy):
     globals()["_rotation_init"] = _rotation_init
     globals()["_select_next_finder"] = _select_next_finder
     globals()["_advance_after_hide"] = _advance_after_hide
+
+    # ── No-Go Zones (Creator-only CRUD, 2026-06-17) ──────────────────
+    # Polygonal exclusion zones. Chest pickers consult `bt_no_go_zones`
+    # before placing a new chest; any candidate point that falls inside
+    # an active polygon is rejected. Stored shape:
+    #   { _id: uuid, name: str, polygon: [{lat, lng}, ...],
+    #     created_by: user_id, created_at: ISO }
+    # NOTE: Pydantic models are defined at module level (NoGoZonePoint,
+    # NoGoZoneBody) because locally-defined BaseModels break FastAPI's
+    # ForwardRef resolution under pydantic v2.
+
+    async def _require_admin(user_id: str):
+        admin_ids = await _resolve_admin_ids()
+        if user_id not in admin_ids:
+            raise HTTPException(403, "Creator only.")
+
+    @router.get("/bt/no-go-zones")
+    async def no_go_zones_list(user_id: str = Depends(get_user_or_legacy)):
+        await _require_admin(user_id)
+        cur = _db.bt_no_go_zones.find({}).sort("created_at", -1)
+        zones: list[dict] = []
+        async for z in cur:
+            zones.append({
+                "id": z.get("_id"),
+                "name": z.get("name") or "",
+                "polygon": z.get("polygon") or [],
+                "created_by": z.get("created_by"),
+                "created_at": z.get("created_at"),
+            })
+        return {"zones": zones}
+
+    @router.post("/bt/no-go-zones")
+    async def no_go_zones_create(
+        body: NoGoZoneBody = Body(...),
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        await _require_admin(user_id)
+        if len(body.polygon) < 3:
+            raise HTTPException(400, "Polygon must have at least 3 points.")
+        zid = str(uuid.uuid4())
+        doc = {
+            "_id": zid,
+            "name": (body.name or "").strip(),
+            "polygon": [{"lat": p.lat, "lng": p.lng} for p in body.polygon],
+            "created_by": user_id,
+            "created_at": _now_iso(),
+        }
+        await _db.bt_no_go_zones.insert_one(doc)
+        return {
+            "id": zid,
+            "name": doc["name"],
+            "polygon": doc["polygon"],
+            "created_at": doc["created_at"],
+        }
+
+    @router.delete("/bt/no-go-zones/{zone_id}")
+    async def no_go_zones_delete(
+        zone_id: str,
+        user_id: str = Depends(get_user_or_legacy),
+    ):
+        await _require_admin(user_id)
+        res = await _db.bt_no_go_zones.delete_one({"_id": zone_id})
+        return {"deleted": int(res.deleted_count or 0)}
 
     app.include_router(router)
     logger.info("[buried_treasure] routes attached (v2 — solo + groups)")
