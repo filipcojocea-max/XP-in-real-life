@@ -98,11 +98,22 @@ export default function GroupScreen() {
   }, [group, togglingNotif]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
-  // Poll every 4 s so accept/reject/bury propagates to all members.
+  // 2026-06-17 fix — Groups page was reloading every 4 s causing:
+  //   (1) the visible "flash / black-then-reload" loop the user reported, and
+  //   (2) BuryView's BTLeafletMap WebView to remount mid-tile-fetch, crashing
+  //       Android within ~2 s of opening Bury Treasure.
+  // The poll was only there to propagate accept/reject/bury between members —
+  // we now skip it entirely when the user is inside the bury / hunting view
+  // (where the WebView is mounted) AND lengthen the interval to 12 s for
+  // lobby/finished views where reloads are harmless. useFocusEffect already
+  // handles the first-load / return-to-screen cases.
   useEffect(() => {
-    const t = setInterval(load, 4000);
+    if (!group) return;
+    const isMapView = group.status === 'bury' || group.status === 'hunting';
+    if (isMapView) return; // never poll while map is mounted
+    const t = setInterval(load, 12000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, group?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // GPS watcher — only needed in bury or hunting view.
   useEffect(() => {
