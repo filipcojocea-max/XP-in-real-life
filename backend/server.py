@@ -8139,6 +8139,229 @@ async def _backfill_spot_random_enabled_default():
         logger.warning(f"[migrate] backfill onboarding_tz_done failed: {e}")
 
 
+# ──────────────────────────────────────────────────────────────────
+# Buried Treasure module wiring (2026-06-15 regression fix)
+# ──────────────────────────────────────────────────────────────────
+# Every /api/bt/* endpoint (settings, schedule, finds, groups, etc.)
+# is declared inside `buried_treasure.attach_routes(app, dep)`. That
+# function was never being called from server.py — which is why the
+# Buried Treasure mini-app was forcing the user to pick a hunt area
+# again on every launch (the saved area is loaded via GET /bt/settings,
+# which was returning 404).
+@app.on_event("startup")
+async def _wire_buried_treasure_module():
+    try:
+        from buried_treasure import init_buried_treasure, attach_routes
+
+        async def _bt_send_push(token: str, title: str, body: str, data: dict | None = None):
+            """Thin adapter to the existing per-token Expo push helper.
+            buried_treasure passes (token, title, body, data); we forward."""
+            try:
+                await _send_expo_push(token, title, body, data or {})
+            except Exception as e:
+                logger.warning("[bt][push] %s", e)
+
+        init_buried_treasure(
+            db=db,
+            now_iso=now_iso,
+            send_push=_bt_send_push,
+            friend_ids_fn=_friend_ids,
+            admin_emails=list(ADMIN_EMAILS),
+        )
+        attach_routes(app, get_user_or_legacy)
+        logger.info("[startup] Buried Treasure module wired (init + attach_routes)")
+    except Exception:
+        logger.exception("[startup] Buried Treasure wiring failed")
+
+
+# ──────────────────────────────────────────────────────────────────
+# Adaptive Work-Life Scheduler endpoints (2026-06-15 regression fix)
+# ──────────────────────────────────────────────────────────────────
+# The frontend has always called api.scheduleGet / schedulePut /
+# scheduleReset / scheduleDayOverride / schedulePreview against the
+# `/schedule*` paths, but the matching server handlers were never
+# wired — every call returned 404 "Not Found", surfacing in the app
+# as "Could not load schedule – Not Found" on the Profile → Adaptive
+# Work-Life Scheduler row.
+#
+# Storage model is unchanged: the schedule lives entirely inside
+# `profile.shift_schedule` (a sub-dict). We re-use the existing
+# helpers `_default_shift_schedule`, `_serialize_shift_schedule`, and
+# `_shift_for_date` so the data layout matches whatever the rest of
+# the codebase (day-boundary calc, BT failsafe ticks, etc.) already
+# reads from.
+
+class _ScheduleDayOverrideBody(BaseModel):
+    # `null` clears the override for that date so the rotating
+    # pattern takes over again — matches the frontend contract.
+    shift: Optional[str] = None
+
+
+@api_router.get("/schedule")
+async def schedule_get(user_id: str = Depends(get_user_or_legacy)):
+    """Return the caller's full Adaptive Work-Life Scheduler doc.
+    Defaults are merged on top of whatever is stored so the response
+    always has the complete `ShiftSchedule` shape the frontend
+    expects (no missing keys → no client-side crashes)."""
+    prof = await db.profile.find_one({"_id": user_id}, {"shift_schedule": 1})
+    return {"schedule": _serialize_shift_schedule(prof)}
+
+
+@api_router.put("/schedule")
+async def schedule_put(
+    payload: dict = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Save partial updates to the schedule. Whitelist-merge — keys
+    we don't recognise are dropped silently so old clients can keep
+    sending fields the server doesn't yet know about without 400ing."""
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Body must be a JSON object")
+    allowed = {
+        "enabled", "pattern_kind", "setup_complete", "pattern",
+        "pattern_start_date", "shifts", "refresh_offset_hours",
+        "manual_overrides",
+    }
+    prof = await db.profile.find_one({"_id": user_id}, {"shift_schedule": 1}) or {}
+    current = _serialize_shift_schedule(prof)
+    next_doc = dict(current)
+    for k, v in payload.items():
+        if k in allowed and v is not None:
+            next_doc[k] = v
+    # Light validation — keep it permissive but reject obvious garbage
+    # so a typo can't silently disable the schedule.
+    if next_doc.get("pattern_kind") not in ("weekly", "rotating"):
+        next_doc["pattern_kind"] = "rotating"
+    if not isinstance(next_doc.get("pattern"), list):
+        next_doc["pattern"] = []
+    pattern = [str(s).lower() for s in next_doc["pattern"]]
+    pattern = [s for s in pattern if s in SHIFT_TYPES]
+    if next_doc.get("pattern_kind") == "weekly" and pattern and len(pattern) != 7:
+        # The wizard might send a length-7 array; never crash on a
+        # transient draft state.
+        pattern = (pattern + ["off"] * 7)[:7]
+    next_doc["pattern"] = pattern
+    # Per-shift validation — keep keys to a known whitelist.
+    shifts = next_doc.get("shifts") or {}
+    if isinstance(shifts, dict):
+        clean: dict = {}
+        for k in SHIFT_TYPES:
+            v = shifts.get(k) or {}
+            if not isinstance(v, dict):
+                continue
+            clean[k] = {
+                "start_time": str(v.get("start_time") or DEFAULT_SHIFTS[k]["start_time"]),
+                "sleep_time": str(v.get("sleep_time") or DEFAULT_SHIFTS[k]["sleep_time"]),
+                "icon":  str(v.get("icon")  or DEFAULT_SHIFTS[k]["icon"]),
+                "color": str(v.get("color") or DEFAULT_SHIFTS[k]["color"]),
+            }
+        next_doc["shifts"] = clean or _default_shift_schedule()["shifts"]
+    # Manual overrides: keep only YYYY-MM-DD keys with valid shift values.
+    overrides = next_doc.get("manual_overrides") or {}
+    if isinstance(overrides, dict):
+        cleaned_ov: dict = {}
+        import re as _re
+        for k, v in overrides.items():
+            if not isinstance(k, str) or not _re.match(r"^\d{4}-\d{2}-\d{2}$", k):
+                continue
+            if v in SHIFT_TYPES:
+                cleaned_ov[k] = v
+        next_doc["manual_overrides"] = cleaned_ov
+    else:
+        next_doc["manual_overrides"] = {}
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$set": {"shift_schedule": next_doc}},
+        upsert=True,
+    )
+    prof = await db.profile.find_one({"_id": user_id}, {"shift_schedule": 1})
+    return {"saved": True, "schedule": _serialize_shift_schedule(prof)}
+
+
+@api_router.post("/schedule/reset")
+async def schedule_reset(user_id: str = Depends(get_user_or_legacy)):
+    """Reset back to the default disabled schedule. Wipes pattern +
+    overrides + setup_complete in one shot so the wizard reopens
+    fresh on the next launch."""
+    fresh = _default_shift_schedule()
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$set": {"shift_schedule": fresh}},
+        upsert=True,
+    )
+    return {"saved": True, "schedule": fresh}
+
+
+@api_router.put("/schedule/day/{date_iso}")
+async def schedule_day_override(
+    date_iso: str,
+    body: _ScheduleDayOverrideBody = Body(...),
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Set / clear a per-date manual override that beats the rotating
+    pattern. `shift=None` removes the override for that date."""
+    import re as _re
+    if not _re.match(r"^\d{4}-\d{2}-\d{2}$", date_iso or ""):
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+    shift = (body.shift or "").lower().strip() or None
+    if shift is not None and shift not in SHIFT_TYPES:
+        raise HTTPException(400, f"shift must be one of {SHIFT_TYPES} or null")
+    prof = await db.profile.find_one({"_id": user_id}, {"shift_schedule": 1}) or {}
+    current = _serialize_shift_schedule(prof)
+    overrides = dict(current.get("manual_overrides") or {})
+    if shift is None:
+        overrides.pop(date_iso, None)
+    else:
+        overrides[date_iso] = shift
+    await db.profile.update_one(
+        {"_id": user_id},
+        {"$set": {"shift_schedule.manual_overrides": overrides}},
+        upsert=True,
+    )
+    return {"saved": True, "manual_overrides": overrides}
+
+
+@api_router.get("/schedule/preview")
+async def schedule_preview(
+    days: int = 14,
+    from_: Optional[str] = None,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Returns a flat list of `{date, shift, start_time, sleep_time,
+    icon, color, is_override}` rows for the next N days — used by the
+    6-month calendar in the wizard."""
+    import re as _re
+    from datetime import date as _date, timedelta as _td
+    days = max(1, min(int(days or 14), 186))  # 6 months max
+    if from_ and _re.match(r"^\d{4}-\d{2}-\d{2}$", from_):
+        cursor = _date.fromisoformat(from_)
+    else:
+        cursor = _date.fromisoformat(today_str())
+    prof = await db.profile.find_one({"_id": user_id}, {"shift_schedule": 1}) or {}
+    sched = _serialize_shift_schedule(prof)
+    shifts = sched.get("shifts") or {}
+    overrides = sched.get("manual_overrides") or {}
+    out: list[dict] = []
+    for _ in range(days):
+        iso = cursor.isoformat()
+        is_override = iso in overrides
+        st = _shift_for_date({"shift_schedule": sched}, iso)
+        sdef = shifts.get(st or "", {}) if st else {}
+        out.append({
+            "date": iso,
+            "shift": st,
+            "start_time": sdef.get("start_time") or "",
+            "sleep_time": sdef.get("sleep_time") or "",
+            "icon":  sdef.get("icon")  or "",
+            "color": sdef.get("color") or "#666",
+            "is_override": is_override,
+        })
+        cursor = cursor + _td(days=1)
+    return {"days": out, "schedule": sched}
+
+
+
+
 # ═══════════════ Admin Suspension Endpoints ═══════════════
 class AdminSuspendBody(BaseModel):
     user_id: str
