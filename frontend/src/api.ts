@@ -879,6 +879,16 @@ export const api = {
   adminPlayerPenalties: (playerId: string) =>
     req<{ penalties: PenaltyNotice[] }>(`/admin/players/${playerId}/penalties`),
 
+  // Creator-only: set a per-player override for the maximum number of
+  // active Goals/Quests the user can have at once. Default 8; allowed
+  // range 1..500. Saved permanently to profile.goal_quest_max and
+  // takes effect immediately on the next goal create / restart.
+  adminSetGoalQuestMax: (playerId: string, max: number) =>
+    req<{ saved: boolean; goal_quest_max: number }>(
+      `/admin/players/${playerId}/goal-quest-max`,
+      { method: 'POST', body: JSON.stringify({ max }) },
+    ),
+
 
   // Top-100 players by total XP, with switchable rolling window.
   adminGlobalLeaderboard: (opts: { period?: 'all' | 'week' | 'month' | 'year'; q?: string }) => {
@@ -2151,6 +2161,10 @@ export type FriendProfileDetails = {
     goals_active: number;
     goals_completed: number;
   };
+  /** Per-player active Goals/Quests cap. Default 8. Creator can raise
+   *  via api.adminSetGoalQuestMax — applies immediately for this user
+   *  only (saved in profile.goal_quest_max). */
+  goal_quest_max: number;
 };
 
 // ── Admin Account Suspension ─────────────────────────────────────

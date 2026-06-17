@@ -2217,10 +2217,21 @@ async def list_goals(user_id: str = Depends(get_user_or_legacy)):
 
 @api_router.post("/goals")
 async def create_goal(body: GoalCreate, user_id: str = Depends(get_user_or_legacy)):
-    # Cap users to 8 active long-term goals at any time. Completed goals
+    # Cap users to N active long-term goals at any time. Completed goals
     # don't count toward the limit so users always have room to add more
     # once they finish older ones.
-    MAX_ACTIVE_GOALS = 8
+    #
+    # 2026-06-17: the limit is now PER-PLAYER and read from
+    # `profile.goal_quest_max` so the Creator can raise an individual
+    # user's cap via /admin/players/{uid}/goal-quest-max. Falls back to
+    # 8 (the historical default) when the field is missing.
+    user_prof = await db.profile.find_one({"_id": user_id}, {"goal_quest_max": 1}) or {}
+    try:
+        MAX_ACTIVE_GOALS = int(user_prof.get("goal_quest_max") or 8)
+    except (TypeError, ValueError):
+        MAX_ACTIVE_GOALS = 8
+    if MAX_ACTIVE_GOALS < 1:
+        MAX_ACTIVE_GOALS = 8
     # Per user-spec 2026-05-23: separately cap MONTHLY-unit goals at 2.
     # Months goals are heavy commitments (30-day cycles, top XP cap)
     # so we prevent users from stockpiling them.
@@ -2645,7 +2656,16 @@ async def restart_goal(goal_id: str, user_id: str = Depends(get_user_or_legacy))
         )
 
     is_admin = await _is_admin_user(user_id)
-    MAX_ACTIVE_GOALS = 8
+    # 2026-06-17: per-player goal/quest cap. Mirrors the same lookup used
+    # at /goals create — Creator can raise an individual user's cap via
+    # /admin/players/{uid}/goal-quest-max. Falls back to 8 if missing.
+    user_prof2 = await db.profile.find_one({"_id": user_id}, {"goal_quest_max": 1}) or {}
+    try:
+        MAX_ACTIVE_GOALS = int(user_prof2.get("goal_quest_max") or 8)
+    except (TypeError, ValueError):
+        MAX_ACTIVE_GOALS = 8
+    if MAX_ACTIVE_GOALS < 1:
+        MAX_ACTIVE_GOALS = 8
     MAX_ACTIVE_MONTHLY_GOALS = 2
     MAX_ACTIVE_DAILY_GOALS = 5
     unit_norm = (goal.get("unit") or "days").lower()
@@ -4443,7 +4463,54 @@ async def player_profile_details(other_id: str, user_id: str = Depends(get_user_
             "goals_active": sum(1 for g in goals_out if not g["completed"]),
             "goals_completed": sum(1 for g in goals_out if g["completed"]),
         },
+        # 2026-06-17: per-player active-goal/quest cap. The Creator
+        # raises an individual user's cap via the new
+        # POST /admin/players/{uid}/goal-quest-max endpoint; the field
+        # is read here so the friend-profile modal can display the
+        # current limit + show the "Increase maximum" button for
+        # Creators. 8 is the historical default.
+        "goal_quest_max": int(prof.get("goal_quest_max") or 8),
     }
+
+
+class _GoalQuestMaxBody(BaseModel):
+    max: int
+
+
+@api_router.post("/admin/players/{target_user_id}/goal-quest-max")
+async def admin_set_goal_quest_max(
+    target_user_id: str,
+    body: _GoalQuestMaxBody,
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Creator-only: set a per-player override for the maximum number
+    of active Goals/Quests they can have at once. Saved permanently to
+    `profile.goal_quest_max`; read by /goals create + restart so the
+    raised limit applies immediately for that user only.
+
+    Allowed range: 1..500. The default global limit is 8 — anything
+    above that gives the player more headroom; anything below tightens
+    it. Setting it back to 8 is equivalent to "reset to default"."""
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Creator-only action.")
+    try:
+        new_max = int(body.max)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "max must be an integer")
+    if new_max < 1 or new_max > 500:
+        raise HTTPException(400, "max must be between 1 and 500")
+    target = await db.profile.find_one({"_id": target_user_id}, {"_id": 1})
+    if not target:
+        raise HTTPException(404, "Target player profile not found.")
+    await db.profile.update_one(
+        {"_id": target_user_id},
+        {"$set": {"goal_quest_max": new_max, "goal_quest_max_updated_at": now_iso()}},
+    )
+    logger.info(
+        "[admin] %s set goal_quest_max=%d for player %s",
+        user_id, new_max, target_user_id,
+    )
+    return {"saved": True, "goal_quest_max": new_max}
 
 
 @api_router.post("/friends/request")

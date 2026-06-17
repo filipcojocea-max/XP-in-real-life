@@ -942,7 +942,7 @@ function PlayerProfileModal({
               Backend gates this with a 403 if the viewer isn't a friend (or
               self) so this UI is the strictly correct surface to render. */}
           {(player.friend_status === 'friends' || player.friend_status === 'self') ? (
-            <FriendDetailsSection userId={player.user_id} />
+            <FriendDetailsSection userId={player.user_id} viewerIsAdmin={viewerIsAdmin} />
           ) : null}
 
           {/* Creator/Admin moderation toolkit — only the Creator account
@@ -1338,23 +1338,54 @@ function AdminControlsBlock({
  * trust whatever comes back. We render three discoverable accordions that
  * the viewer can independently expand to keep the modal scannable.
  */
-function FriendDetailsSection({ userId }: { userId: string }) {
+function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: string; viewerIsAdmin?: boolean }) {
   const [data, setData] = useState<FriendProfileDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openSection, setOpenSection] = useState<'apps' | 'tasks' | 'goals' | null>(null);
+  // 2026-06-17: Creator-only "Increase maximum" dialog state.
+  // Shared between the Quests and Goals accordion bottoms because
+  // both surfaces edit the same per-player cap (profile.goal_quest_max).
+  const [maxModalOpen, setMaxModalOpen] = useState(false);
+  const [maxInput, setMaxInput] = useState('');
+  const [maxSaving, setMaxSaving] = useState(false);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setData(null);
     api.playerProfileDetails(userId)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e: any) => { if (!cancelled) setError(String(e?.message || e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [userId]);
+  useEffect(() => { return reload(); }, [reload]);
+
+  const openMaxModal = () => {
+    setMaxInput(String(data?.goal_quest_max ?? 8));
+    setMaxModalOpen(true);
+  };
+
+  const saveMax = async () => {
+    const n = parseInt(maxInput, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 500) {
+      showAlert('Invalid number', 'Enter a number between 1 and 500.');
+      return;
+    }
+    setMaxSaving(true);
+    try {
+      await api.adminSetGoalQuestMax(userId, n);
+      setMaxModalOpen(false);
+      // Reload details so the new cap shows up in the subtitle.
+      reload();
+      showAlert('Saved', `New maximum: ${n} active Goals/Quests for this player.`);
+    } catch (e: any) {
+      showAlert('Could not save', String(e?.message || e));
+    } finally {
+      setMaxSaving(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -1415,6 +1446,25 @@ function FriendDetailsSection({ userId }: { userId: string }) {
             ))}
           </View>
         )}
+        {/* Creator-only: raise / lower the per-player Quests cap.
+            The current cap is read from FriendProfileDetails.goal_quest_max
+            and saved back via api.adminSetGoalQuestMax. */}
+        {viewerIsAdmin && !data.is_self ? (
+          <View style={{ marginTop: 12 }}>
+            <Text style={[styles.detailsEmpty, { marginBottom: 6 }]}>
+              Current max active Goals/Quests: {data.goal_quest_max}
+            </Text>
+            <TouchableOpacity
+              onPress={openMaxModal}
+              activeOpacity={0.85}
+              style={styles.maxBtn}
+              testID="friend-details-tasks-increase-max"
+            >
+              <Ionicons name="add-circle" size={16} color={colors.bg} />
+              <Text style={styles.maxBtnText}>Increase maximum</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </DetailAccordion>
 
       {/* Goals */}
@@ -1440,7 +1490,83 @@ function FriendDetailsSection({ userId }: { userId: string }) {
             ))}
           </View>
         )}
+        {/* Creator-only: raise the same per-player Goals/Quests cap.
+            Shown at the BOTTOM of the Goals list as a primary CTA so
+            it lines up with the user spec ("at the very bottom of
+            the expanded list, add a button labeled Increase maximum"). */}
+        {viewerIsAdmin && !data.is_self ? (
+          <View style={{ marginTop: 12 }}>
+            <Text style={[styles.detailsEmpty, { marginBottom: 6 }]}>
+              Current max active Goals/Quests: {data.goal_quest_max}
+            </Text>
+            <TouchableOpacity
+              onPress={openMaxModal}
+              activeOpacity={0.85}
+              style={styles.maxBtn}
+              testID="friend-details-goals-increase-max"
+            >
+              <Ionicons name="add-circle" size={16} color={colors.bg} />
+              <Text style={styles.maxBtnText}>Increase maximum</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </DetailAccordion>
+
+      {/* Increase-maximum dialog — shared by Quests + Goals (single
+          per-player field). Keyboard-aware so the input stays visible
+          on Android. */}
+      <Modal
+        visible={maxModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !maxSaving && setMaxModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.maxModalRoot}
+        >
+          <View style={styles.maxModalCard}>
+            <Text style={styles.maxModalTitle}>Set Goals/Quests maximum</Text>
+            <Text style={styles.maxModalHint}>
+              New cap will apply immediately for this player only. Default is 8.
+              Allowed range: 1–500.
+            </Text>
+            <TextInput
+              value={maxInput}
+              onChangeText={(t) => setMaxInput(t.replace(/[^0-9]/g, ''))}
+              keyboardType="number-pad"
+              maxLength={3}
+              placeholder="e.g. 20"
+              placeholderTextColor={colors.textMuted}
+              style={styles.maxModalInput}
+              autoFocus
+              editable={!maxSaving}
+              testID="friend-details-max-input"
+            />
+            <View style={styles.maxModalActions}>
+              <TouchableOpacity
+                onPress={() => setMaxModalOpen(false)}
+                disabled={maxSaving}
+                style={[styles.maxModalBtn, styles.maxModalBtnGhost]}
+              >
+                <Text style={styles.maxModalBtnGhostText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={saveMax}
+                disabled={maxSaving}
+                style={[styles.maxModalBtn, styles.maxModalBtnPrimary]}
+                testID="friend-details-max-save"
+              >
+                {maxSaving ? (
+                  <ActivityIndicator color={colors.bg} />
+                ) : (
+                  <Text style={styles.maxModalBtnPrimaryText}>Save</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -1843,6 +1969,64 @@ const styles = StyleSheet.create({
   detailsError: { marginTop: spacing.lg, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
   detailsErrorText: { color: colors.textMuted, fontSize: 12 },
   detailsEmpty: { color: colors.textMuted, fontSize: 13, fontStyle: 'italic', paddingVertical: 8 },
+
+  // ── Increase-maximum (Creator → per-player Goals/Quests cap) ──
+  maxBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: colors.amber,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: radii.pill,
+    alignSelf: 'stretch',
+  },
+  maxBtnText: { color: colors.bg, fontWeight: '900', fontSize: 13, letterSpacing: 0.3 },
+  maxModalRoot: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.lg,
+  },
+  maxModalCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    gap: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  maxModalTitle: { color: colors.text, fontSize: 16, fontWeight: '800' },
+  maxModalHint:  { color: colors.textMuted, fontSize: 12, lineHeight: 16 },
+  maxModalInput: {
+    backgroundColor: colors.bg,
+    color: colors.text,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: radii.md,
+    fontSize: 16,
+    fontWeight: '800',
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginTop: 6,
+  },
+  maxModalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 8 },
+  maxModalBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: radii.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 92,
+  },
+  maxModalBtnGhost:        { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.border },
+  maxModalBtnGhostText:    { color: colors.textMuted, fontWeight: '700', fontSize: 13 },
+  maxModalBtnPrimary:      { backgroundColor: colors.amber },
+  maxModalBtnPrimaryText:  { color: colors.bg, fontWeight: '900', fontSize: 13 },
   detailCard: {
     backgroundColor: colors.surfaceGlass,
     borderWidth: 1,
