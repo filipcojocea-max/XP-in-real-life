@@ -865,7 +865,7 @@ function PlayerProfileModal({
             </View>
           ) : (
             <View style={[styles.modalAvatarWrap]}>
-              {player.avatar_base64 && (player.friend_status === 'friends' || player.friend_status === 'self') ? (
+              {player.avatar_base64 && (player.friend_status === 'friends' || player.friend_status === 'self' || viewerIsAdmin) ? (
                 <Image
                   source={{
                     // The onboarding flow saves the avatar pre-prefixed
@@ -875,6 +875,9 @@ function PlayerProfileModal({
                     // friends always see the photo (regression 2026-05-30:
                     // friends were showing the shield because of the
                     // double prefix).
+                    // 2026-06-17: Creators bypass the friend gate so they
+                    // can see every player's real photo, matching the
+                    // existing Mini-Apps / Quests / Goals admin override.
                     uri: String(player.avatar_base64).startsWith('data:')
                       ? String(player.avatar_base64)
                       : `data:image/jpeg;base64,${player.avatar_base64}`,
