@@ -2417,10 +2417,51 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
     # message. The unit-aware logic lives in `_is_goal_locked`.
     requested_value = max(0, min(body.current_value, goal["target_value"]))
     incrementing = requested_value > int(goal.get("current_value", 0))
-    # Fetch wake/tz ONCE (daily-lock needs them; we also reuse for the
-    # final enrichment response below).
+    decrementing = requested_value < int(goal.get("current_value", 0))
+
+    # ── Cycle-boundary direction reset (2026-06-17 user spec) ──
+    # The direction-flip lock only applies WITHIN the current cycle.
+    # When the cycle has rolled over (goal no longer cycle-locked from
+    # its previous tick) the previous direction is irrelevant — we
+    # wipe it so the user gets a fresh "first action" experience on
+    # the new cycle. `_is_goal_locked` returns (False, None) when the
+    # cycle has expired, which is exactly the signal we need.
     wake_str = await _wake_for_user(user_id)
     tz_name = await _tz_for_user(user_id)
+    _cycle_locked, _ = _is_goal_locked(goal, wake_str=wake_str, tz_name=tz_name)
+    if not _cycle_locked and goal.get("last_action_direction"):
+        # Persist the wipe so subsequent reads see a clean slate too.
+        await db.goals.update_one(
+            {"id": goal_id, "user_id": user_id},
+            {"$set": {"last_action_direction": None}},
+        )
+        goal["last_action_direction"] = None
+
+    # ── Direction-flip protection (2026-06-17 user spec) ──
+    # Block back-to-back same-direction actions on a goal so a user can
+    # never accidentally double-claim XP (two ticks in a row) or double-
+    # refund XP (two unticks in a row). They CAN flip direction freely:
+    #   tick → untick → tick → untick → … all fine.
+    last_dir = goal.get("last_action_direction")
+    if incrementing and last_dir == "tick":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "double_tick_blocked",
+                "message": "Already ticked. Un-tick first if you want to re-tick.",
+                "last_action_direction": "tick",
+            },
+        )
+    if decrementing and last_dir == "untick":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "double_untick_blocked",
+                "message": "Already un-ticked. Tick it first if you want to un-tick again.",
+                "last_action_direction": "untick",
+            },
+        )
+
     if incrementing:
         locked, next_at = _is_goal_locked(goal, wake_str=wake_str, tz_name=tz_name)
         if locked and next_at is not None:
@@ -2443,9 +2484,13 @@ async def update_goal_progress(goal_id: str, body: GoalProgress, user_id: str = 
 
     completed = requested_value >= goal["target_value"]
     update = {"current_value": requested_value, "completed": completed}
+    # Stamp the new direction so the next call can enforce flip-only
+    # rules. Pure "no-op" calls (same value) leave the field untouched.
     if incrementing:
+        update["last_action_direction"] = "tick"
         update["last_ticked_at"] = now_iso()
-    elif requested_value < int(goal.get("current_value", 0)):
+    elif decrementing:
+        update["last_action_direction"] = "untick"
         # User un-ticked.
         # XP-cheat fix (2026-05-24): for DAILY goals we deliberately
         # preserve `last_ticked_at` so the user can't un-tick + re-tick
