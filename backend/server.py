@@ -4908,6 +4908,24 @@ async def boosts_status(user_id: str = Depends(get_user_or_legacy)):
     }
 
 
+# Convenience aliases — the frontend polls these as separate endpoints
+# so it can fetch the badge/timer independently of the full status payload.
+# Both were returning 404 in production logs.
+@api_router.get("/active-boost")
+async def active_boost_alias(user_id: str = Depends(get_user_or_legacy)):
+    prof = await db.profile.find_one({"_id": user_id}) or {}
+    return {"active_boost": _serialize_active_boost(prof)}
+
+
+@api_router.get("/boost/inventory")
+async def boost_inventory_alias(user_id: str = Depends(get_user_or_legacy)):
+    prof = await db.profile.find_one({"_id": user_id}) or {}
+    return {
+        "boost_inventory": _serialize_boost_inventory(prof),
+        "boosts_unlocked": bool(prof.get("boosts_unlocked")),
+    }
+
+
 # ═════════════════════ Friends Leaderboard (weekly XP) ═════════════════════
 # Weekly window = Mon 00:00 → Sat 23:59:59 in each player's LOCAL time.
 # Sunday is rest/winner day — week is closed, winner gets a 2x-day boost
@@ -8288,6 +8306,50 @@ async def _wire_buried_treasure_module():
         logger.info("[startup] Buried Treasure module wired (init + attach_routes)")
     except Exception:
         logger.exception("[startup] Buried Treasure wiring failed")
+
+
+# ──────────────────────────────────────────────────────────────────
+# Penalties + Chat-preferences module wiring (2026-06-17)
+# ──────────────────────────────────────────────────────────────────
+# Both modules expose ready-to-mount FastAPI routers via attach_routes(),
+# but `attach_routes` was never being called from server.py — every
+# /api/penalties/pending and /api/chat/preferences request returned
+# 404 in production logs. We also point the previously-stubbed
+# _chat_pref_for_pair / _chat_blocked_for helpers at the real impls
+# so messages_send/threads/unread-summary can honour soft-block + mute.
+@app.on_event("startup")
+async def _wire_penalties_and_chat_prefs():
+    global _chat_pref_for_pair, _chat_blocked_for
+    try:
+        from penalties import init_penalties, attach_routes as _pen_attach
+        init_penalties(
+            db=db,
+            is_admin_user=_is_admin_user,
+            get_user_or_legacy=get_user_or_legacy,
+            now_iso=now_iso,
+            send_expo_push=_send_expo_push,
+            serialize_profile=serialize_profile,
+            level_from_xp=level_from_xp,
+        )
+        _pen_attach(app, get_user_or_legacy)
+        logger.info("[startup] Penalties module wired")
+    except Exception:
+        logger.exception("[startup] Penalties wiring failed")
+
+    try:
+        from chat_preferences import (
+            init_chat_preferences,
+            attach_routes as _cp_attach,
+            get_pref_for_pair,
+            list_blocked_for,
+        )
+        init_chat_preferences(db=db, get_user_or_legacy=get_user_or_legacy, now_iso=now_iso)
+        _cp_attach(app, get_user_or_legacy)
+        _chat_pref_for_pair = get_pref_for_pair
+        _chat_blocked_for = list_blocked_for
+        logger.info("[startup] Chat preferences module wired")
+    except Exception:
+        logger.exception("[startup] Chat preferences wiring failed")
 
 
 # ──────────────────────────────────────────────────────────────────
