@@ -4360,7 +4360,11 @@ async def player_profile_details(other_id: str, user_id: str = Depends(get_user_
     if not prof:
         raise HTTPException(404, "Player not found")
     is_self = (other_id == user_id)
-    if not is_self:
+    # 2026-06-17 spec: Creators always see the full Mini-Apps / Quests /
+    # Goals panel for ANY player, no friendship required. Regular users
+    # still need a confirmed friend relationship.
+    viewer_is_admin = await _is_admin_user(user_id)
+    if not is_self and not viewer_is_admin:
         rel = await _find_relationship(user_id, other_id)
         status = _relationship_status(rel, user_id)
         if status != "friends":

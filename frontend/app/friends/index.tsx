@@ -939,9 +939,10 @@ function PlayerProfileModal({
           ) : null}
 
           {/* Friend-only deep-detail panels: mini-apps, tasks, goals.
-              Backend gates this with a 403 if the viewer isn't a friend (or
-              self) so this UI is the strictly correct surface to render. */}
-          {(player.friend_status === 'friends' || player.friend_status === 'self') ? (
+              2026-06-17: Creators now see this for ALL players regardless
+              of friendship — the backend guards against non-Creator
+              non-friend access on its side (403). */}
+          {(player.friend_status === 'friends' || player.friend_status === 'self' || viewerIsAdmin) ? (
             <FriendDetailsSection userId={player.user_id} viewerIsAdmin={viewerIsAdmin} />
           ) : null}
 

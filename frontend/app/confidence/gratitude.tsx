@@ -50,8 +50,8 @@ export default function GratitudeTrack() {
         <Text style={styles.title}>Grateful Mind</Text>
         <View style={{ width: 32 }} />
       </View>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={20}>
-        <ScrollView contentContainerStyle={{ padding: spacing.md, paddingBottom: 80, gap: spacing.md }} keyboardShouldPersistTaps="handled">
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={20}>
+        <ScrollView contentContainerStyle={{ padding: spacing.md, paddingBottom: 80, gap: spacing.md }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
           {loading || !challenge ? <ActivityIndicator color={PINK} style={{ marginVertical: 40 }} /> : (
             <>
               <View style={styles.kickerRow}>

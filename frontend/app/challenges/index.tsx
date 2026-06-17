@@ -543,7 +543,7 @@ function ReflectModal({
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.solidBlackSafe}>
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.solidBlackBackdrop}
         >
           <ScrollView
@@ -551,6 +551,7 @@ function ReflectModal({
             contentContainerStyle={styles.solidPopup}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
             testID="reflect-modal"
           >
             <View style={styles.solidPopupHeader}>
@@ -705,7 +706,7 @@ function LateReflectModal({
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.solidBlackSafe}>
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.solidBlackBackdrop}
         >
           <ScrollView
@@ -713,6 +714,7 @@ function LateReflectModal({
             contentContainerStyle={styles.solidPopup}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
             testID="late-reflect-modal"
           >
             <View style={styles.solidPopupHeader}>
