@@ -1347,27 +1347,45 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openSection, setOpenSection] = useState<'apps' | 'tasks' | 'goals' | null>(null);
-  // 2026-06-17: Creator-only "Increase maximum" dialog state.
-  // Shared between the Quests and Goals accordion bottoms because
-  // both surfaces edit the same per-player cap (profile.goal_quest_max).
+  // Creator-only "Increase maximum" dialog state.
   const [maxModalOpen, setMaxModalOpen] = useState(false);
   const [maxInput, setMaxInput] = useState('');
   const [maxSaving, setMaxSaving] = useState(false);
 
-  const reload = useCallback(() => {
-    let cancelled = false;
+  // 2026-06-17 hotfix: previous version returned a cleanup function from
+  // `reload()` and called it through useEffect, which on some RN runtimes
+  // tripped a hook-order violation when the modal mounted for a non-friend
+  // (Creator opening a stranger). The reload is now a plain async function
+  // and the effect handles its own cancellation.
+  const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
-    api.playerProfileDetails(userId)
-      .then((d) => { if (!cancelled) setData(d); })
-      .catch((e: any) => { if (!cancelled) setError(String(e?.message || e)); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+    try {
+      const d = await api.playerProfileDetails(userId);
+      setData(d);
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await api.playerProfileDetails(userId);
+        if (!cancelled) { setData(d); setLoading(false); }
+      } catch (e: any) {
+        if (!cancelled) { setError(String(e?.message || e)); setLoading(false); }
+      }
+    })();
     return () => { cancelled = true; };
   }, [userId]);
-  useEffect(() => { return reload(); }, [reload]);
 
   const openMaxModal = () => {
-    setMaxInput(String(data?.goal_quest_max ?? 8));
+    const cur = (data && typeof data.goal_quest_max === 'number') ? data.goal_quest_max : 8;
+    setMaxInput(String(cur));
     setMaxModalOpen(true);
   };
 
@@ -1381,8 +1399,7 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
     try {
       await api.adminSetGoalQuestMax(userId, n);
       setMaxModalOpen(false);
-      // Reload details so the new cap shows up in the subtitle.
-      reload();
+      void reload();
       showAlert('Saved', `New maximum: ${n} active Goals/Quests for this player.`);
     } catch (e: any) {
       showAlert('Could not save', String(e?.message || e));
@@ -1456,7 +1473,7 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
         {viewerIsAdmin && !data.is_self ? (
           <View style={{ marginTop: 12 }}>
             <Text style={[styles.detailsEmpty, { marginBottom: 6 }]}>
-              Current max active Goals/Quests: {data.goal_quest_max}
+              Current max active Goals/Quests: {data.goal_quest_max ?? 8}
             </Text>
             <TouchableOpacity
               onPress={openMaxModal}
@@ -1501,7 +1518,7 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
         {viewerIsAdmin && !data.is_self ? (
           <View style={{ marginTop: 12 }}>
             <Text style={[styles.detailsEmpty, { marginBottom: 6 }]}>
-              Current max active Goals/Quests: {data.goal_quest_max}
+              Current max active Goals/Quests: {data.goal_quest_max ?? 8}
             </Text>
             <TouchableOpacity
               onPress={openMaxModal}
