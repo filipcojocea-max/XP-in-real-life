@@ -35,6 +35,7 @@ import * as FileSystem from 'expo-file-system';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
 import MapView, { Marker, Circle, IS_WEB_PLACEHOLDER } from '../../../src/components/MapShim';
+import BTLeafletMap, { type BTLeafletMapHandle } from '../../../src/components/BTLeafletMap';
 import { api, type BTCompassReading, type BTGroup } from '../../../src/api';
 import { BTReportIssueModal } from '../../../src/components/BTReportIssueModal';
 import { colors, radii, spacing } from '../../../src/theme';
@@ -379,15 +380,24 @@ function LobbyView({
 // ─────────────────────────────────────────────────────────────────────
 // Bury — creator captures map screenshot + spot photo
 // ─────────────────────────────────────────────────────────────────────
+// 1x1 transparent PNG placeholder for the map screenshot field. The
+// backend `/bt/groups/{gid}/bury` endpoint requires a non-empty
+// `map_screenshot_base64`; this is the smallest valid value. We mirror
+// the hide.tsx pattern (which is the proven-stable flow): the actual
+// hunting clue is the spot PHOTO + GPS, not this image. The previous
+// implementation called `mapRef.current.requestSnapshot()` via
+// html2canvas inside the WebView — that RPC was the root cause of the
+// 1-6 second crash on the Capture-Map step because the WebView would
+// unmount mid-tile-fetch before the snapshot resolved.
+const BURY_PLACEHOLDER_MAP =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkqAcAAIUAgUW0RjgAAAAASUVORK5CYII=';
+
 function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void }) {
   const router = useRouter();
+  // Live GPS — updated by the watcher; pushed into the map via ref.
   const [gps, setGPS] = useState<{ lat: number; lng: number } | null>(null);
-  // 2026-06-17: stable initial centre — captured from the FIRST GPS
-  // fix only and never mutated, so BTLeafletMap's WebView mounts ONCE
-  // and finishes tile-loading reliably. The Buried-Treasure Groups
-  // screen was crashing on open because each parent re-render (the
-  // 4-second poll in GroupScreen) was bouncing `initialLat` and
-  // forcing the WebView to remount mid-tile-fetch on Android.
+  // FIRST fix only — used as `initialLat/Lng` for the map. Stable for
+  // the lifetime of the screen so BTLeafletMap's WebView never remounts.
   const [initialCenter, setInitialCenter] = useState<{ lat: number; lng: number } | null>(null);
   const [mapShot, setMapShot] = useState<string | null>(null);
   const [spotPhoto, setSpotPhoto] = useState<string | null>(null);
@@ -395,49 +405,67 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
   const [submitting, setSubmitting] = useState(false);
   const mapRef = useRef<BTLeafletMapHandle | null>(null);
   const camRef = useRef<any>(null);
+  const watchRef = useRef<Location.LocationSubscription | null>(null);
 
+  // GPS watcher — IDENTICAL to hide.tsx so the live "you are here" dot
+  // updates without ever remounting the WebView.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await Location.requestForegroundPermissionsAsync();
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }).catch(() => null);
-      if (!cancelled && pos) {
-        const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        setGPS(next);
-        // Lock the initial map centre on FIRST fix only (idempotent).
-        setInitialCenter((prev) => prev || next);
+      const cur = await Location.getForegroundPermissionsAsync();
+      let granted = cur.status === 'granted';
+      if (!granted && cur.canAskAgain) {
+        const r = await Location.requestForegroundPermissionsAsync();
+        granted = r.status === 'granted';
       }
-    })();
-    return () => { cancelled = true; };
+      if (!granted) {
+        showAlert('Location needed', 'Allow Location so we can save the bury spot.');
+        return;
+      }
+      try {
+        const sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 1500 },
+          (pos) => {
+            if (cancelled) return;
+            const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+            setGPS(next);
+            // Lock the initial map centre on FIRST fix only (idempotent).
+            setInitialCenter((prev) => prev || next);
+          },
+        );
+        watchRef.current = sub;
+      } catch (e: any) {
+        showAlert('GPS error', String(e?.message || e));
+      }
+    })().catch(() => {});
+    return () => {
+      cancelled = true;
+      try { watchRef.current?.remove(); } catch {}
+    };
   }, []);
 
-  const snapMap = useCallback(async () => {
-    // BTLeafletMap captures via html2canvas inside the WebView. If the
-    // capture fails for any reason (canvas tainted, network slow,
-    // unmounted mid-call) we degrade gracefully to a placeholder so the
-    // bury flow can still complete — the backend treats the map photo
-    // as a "best effort" image, not a verification artefact.
-    if (!mapRef.current) {
-      setMapShot('PLACEHOLDER');
-      return;
-    }
-    try {
-      const b64 = await mapRef.current.requestSnapshot();
-      if (b64 && b64.length > 200) setMapShot(b64);
-      else throw new Error('Map returned empty snapshot.');
-    } catch (e: any) {
-      // Soft-fail: log + placeholder so the user can still bury.
-      // eslint-disable-next-line no-console
-      console.warn('[bt] map snapshot failed', e?.message || e);
-      setMapShot('PLACEHOLDER');
-    }
+  // Pipe every GPS tick into the embedded mini-map via ref so the live
+  // dot updates without re-rendering the WebView.
+  useEffect(() => {
+    if (!gps) return;
+    try { mapRef.current?.setUserLocation(gps.lat, gps.lng); } catch {}
+  }, [gps]);
+
+  // "Capture map" is now just a UI confirmation — we set a placeholder
+  // and let the spot photo + GPS do the actual locating work. This
+  // mirrors hide.tsx exactly and removes the html2canvas RPC race that
+  // crashed the screen 1-6 seconds in.
+  const snapMap = useCallback(() => {
+    setMapShot('PLACEHOLDER');
   }, []);
 
   const openCam = useCallback(async () => {
-    // expo-camera 17: static `Camera` symbol is unreliable on Android prod
-    // builds — the dynamic-import pattern (mirrored from /treasure/solo.tsx)
-    // is the battle-tested workaround and avoids `TypeError: Cannot read
-    // properties of undefined (reading 'requestCameraPermissionsAsync')`.
+    if (!gps) {
+      showAlert('No GPS yet', 'Waiting for your location — try again in a moment.');
+      return;
+    }
+    // expo-camera 17: dynamic import avoids the static `Camera` symbol
+    // being undefined on Android prod builds (same pattern as solo.tsx).
     const { Camera } = await import('expo-camera');
     const r = await Camera.requestCameraPermissionsAsync();
     if (r.status !== 'granted') {
@@ -445,7 +473,7 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
       return;
     }
     setCamOpen(true);
-  }, []);
+  }, [gps]);
 
   const snapPhoto = useCallback(async () => {
     if (!camRef.current) return;
@@ -463,13 +491,9 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
     if (!gps || !mapShot || !spotPhoto || submitting) return;
     setSubmitting(true);
     try {
-      // Web preview placeholder: send a tiny 1x1 transparent jpg so the
-      // backend's "required" check passes during local QA. On real
-      // devices we always have an actual base64 map snapshot.
-      const mapPayload =
-        mapShot === 'PLACEHOLDER'
-          ? '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA/8M//2Q=='
-          : mapShot;
+      // We always send the small placeholder PNG — the hunting clue is
+      // the spot PHOTO + GPS, the "map" field is now decorative.
+      const mapPayload = BURY_PLACEHOLDER_MAP;
       await api.btGroupBury(group.id, gps.lat, gps.lng, spotPhoto, mapPayload);
       onBuried();
     } catch (e: any) {
@@ -481,6 +505,16 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
 
   const ready = !!(gps && mapShot && spotPhoto);
 
+  // The map ALWAYS mounts on first render (no `gps ? <Map/> : <Spinner/>`
+  // gate). A translucent overlay shows the spinner until the first GPS
+  // fix arrives, so the WebView gets exactly ONE mount + one tile-load
+  // pass. Until the first fix is in, the map is centred on (0,0) at
+  // zoom 2 just so the WebView has SOMETHING to render — the overlay
+  // covers that initial frame so the user never sees the world map.
+  const mapLat = initialCenter?.lat ?? 0;
+  const mapLng = initialCenter?.lng ?? 0;
+  const mapZoom = initialCenter ? 17 : 2;
+
   return (
     <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
       <Text style={styles.helper}>
@@ -490,36 +524,39 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
       {/* Map preview + capture */}
       <View style={styles.card}>
         <Text style={styles.cardKicker}>1 · MAP SNAPSHOT</Text>
-        {initialCenter ? (
-          <View style={styles.miniMap}>
-            <BTLeafletMap
-              ref={mapRef}
-              mode="static"
-              initialLat={initialCenter.lat}
-              initialLng={initialCenter.lng}
-              initialZoom={17}
-              initialRadius={15}
-              ringColor="#FFD166"
-              markerColor="#FFD166"
-              onReady={() => {
-                // Drop the live "you are here" dot immediately on
-                // first WebView ready — keeps the map mount stable
-                // (no prop-change re-render).
-                if (gps) {
-                  try { mapRef.current?.setUserLocation(gps.lat, gps.lng); } catch {}
-                }
-              }}
-              style={StyleSheet.absoluteFill}
-            />
-          </View>
-        ) : (
-          <ActivityIndicator color={colors.cyan} style={{ marginVertical: 20 }} />
-        )}
+        <View style={styles.miniMap}>
+          {/* ALWAYS mount the map — the overlay below covers the world
+              frame until the GPS fix arrives. */}
+          <BTLeafletMap
+            ref={mapRef}
+            mode="static"
+            initialLat={mapLat}
+            initialLng={mapLng}
+            initialZoom={mapZoom}
+            initialRadius={15}
+            ringColor="#FFD166"
+            markerColor="#FFD166"
+            interactive={false}
+            onReady={() => {
+              if (gps) {
+                try { mapRef.current?.setUserLocation(gps.lat, gps.lng); } catch {}
+              }
+            }}
+            style={StyleSheet.absoluteFill}
+          />
+          {!initialCenter ? (
+            <View style={styles.miniMapOverlay} pointerEvents="none">
+              <ActivityIndicator color={colors.cyan} />
+              <Text style={styles.helper}>Locking GPS…</Text>
+            </View>
+          ) : null}
+        </View>
         <TouchableOpacity
           style={[styles.subBtn, mapShot && { backgroundColor: '#22C55E' }]}
           onPress={snapMap}
           activeOpacity={0.85}
           testID="bt-snap-map"
+          disabled={!initialCenter}
         >
           <Ionicons name={mapShot ? 'checkmark' : 'camera'} size={18} color="#0b0f15" />
           <Text style={styles.subBtnText}>{mapShot ? 'Map captured' : 'Capture map'}</Text>
@@ -592,6 +629,7 @@ function HuntingView({
   gps: { lat: number; lng: number } | null;
   onFound: () => void;
 }) {
+  const router = useRouter();
   const [compass, setCompass] = useState<BTCompassReading | null>(null);
   const [heading, setHeading] = useState(0);
   const [camOpen, setCamOpen] = useState(false);
@@ -837,6 +875,13 @@ const styles = StyleSheet.create({
   },
   actionText: { color: '#0b0f15', fontWeight: '900', letterSpacing: 0.7 },
   miniMap: { width: '100%', height: 200, backgroundColor: '#0E1218', borderRadius: radii.md, overflow: 'hidden' },
+  miniMapOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#0E1218',
+  },
   spotPreview: { width: '100%', height: 200, borderRadius: radii.md, backgroundColor: '#0E1218' },
   subBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
