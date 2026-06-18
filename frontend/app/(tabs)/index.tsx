@@ -15,6 +15,7 @@ import Ring from '../../src/components/Ring';
 import Card from '../../src/components/Card';
 import MotivationBanner from '../../src/components/MotivationBanner';
 import PremiumShield, { getDynamicShieldLevel } from '../../src/components/PremiumShield';
+import ShieldTapAnimator from '../../src/components/ShieldTapAnimator';
 import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 import { api, Profile, DailyStats } from '../../src/api';
 import { colors, focusMeta, spacing, radii } from '../../src/theme';
@@ -142,14 +143,24 @@ export default function Home() {
             <View style={styles.emblemCore}>
               <View style={styles.emblemGlow} />
               {profile.level >= 2 ? (
-                <PremiumShield
-                  size={110}
+                <ShieldTapAnimator
                   level={getDynamicShieldLevel({
                     level: profile.level,
                     total_xp: profile.total_xp,
                     is_admin: profile.is_admin,
                   })}
-                />
+                  size={110}
+                  ringDiameter={260}
+                >
+                  <PremiumShield
+                    size={110}
+                    level={getDynamicShieldLevel({
+                      level: profile.level,
+                      total_xp: profile.total_xp,
+                      is_admin: profile.is_admin,
+                    })}
+                  />
+                </ShieldTapAnimator>
               ) : (
                 <>
                   <Ionicons name="shield" size={88} color={colors.cyan} />
