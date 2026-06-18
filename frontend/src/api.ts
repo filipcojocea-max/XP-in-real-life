@@ -880,11 +880,29 @@ export const api = {
     req<{ penalties: PenaltyNotice[] }>(`/admin/players/${playerId}/penalties`),
 
   // Creator-only: set a per-player override for the maximum number of
-  // active Goals/Quests the user can have at once. Default 8; allowed
-  // range 1..500. Saved permanently to profile.goal_quest_max and
-  // takes effect immediately on the next goal create / restart.
+  // active QUESTS only (default 11). Allowed range 1..500. Independent
+  // of the goal cap — call adminSetGoalMax separately for goals.
+  adminSetQuestMax: (playerId: string, max: number) =>
+    req<{ saved: boolean; max_active_quests: number }>(
+      `/admin/players/${playerId}/quest-max`,
+      { method: 'POST', body: JSON.stringify({ max }) },
+    ),
+
+  // Creator-only: set a per-player override for the maximum number of
+  // active GOALS only (default 8). Allowed range 1..500. Independent
+  // of the quest cap — call adminSetQuestMax separately for quests.
+  adminSetGoalMax: (playerId: string, max: number) =>
+    req<{ saved: boolean; max_active_goals: number }>(
+      `/admin/players/${playerId}/goal-max`,
+      { method: 'POST', body: JSON.stringify({ max }) },
+    ),
+
+  // @deprecated Legacy combined endpoint — sets BOTH quest AND goal
+  // caps to the same value. Kept for backward compat with older
+  // Creator clients. New code should call adminSetQuestMax and
+  // adminSetGoalMax independently.
   adminSetGoalQuestMax: (playerId: string, max: number) =>
-    req<{ saved: boolean; goal_quest_max: number }>(
+    req<{ saved: boolean; goal_quest_max: number; max_active_quests: number; max_active_goals: number }>(
       `/admin/players/${playerId}/goal-quest-max`,
       { method: 'POST', body: JSON.stringify({ max }) },
     ),
@@ -2161,9 +2179,15 @@ export type FriendProfileDetails = {
     goals_active: number;
     goals_completed: number;
   };
-  /** Per-player active Goals/Quests cap. Default 8. Creator can raise
-   *  via api.adminSetGoalQuestMax — applies immediately for this user
-   *  only (saved in profile.goal_quest_max). */
+  /** Per-player active QUEST cap (default 11). Creator-only; set via
+   *  api.adminSetQuestMax. Independent of `max_active_goals`. */
+  max_active_quests: number;
+  /** Per-player active GOAL cap (default 8). Creator-only; set via
+   *  api.adminSetGoalMax. Independent of `max_active_quests`. */
+  max_active_goals: number;
+  /** @deprecated Legacy combined cap — kept for backward compatibility
+   *  with older bundles. New code should read `max_active_quests` and
+   *  `max_active_goals` separately. */
   goal_quest_max: number;
 };
 

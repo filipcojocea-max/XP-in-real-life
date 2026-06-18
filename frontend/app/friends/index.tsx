@@ -1351,7 +1351,10 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
   const [openSection, setOpenSection] = useState<'apps' | 'tasks' | 'goals' | null>(null);
   // Creator-only "Increase maximum" dialog state.
   const [maxModalOpen, setMaxModalOpen] = useState(false);
-  const [maxInput, setMaxInput] = useState('');
+  // 2026-06-18: Quests and Goals caps are now INDEPENDENT — the modal
+  // shows two inputs and the Creator can change either or both.
+  const [questMaxInput, setQuestMaxInput] = useState('');
+  const [goalMaxInput, setGoalMaxInput] = useState('');
   const [maxSaving, setMaxSaving] = useState(false);
 
   // 2026-06-17 hotfix: previous version returned a cleanup function from
@@ -1386,23 +1389,60 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
   }, [userId]);
 
   const openMaxModal = () => {
-    const cur = (data && typeof data.goal_quest_max === 'number') ? data.goal_quest_max : 8;
-    setMaxInput(String(cur));
+    const curQ =
+      data && typeof (data as any).max_active_quests === 'number'
+        ? (data as any).max_active_quests
+        : data && typeof data.goal_quest_max === 'number'
+        ? data.goal_quest_max
+        : 11;
+    const curG =
+      data && typeof (data as any).max_active_goals === 'number'
+        ? (data as any).max_active_goals
+        : data && typeof data.goal_quest_max === 'number'
+        ? data.goal_quest_max
+        : 8;
+    setQuestMaxInput(String(curQ));
+    setGoalMaxInput(String(curG));
     setMaxModalOpen(true);
   };
 
   const saveMax = async () => {
-    const n = parseInt(maxInput, 10);
-    if (!Number.isFinite(n) || n < 1 || n > 500) {
-      showAlert('Invalid number', 'Enter a number between 1 and 500.');
+    const nQ = parseInt(questMaxInput, 10);
+    const nG = parseInt(goalMaxInput, 10);
+    if (!Number.isFinite(nQ) || nQ < 1 || nQ > 500) {
+      showAlert('Invalid quest limit', 'Quest maximum must be between 1 and 500.');
+      return;
+    }
+    if (!Number.isFinite(nG) || nG < 1 || nG > 500) {
+      showAlert('Invalid goal limit', 'Goal maximum must be between 1 and 500.');
       return;
     }
     setMaxSaving(true);
     try {
-      await api.adminSetGoalQuestMax(userId, n);
+      // Save independently so the Creator can change one without
+      // touching the other. We run the two requests sequentially so
+      // an early failure leaves the OTHER value untouched (rather
+      // than half-applied).
+      const curQ =
+        data && typeof (data as any).max_active_quests === 'number'
+          ? (data as any).max_active_quests
+          : data && typeof data.goal_quest_max === 'number'
+          ? data.goal_quest_max
+          : 11;
+      const curG =
+        data && typeof (data as any).max_active_goals === 'number'
+          ? (data as any).max_active_goals
+          : data && typeof data.goal_quest_max === 'number'
+          ? data.goal_quest_max
+          : 8;
+      if (nQ !== curQ) await api.adminSetQuestMax(userId, nQ);
+      if (nG !== curG) await api.adminSetGoalMax(userId, nG);
       setMaxModalOpen(false);
       void reload();
-      showAlert('Saved', `New maximum: ${n} active Goals/Quests for this player.`);
+      showAlert(
+        'Saved',
+        `Quests max: ${nQ} · Goals max: ${nG} (independent caps for this player).`,
+      );
     } catch (e: any) {
       showAlert('Could not save', String(e?.message || e));
     } finally {
@@ -1470,12 +1510,13 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
           </View>
         )}
         {/* Creator-only: raise / lower the per-player Quests cap.
-            The current cap is read from FriendProfileDetails.goal_quest_max
-            and saved back via api.adminSetGoalQuestMax. */}
+            Reads from FriendProfileDetails.max_active_quests (new
+            independent field, 2026-06-18); falls back to legacy
+            goal_quest_max for older bundles. */}
         {viewerIsAdmin && !data.is_self ? (
           <View style={{ marginTop: 12 }}>
             <Text style={[styles.detailsEmpty, { marginBottom: 6 }]}>
-              Current max active Goals/Quests: {data.goal_quest_max ?? 8}
+              Current max active Quests: {(data as any).max_active_quests ?? data.goal_quest_max ?? 11}
             </Text>
             <TouchableOpacity
               onPress={openMaxModal}
@@ -1520,7 +1561,7 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
         {viewerIsAdmin && !data.is_self ? (
           <View style={{ marginTop: 12 }}>
             <Text style={[styles.detailsEmpty, { marginBottom: 6 }]}>
-              Current max active Goals/Quests: {data.goal_quest_max ?? 8}
+              Current max active Goals: {(data as any).max_active_goals ?? data.goal_quest_max ?? 8}
             </Text>
             <TouchableOpacity
               onPress={openMaxModal}
@@ -1535,8 +1576,9 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
         ) : null}
       </DetailAccordion>
 
-      {/* Increase-maximum dialog — shared by Quests + Goals (single
-          per-player field). Keyboard-aware so the input stays visible
+      {/* Increase-maximum dialog — Quests and Goals are now INDEPENDENT
+          fields, so the modal shows two inputs and the Creator can edit
+          either or both. Keyboard-aware so both inputs stay visible
           on Android. */}
       <Modal
         visible={maxModalOpen}
@@ -1549,14 +1591,18 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
           style={styles.maxModalRoot}
         >
           <View style={styles.maxModalCard}>
-            <Text style={styles.maxModalTitle}>Set Goals/Quests maximum</Text>
+            <Text style={styles.maxModalTitle}>Set Quests &amp; Goals maximums</Text>
             <Text style={styles.maxModalHint}>
-              New cap will apply immediately for this player only. Default is 8.
-              Allowed range: 1–500.
+              Two independent caps for this player only. Defaults: 11 quests,
+              8 goals. Allowed range: 1–500 each.
+            </Text>
+
+            <Text style={[styles.maxModalHint, { marginTop: 12, color: colors.text }]}>
+              Quests maximum
             </Text>
             <TextInput
-              value={maxInput}
-              onChangeText={(t) => setMaxInput(t.replace(/[^0-9]/g, ''))}
+              value={questMaxInput}
+              onChangeText={(t) => setQuestMaxInput(t.replace(/[^0-9]/g, ''))}
               keyboardType="number-pad"
               maxLength={3}
               placeholder="e.g. 20"
@@ -1564,8 +1610,24 @@ function FriendDetailsSection({ userId, viewerIsAdmin = false }: { userId: strin
               style={styles.maxModalInput}
               autoFocus
               editable={!maxSaving}
-              testID="friend-details-max-input"
+              testID="friend-details-quest-max-input"
             />
+
+            <Text style={[styles.maxModalHint, { marginTop: 12, color: colors.text }]}>
+              Goals maximum
+            </Text>
+            <TextInput
+              value={goalMaxInput}
+              onChangeText={(t) => setGoalMaxInput(t.replace(/[^0-9]/g, ''))}
+              keyboardType="number-pad"
+              maxLength={3}
+              placeholder="e.g. 12"
+              placeholderTextColor={colors.textMuted}
+              style={styles.maxModalInput}
+              editable={!maxSaving}
+              testID="friend-details-goal-max-input"
+            />
+
             <View style={styles.maxModalActions}>
               <TouchableOpacity
                 onPress={() => setMaxModalOpen(false)}

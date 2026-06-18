@@ -24,9 +24,12 @@ import { useScrollToTopOnFocus } from '../../src/hooks/useScrollToTopOnFocus';
 
 const AREAS: FocusArea[] = ['social', 'fitness', 'appearance', 'mindset'];
 
-// Maximum number of active (uncompleted) long-term goals a user can hold
-// at one time. Mirrors the server-side cap in /api/goals.
-const GOAL_LIMIT = 8;
+// Default maximum number of active (uncompleted) long-term goals a user
+// can hold at one time. This is now a runtime VALUE read from the
+// player's profile (`profile.max_active_goals`) so a Creator can raise
+// or lower it per-player; the constant below is just the fallback when
+// the profile hasn't loaded yet or the field is missing.
+const DEFAULT_GOAL_LIMIT = 8;
 // Per-unit caps (also mirrored server-side).
 const DAILY_GOAL_LIMIT = 5;
 
@@ -105,12 +108,27 @@ export default function Goals() {
   // the delete-confirm dialog the user just triggered.
   const longPressFiredRef = useRef<Record<string, boolean>>({});
 
+  // Per-player goal cap — Creator can raise/lower this independently
+  // of the quest cap via /api/admin/players/{id}/goal-max. Falls back
+  // to the historical 8 while the profile is loading.
+  const [goalLimit, setGoalLimit] = useState<number>(DEFAULT_GOAL_LIMIT);
+
   const load = useCallback(async () => {
     try {
       const r = await api.listGoals();
       setGoals(r.goals);
       const prof = await api.getProfile().catch(() => null);
       setIsAdmin(!!prof?.is_admin);
+      // Reads `max_active_goals` first (new independent field); falls
+      // back to legacy `goal_quest_max`, then to the 8-goal default.
+      const raw =
+        prof && typeof (prof as any).max_active_goals === 'number'
+          ? (prof as any).max_active_goals
+          : prof && typeof (prof as any).goal_quest_max === 'number'
+          ? (prof as any).goal_quest_max
+          : DEFAULT_GOAL_LIMIT;
+      const n = Math.max(1, Math.min(500, Number(raw) || DEFAULT_GOAL_LIMIT));
+      setGoalLimit(n);
     } catch (e) {
       console.log('goals', e);
     } finally {
@@ -137,7 +155,7 @@ export default function Goals() {
 
   // Active goals = uncompleted; once a user finishes one, they can add a new one.
   const activeCount = goals.filter((g) => !g.completed).length;
-  const atGoalLimit = activeCount >= GOAL_LIMIT;
+  const atGoalLimit = activeCount >= goalLimit;
 
   // Show a 5-second auto-dismiss toast on a specific goal card.
   const showLockToast = useCallback((goalId: string, message: string) => {
@@ -228,7 +246,7 @@ export default function Goals() {
           <Text style={styles.kicker}>Long-Term Goals</Text>
           <Text style={styles.title}>Your Quests</Text>
           <Text style={styles.goalsCount}>
-            {activeCount} / {GOAL_LIMIT} active
+            {activeCount} / {goalLimit} active
           </Text>
         </View>
         <TouchableOpacity
@@ -238,7 +256,7 @@ export default function Goals() {
             if (atGoalLimit) {
               showAlert(
                 'Goal limit reached',
-                `You can have up to ${GOAL_LIMIT} active goals at once. Finish or delete one to add a new goal.`
+                `You can have up to ${goalLimit} active goals at once. Finish or delete one to add a new goal.`
               );
               return;
             }
