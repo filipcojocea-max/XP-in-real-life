@@ -273,6 +273,41 @@ export default function ShieldTapAnimator({
     }, HOLD_SPAWN_INTERVAL_MS);
   }, [disabled, colors, maxParticleReach, scale]);
 
+  /** Yellow shield-shaped burst that expands from the centre after the
+   *  hold particles have retracted. Kept inside the ring (max 1.6×
+   *  shield size, well under the ring radius).
+   *  Defined BEFORE endHold so its identifier exists in scope when
+   *  endHold's useCallback evaluates its dependency array (otherwise
+   *  TDZ → "Cannot access 'fireShieldBurst' before initialization"). */
+  const fireShieldBurst = useCallback(() => {
+    burstActive.current = true;
+    burstScale.setValue(0.3);
+    burstOpacity.setValue(0);
+    Animated.parallel([
+      Animated.timing(burstScale, {
+        toValue: 1,
+        duration: BURST_DURATION_MS,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.sequence([
+        Animated.timing(burstOpacity, {
+          toValue: 0.85,
+          duration: 90,
+          useNativeDriver: true,
+        }),
+        Animated.timing(burstOpacity, {
+          toValue: 0,
+          duration: BURST_DURATION_MS - 90,
+          easing: Easing.in(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start(() => {
+      burstActive.current = false;
+    });
+  }, [burstScale, burstOpacity]);
+
   // ─── HOLD (release) ────────────────────────────────────────────
   const endHold = useCallback(() => {
     if (!holdingRef.current) return;
@@ -325,38 +360,6 @@ export default function ShieldTapAnimator({
       useNativeDriver: true,
     }).start();
   }, [scale, fireShieldBurst]);
-
-  /** Yellow shield-shaped burst that expands from the centre after the
-   *  hold particles have retracted. Kept inside the ring (max 1.6×
-   *  shield size, well under the ring radius). */
-  const fireShieldBurst = useCallback(() => {
-    burstActive.current = true;
-    burstScale.setValue(0.3);
-    burstOpacity.setValue(0);
-    Animated.parallel([
-      Animated.timing(burstScale, {
-        toValue: 1,
-        duration: BURST_DURATION_MS,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.sequence([
-        Animated.timing(burstOpacity, {
-          toValue: 0.85,
-          duration: 90,
-          useNativeDriver: true,
-        }),
-        Animated.timing(burstOpacity, {
-          toValue: 0,
-          duration: BURST_DURATION_MS - 90,
-          easing: Easing.in(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ]),
-    ]).start(() => {
-      burstActive.current = false;
-    });
-  }, [burstScale, burstOpacity]);
 
   // Clean up the spawn interval if we unmount mid-hold.
   useEffect(() => {
