@@ -581,6 +581,83 @@ def _effective_day_start_for(prof: Optional[dict], local_now: datetime) -> tuple
     return _parse_hhmm(s_def.get("start_time", "07:00"), default=(7, 0))
 
 
+def _effective_day_end_for(prof: Optional[dict], local_now: datetime) -> tuple[int, int]:
+    """Returns (HH, MM) of the day-END / sleep boundary that applies
+    RIGHT NOW for the given user — the companion of
+    `_effective_day_start_for`. Consults the active shift's
+    `sleep_time` when `shift_schedule.enabled` is true; otherwise
+    falls back to the legacy global `sleep_time` field on the profile
+    (default 22:00).
+
+    This is the single source of truth for:
+      • Sleep mini-app day rollover
+      • End-of-day push notifications
+      • Any UI that asks "is the user winding down?"
+    so every reset/refresh in the app reads the SAME boundary the
+    Adaptive Work-Life Scheduler calendar shows.
+    """
+    fallback = (prof or {}).get("sleep_time") or "22:00"
+    fb_hh, fb_mm = _parse_hhmm(fallback, default=(22, 0))
+    if not prof or not (prof.get("shift_schedule") or {}).get("enabled"):
+        return fb_hh, fb_mm
+    today_iso = local_now.date().isoformat()
+    shift = _shift_for_date(prof, today_iso)
+    if shift is None:
+        return fb_hh, fb_mm
+    shifts = (prof.get("shift_schedule") or {}).get("shifts") or {}
+    s_def = shifts.get(shift) or DEFAULT_SHIFTS.get(shift) or {}
+    return _parse_hhmm(s_def.get("sleep_time", "22:00"), default=(22, 0))
+
+
+async def _resolve_day_window_for_user(user_id: str) -> dict:
+    """Async wrapper that fetches the user's profile once and returns
+    everything callers need for day-boundary math:
+        {
+          "tz": str | None,           # IANA tz name
+          "day_start": "HH:MM",       # scheduler-aware start
+          "day_end":   "HH:MM",       # scheduler-aware sleep boundary
+          "start_hh": int, "start_mm": int,
+          "end_hh":   int, "end_mm":   int,
+          "schedule_enabled": bool,
+        }
+
+    Every cron / daily-reset / chest-rotation / streak-anchor path in
+    the backend reads from THIS helper so the Work-Life Scheduler
+    becomes the single source of truth — when the user sets a 06:00
+    wake on Monday, Monday's quests/goals/chest/streak all roll at
+    06:00 instead of the legacy 07:00 fallback.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except Exception:
+        ZoneInfo = None  # type: ignore[assignment]
+    prof = await db.profile.find_one(
+        {"_id": user_id},
+        {"timezone": 1, "day_start_time": 1, "wake_time": 1,
+         "sleep_time": 1, "shift_schedule": 1},
+    ) or {}
+    tz_name = prof.get("timezone")
+    try:
+        local_now = (
+            datetime.now(ZoneInfo(tz_name)) if (ZoneInfo and tz_name)
+            else datetime.now(timezone.utc)
+        )
+    except Exception:
+        local_now = datetime.now(timezone.utc)
+    start_hh, start_mm = _effective_day_start_for(prof, local_now)
+    end_hh, end_mm = _effective_day_end_for(prof, local_now)
+    return {
+        "tz": tz_name,
+        "day_start": f"{start_hh:02d}:{start_mm:02d}",
+        "day_end": f"{end_hh:02d}:{end_mm:02d}",
+        "start_hh": start_hh,
+        "start_mm": start_mm,
+        "end_hh": end_hh,
+        "end_mm": end_mm,
+        "schedule_enabled": bool((prof.get("shift_schedule") or {}).get("enabled")),
+    }
+
+
 def _parse_hhmm(s: Optional[str], default=(7, 0)) -> tuple[int, int]:
     try:
         if not s:
@@ -975,15 +1052,17 @@ async def _compute_streak_from_charts(user_id: str) -> int:
                 active_dates.add(d)
         if not active_dates:
             return 0
-        # Compute the user's local "today" using day_start_time anchor
-        # so timezone / DST flip-overs don't randomly reset the streak.
+        # Compute the user's local "today" using the Adaptive Work-Life
+        # Scheduler's effective day-start (falls back to day_start_time
+        # / wake_time / 07:00 when the schedule is disabled). This is
+        # the single source of truth so timezone / DST flip-overs AND
+        # the user's calendar both drive the streak roll-over.
         today = today_str()
         try:
             tz_name = prof.get("timezone") or "UTC"
             from zoneinfo import ZoneInfo
             local = datetime.now(ZoneInfo(tz_name))
-            day_start = prof.get("day_start_time") or prof.get("wake_time") or "07:00"
-            hh, mm = [int(x) for x in (day_start or "07:00").split(":")[:2]]
+            hh, mm = _effective_day_start_for(prof, local)
             anchor = local.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if local < anchor:
                 anchor = anchor - timedelta(days=1)
@@ -3427,7 +3506,10 @@ async def sleep_profile(user_id: str = Depends(get_user_or_legacy)):
     #  - Uses the user's own `day_start_time` + `timezone` to anchor the sleep-cycle day.
     #  - Prompt is active from (day_start - 2h) until the NEXT day_start.
     #  - Disappears once the user has logged a check-in for the current sleep-cycle day.
-    prof = await db.profile.find_one({"_id": user_id}, {"timezone": 1, "day_start_time": 1, "wake_time": 1})
+    prof = await db.profile.find_one(
+        {"_id": user_id},
+        {"timezone": 1, "day_start_time": 1, "wake_time": 1, "shift_schedule": 1},
+    )
     today_user = user_today_str(prof)
     last = p.get("last_checkin_date")
     show_checkin = last != today_user
@@ -3436,9 +3518,11 @@ async def sleep_profile(user_id: str = Depends(get_user_or_legacy)):
     try:
         if prof and prof.get("timezone"):
             from zoneinfo import ZoneInfo
-            day_start = prof.get("day_start_time") or prof.get("wake_time") or "07:00"
-            hh, mm = [int(x) for x in day_start.split(":")[:2]]
             local_now = datetime.now(ZoneInfo(prof["timezone"]))
+            # Scheduler-aware day start — honours Adaptive Work-Life
+            # Scheduler calendar so the "How was your sleep?" prompt
+            # follows the SAME daily boundary as quests/goals/streak.
+            hh, mm = _effective_day_start_for(prof, local_now)
             start_today = local_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
             window_start = start_today - timedelta(hours=2)
             # If local_now is BEFORE day_start, today's window is still yesterday's
@@ -3502,7 +3586,10 @@ async def sleep_checkin(body: SleepCheckinPayload, user_id: str = Depends(get_us
     p = await db.sleep_profile.find_one({"user_id": user_id})
     if not p:
         raise HTTPException(404, "Onboard first")
-    prof = await db.profile.find_one({"_id": user_id}, {"timezone": 1, "day_start_time": 1, "wake_time": 1})
+    prof = await db.profile.find_one(
+        {"_id": user_id},
+        {"timezone": 1, "day_start_time": 1, "wake_time": 1, "shift_schedule": 1},
+    )
     entry = {
         "date": user_today_str(prof),
         "rating": int(body.rating),
@@ -3662,8 +3749,28 @@ def _challenge_day_for_user(now_dt: datetime, wake_str: str | None, tz_name: Opt
 
 
 async def _wake_for_user(user_id: str) -> str:
-    prof = await db.profile.find_one({"_id": user_id})
-    return (prof or {}).get("day_start_time") or (prof or {}).get("wake_time") or "07:00"
+    """Scheduler-aware wake-up time as 'HH:MM' string.
+
+    Reads the active shift's start_time first (when
+    profile.shift_schedule.enabled is true), then falls back to the
+    legacy day_start_time / wake_time fields, then to 07:00.
+
+    This is the single source of truth used by sleep / streak / push
+    scheduling code that needs a HH:MM string rather than a tuple."""
+    prof = await db.profile.find_one(
+        {"_id": user_id},
+        {"timezone": 1, "day_start_time": 1, "wake_time": 1, "shift_schedule": 1},
+    ) or {}
+    try:
+        from zoneinfo import ZoneInfo
+        tz = prof.get("timezone")
+        local_now = (
+            datetime.now(ZoneInfo(tz)) if tz else datetime.now(timezone.utc)
+        )
+    except Exception:
+        local_now = datetime.now(timezone.utc)
+    hh, mm = _effective_day_start_for(prof, local_now)
+    return f"{hh:02d}:{mm:02d}"
 
 
 async def _tz_for_user(user_id: str) -> Optional[str]:
@@ -7676,9 +7783,16 @@ async def confidence_daily(user_id: str = Depends(get_user_or_legacy)):
 
     Rule-4 — challenges are randomised PER USER ACCOUNT via
     `challenge_queue.next_item`. Each track has its own queue. The pick
-    is memoised for the UTC day so the same user keeps seeing the same
-    challenge for that day; on the next UTC day the queue advances."""
-    today = datetime.utcnow().date().isoformat()
+    is memoised for the user's local day (scheduler-aware) so the same
+    user keeps seeing the same challenge for that day; on the next
+    boundary the queue advances. The day anchor honours the Adaptive
+    Work-Life Scheduler when enabled, so rolling-shift users get their
+    new picks at their actual wake-up time."""
+    prof_for_day = await db.profile.find_one(
+        {"_id": user_id},
+        {"timezone": 1, "day_start_time": 1, "wake_time": 1, "shift_schedule": 1},
+    )
+    today = user_today_str(prof_for_day)
 
     # Per-user, per-day, per-track memoisation. The queue itself only
     # advances when we mint a NEW pick — so refreshing the page within
@@ -7736,8 +7850,14 @@ async def confidence_complete(
     """Mark a daily confidence challenge as done for today. Idempotent:
     a second POST for the same track on the same day is a no-op. Awards
     +15 XP per completion (small nudge, but it adds up to ~60 XP/day if
-    you hit all four tracks)."""
-    today = datetime.utcnow().date().isoformat()
+    you hit all four tracks). The 'today' anchor is scheduler-aware so
+    rolling-shift users get their reset at the wake-up time set on
+    their Adaptive Work-Life Scheduler calendar."""
+    prof_for_day = await db.profile.find_one(
+        {"_id": user_id},
+        {"timezone": 1, "day_start_time": 1, "wake_time": 1, "shift_schedule": 1},
+    )
+    today = user_today_str(prof_for_day)
     existing = await db.confidence_completions.find_one(
         {"user_id": user_id, "date": today, "track": body.track}
     )
