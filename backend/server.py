@@ -8336,6 +8336,37 @@ async def _wire_buried_treasure_module():
         )
         attach_routes(app, get_user_or_legacy)
         logger.info("[startup] Buried Treasure module wired (init + attach_routes)")
+
+        # ── Background tick for daily-reset + group rotations ──────
+        # buried_treasure.py exposes `_rotation_failsafe_tick` as a
+        # module global from inside attach_routes — we now schedule it
+        # to run every 60 s. This is what auto-rolls each player's
+        # solo chest at their personal wake-up time, plus advances
+        # group rotations / runs the auto-failsafe-hide for stalled
+        # holders. The endpoints also call _maybe_reset_solo() lazily
+        # on /bt/solo/current + /compass so the cycle works even if
+        # this tick is paused, but the tick is what fires the
+        # "🌅 New treasure for the day!" push for offline players.
+        try:
+            import buried_treasure as _bt_mod
+            tick_fn = _bt_mod.__dict__.get("_rotation_failsafe_tick")
+            if tick_fn is not None:
+                import asyncio as _asyncio
+
+                async def _bt_tick_loop():
+                    while True:
+                        try:
+                            await tick_fn()
+                        except Exception:
+                            logger.exception("[bt-tick] iteration failed")
+                        await _asyncio.sleep(60)
+
+                _asyncio.create_task(_bt_tick_loop())
+                logger.info("[startup] Buried Treasure rotation tick scheduled (60s)")
+            else:
+                logger.warning("[startup] _rotation_failsafe_tick not exposed by buried_treasure")
+        except Exception:
+            logger.exception("[startup] Buried Treasure tick wiring failed")
     except Exception:
         logger.exception("[startup] Buried Treasure wiring failed")
 

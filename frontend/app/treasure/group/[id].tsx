@@ -445,10 +445,18 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
   }, []);
 
   // Pipe every GPS tick into the embedded mini-map via ref so the live
-  // dot updates without re-rendering the WebView.
+  // dot updates without re-rendering the WebView. Also pan the map to
+  // the user's first fix — BTLeafletMap freezes its initial HTML on
+  // mount so without an explicit setCenter call the map would stay
+  // pinned at (0,0)/zoom 2 even after GPS arrives.
+  const didCenterRef = useRef(false);
   useEffect(() => {
     if (!gps) return;
     try { mapRef.current?.setUserLocation(gps.lat, gps.lng); } catch {}
+    if (!didCenterRef.current) {
+      didCenterRef.current = true;
+      try { mapRef.current?.setCenter(gps.lat, gps.lng, 17); } catch {}
+    }
   }, [gps]);
 
   // "Capture map" is now just a UI confirmation — we set a placeholder

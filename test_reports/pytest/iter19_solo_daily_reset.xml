@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" skipped="0" tests="14" time="578.775" timestamp="2026-06-18T09:13:48.358267+00:00" hostname="agent-env-3536bda1-e85d-41df-93ae-85b5950b1c03"><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestSoloDailyReset" name="test_reset_via_solo_current" time="126.812"><failure message="RuntimeError: Event loop is closed">backend/tests/test_iter19_solo_daily_reset.py:197: in test_reset_via_solo_current
+    _run(_force_past_reset(mongo_db, user["user_id"]))
+backend/tests/test_iter19_solo_daily_reset.py:154: in _run
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+                                                                           ^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+backend/tests/test_iter19_solo_daily_reset.py:158: in _force_past_reset
+    await db.bt_solo.update_one(
+/root/.venv/lib/python3.11/site-packages/motor/metaprogramming.py:74: in method
+    return framework.run_on_executor(
+/root/.venv/lib/python3.11/site-packages/motor/frameworks/asyncio/__init__.py:85: in run_on_executor
+    return loop.run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:817: in run_in_executor
+    self._check_closed()
+/usr/local/lib/python3.11/asyncio/base_events.py:520: in _check_closed
+    raise RuntimeError('Event loop is closed')
+E   RuntimeError: Event loop is closed
+
+During handling of the above exception, another exception occurred:
+backend/tests/test_iter19_solo_daily_reset.py:215: in test_reset_via_solo_current
+    _run(_cleanup_user(mongo_db, user["user_id"]))
+backend/tests/test_iter19_solo_daily_reset.py:154: in _run
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+                                                                           ^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+backend/tests/test_iter19_solo_daily_reset.py:173: in _cleanup_user
+    await db.bt_solo.delete_one({"_id": user_id})
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/motor/metaprogramming.py:74: in method
+    return framework.run_on_executor(
+/root/.venv/lib/python3.11/site-packages/motor/frameworks/asyncio/__init__.py:85: in run_on_executor
+    return loop.run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:817: in run_in_executor
+    self._check_closed()
+/usr/local/lib/python3.11/asyncio/base_events.py:520: in _check_closed
+    raise RuntimeError('Event loop is closed')
+E   RuntimeError: Event loop is closed</failure></testcase><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestSoloDailyReset" name="test_no_premature_reset" time="126.791" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestSoloDailyReset" name="test_reset_via_solo_compass" time="125.489"><failure message="RuntimeError: Event loop is closed">backend/tests/test_iter19_solo_daily_reset.py:240: in test_reset_via_solo_compass
+    _run(_force_past_reset(mongo_db, user["user_id"]))
+backend/tests/test_iter19_solo_daily_reset.py:154: in _run
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+                                                                           ^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+backend/tests/test_iter19_solo_daily_reset.py:158: in _force_past_reset
+    await db.bt_solo.update_one(
+/root/.venv/lib/python3.11/site-packages/motor/metaprogramming.py:74: in method
+    return framework.run_on_executor(
+/root/.venv/lib/python3.11/site-packages/motor/frameworks/asyncio/__init__.py:85: in run_on_executor
+    return loop.run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:817: in run_in_executor
+    self._check_closed()
+/usr/local/lib/python3.11/asyncio/base_events.py:520: in _check_closed
+    raise RuntimeError('Event loop is closed')
+E   RuntimeError: Event loop is closed
+
+During handling of the above exception, another exception occurred:
+backend/tests/test_iter19_solo_daily_reset.py:255: in test_reset_via_solo_compass
+    _run(_cleanup_user(mongo_db, user["user_id"]))
+backend/tests/test_iter19_solo_daily_reset.py:154: in _run
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+                                                                           ^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+backend/tests/test_iter19_solo_daily_reset.py:173: in _cleanup_user
+    await db.bt_solo.delete_one({"_id": user_id})
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/motor/metaprogramming.py:74: in method
+    return framework.run_on_executor(
+/root/.venv/lib/python3.11/site-packages/motor/frameworks/asyncio/__init__.py:85: in run_on_executor
+    return loop.run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:817: in run_in_executor
+    self._check_closed()
+/usr/local/lib/python3.11/asyncio/base_events.py:520: in _check_closed
+    raise RuntimeError('Event loop is closed')
+E   RuntimeError: Event loop is closed</failure></testcase><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestSoloDailyReset" name="test_backfill_when_no_next_reset_at" time="126.085"><failure message="RuntimeError: Event loop is closed">backend/tests/test_iter19_solo_daily_reset.py:265: in test_backfill_when_no_next_reset_at
+    doc0 = _run(_fetch_solo_doc(mongo_db, user["user_id"]))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend/tests/test_iter19_solo_daily_reset.py:154: in _run
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+                                                                           ^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+backend/tests/test_iter19_solo_daily_reset.py:169: in _fetch_solo_doc
+    return await db.bt_solo.find_one({"_id": user_id})
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/motor/metaprogramming.py:74: in method
+    return framework.run_on_executor(
+/root/.venv/lib/python3.11/site-packages/motor/frameworks/asyncio/__init__.py:85: in run_on_executor
+    return loop.run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:817: in run_in_executor
+    self._check_closed()
+/usr/local/lib/python3.11/asyncio/base_events.py:520: in _check_closed
+    raise RuntimeError('Event loop is closed')
+E   RuntimeError: Event loop is closed
+
+During handling of the above exception, another exception occurred:
+backend/tests/test_iter19_solo_daily_reset.py:278: in test_backfill_when_no_next_reset_at
+    _run(_cleanup_user(mongo_db, user["user_id"]))
+backend/tests/test_iter19_solo_daily_reset.py:154: in _run
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+                                                                           ^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+backend/tests/test_iter19_solo_daily_reset.py:173: in _cleanup_user
+    await db.bt_solo.delete_one({"_id": user_id})
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/root/.venv/lib/python3.11/site-packages/motor/metaprogramming.py:74: in method
+    return framework.run_on_executor(
+/root/.venv/lib/python3.11/site-packages/motor/frameworks/asyncio/__init__.py:85: in run_on_executor
+    return loop.run_in_executor(_EXECUTOR, functools.partial(fn, *args, **kwargs))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:817: in run_in_executor
+    self._check_closed()
+/usr/local/lib/python3.11/asyncio/base_events.py:520: in _check_closed
+    raise RuntimeError('Event loop is closed')
+E   RuntimeError: Event loop is closed</failure></testcase><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestBackgroundTick" name="test_startup_log_present" time="0.013" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestBackgroundTick" name="test_process_alive_after_70s" time="70.466" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_penalties_pending" time="0.428" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_chat_preferences" time="0.118" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_active_boost" time="0.096" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_boost_inventory" time="0.094" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_spot_finds" time="0.098" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_no_go_zones_admin" time="0.107" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_bt_settings" time="0.099" /><testcase classname="backend.tests.test_iter19_solo_daily_reset.TestRegression" name="test_quest_cap_default" time="1.601" /></testsuite></testsuites>

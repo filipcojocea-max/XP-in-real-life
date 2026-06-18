@@ -848,6 +848,14 @@ def _solo_public(doc: dict | None) -> dict | None:
     return out
 
 
+async def _maybe_reset_solo(doc: dict | None) -> dict | None:
+    """Stub — the real implementation is installed by attach_routes()
+    so it can use the `_resolve_user_wake_at` closure defined there.
+    This module-level stub exists only to keep linters happy; the
+    function is overwritten via `globals()` at startup."""
+    return doc
+
+
 def _group_public(doc: dict | None, *, viewer_id: str) -> dict | None:
     if not doc:
         return None
@@ -1151,6 +1159,7 @@ def attach_routes(app, get_user_or_legacy):
     @router.get("/bt/solo/current")
     async def solo_current(user_id: str = Depends(get_user_or_legacy)):
         doc = await _db.bt_solo.find_one({"_id": user_id})
+        doc = await _maybe_reset_solo(doc)
         return {"hunt": _solo_public(doc)}
 
     @router.get("/bt/solo/compass")
@@ -1160,6 +1169,7 @@ def attach_routes(app, get_user_or_legacy):
         user_id: str = Depends(get_user_or_legacy),
     ):
         doc = await _db.bt_solo.find_one({"_id": user_id})
+        doc = await _maybe_reset_solo(doc)
         if not doc:
             raise HTTPException(404, "No active solo hunt. Start one first.")
         chest = doc.get("chest") or {}
@@ -2162,6 +2172,105 @@ def attach_routes(app, get_user_or_legacy):
         except Exception:
             from datetime import datetime as _dt, timezone as _tz, timedelta as _td
             return (_dt.now(_tz.utc) + _td(hours=24)).isoformat()
+
+    async def _maybe_reset_solo_impl(doc: dict | None) -> dict | None:
+        """On-demand daily reset for the caller's solo chest.
+
+        The original design relied on a background scheduler to walk
+        every player's `bt_solo` doc and refresh each chest at their
+        personal wake-up time. We now do this lazily inside the solo
+        endpoints so the cycle works even if the background tick is
+        paused — when the caller hits /bt/solo/current or
+        /bt/solo/compass we check whether `next_reset_at` has passed
+        and, if so, pick a fresh GREEN-only chest inside their saved
+        hunt area, stamp a new `buried_at`, push the next reset time
+        forward, and clear the previous find. Returns the (possibly
+        mutated) document so callers can serialise the new state in
+        the same request.
+        """
+        if not doc:
+            return doc
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        uid = str(doc.get("_id") or "")
+        if not uid:
+            return doc
+
+        next_reset = doc.get("next_reset_at")
+        # Backfill: legacy hunts with no `next_reset_at` field — stamp
+        # tomorrow's wake-up time and leave the chest untouched.
+        if not next_reset:
+            try:
+                wake = await _resolve_user_wake_at(uid)
+                await _db.bt_solo.update_one({"_id": uid}, {"$set": {"next_reset_at": wake}})
+                doc["next_reset_at"] = wake
+            except Exception:
+                logger.exception("[bt-solo] backfill next_reset_at failed for %s", uid)
+            return doc
+
+        try:
+            nxt_dt = datetime.fromisoformat(str(next_reset).replace("Z", "+00:00"))
+        except Exception:
+            return doc
+        if nxt_dt > now:
+            return doc  # not yet due
+
+        area = doc.get("area") or {}
+        center_lat = area.get("lat")
+        center_lng = area.get("lng")
+        radius_m = float(area.get("radius_m") or 1500.0)
+        if center_lat is None or center_lng is None:
+            try:
+                nxt = await _resolve_user_wake_at(uid)
+                await _db.bt_solo.update_one({"_id": uid}, {"$set": {"next_reset_at": nxt}})
+                doc["next_reset_at"] = nxt
+            except Exception:
+                pass
+            return doc
+
+        try:
+            new_lat, new_lng = await _pick_public_chest_point(
+                float(center_lat), float(center_lng), radius_m,
+            )
+        except Exception:
+            logger.exception("[bt-solo] strict green pick failed for %s — falling back", uid)
+            try:
+                new_lat, new_lng = await _pick_safe_random_point(
+                    float(center_lat), float(center_lng), radius_m,
+                )
+            except Exception:
+                logger.exception("[bt-solo] safe-random pick also failed for %s — aborting reset", uid)
+                return doc
+
+        next_reset_iso = await _resolve_user_wake_at(uid)
+        buried_iso = _now_iso()
+        await _db.bt_solo.update_one(
+            {"_id": uid},
+            {
+                "$set": {
+                    "chest": {"lat": float(new_lat), "lng": float(new_lng)},
+                    "buried_at": buried_iso,
+                    "found_today": False,
+                    "next_reset_at": next_reset_iso,
+                    "auto_reset": True,
+                },
+                "$unset": {"found_at": "", "winner_photo_base64": ""},
+            },
+        )
+        doc["chest"] = {"lat": float(new_lat), "lng": float(new_lng)}
+        doc["buried_at"] = buried_iso
+        doc["found_today"] = False
+        doc["next_reset_at"] = next_reset_iso
+        doc["auto_reset"] = True
+        doc.pop("found_at", None)
+        doc.pop("winner_photo_base64", None)
+        logger.info("[bt-solo] on-demand reset for %s → (%.6f, %.6f)", uid, new_lat, new_lng)
+        return doc
+
+    # Install the closure-aware implementation over the module-level
+    # stub so `solo_current` / `solo_compass` (which call the module
+    # global) hit the real function.
+    globals()["_maybe_reset_solo"] = _maybe_reset_solo_impl
 
     def _rotation_init(creator_id: str, member_ids: list[str]) -> dict:
         """Initial rotation_state for a freshly buried group. Creator
