@@ -8299,6 +8299,94 @@ async def admin_players_by_creation(
     return {"players": rows, "count": len(rows), "order": order, "since": since}
 
 
+# ═══════════════════ Admin: Inactive players (dormant accounts) ═══════════════
+@api_router.get("/admin/players/inactive")
+async def admin_players_inactive(
+    bucket: str = "2w",
+    user_id: str = Depends(get_user_or_legacy),
+):
+    """Creator-only: list players who haven't been seen in N+ days.
+
+    `bucket` selects the inactivity window:
+      * "2w"  → 14+ days dormant
+      * "1m"  → 30+ days dormant
+      * "6m"  → 180+ days dormant
+
+    "Inactive" is the LATER of profile.last_seen_at and the user's
+    most-recent task_logs.completed_at — so a player who hasn't opened
+    the app but is still being marked off the chart by another flow
+    counts as active. Sorted longest-inactive first.
+    """
+    if not await _is_admin_user(user_id):
+        raise HTTPException(403, "Admin only.")
+
+    bucket_norm = (bucket or "2w").strip().lower()
+    days_map = {"2w": 14, "1m": 30, "6m": 180}
+    threshold_days = days_map.get(bucket_norm)
+    if threshold_days is None:
+        raise HTTPException(400, "bucket must be one of: 2w, 1m, 6m")
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=threshold_days)
+    cutoff_iso = cutoff.isoformat()
+
+    # Pull every profile and resolve last-activity per user. The
+    # collection is small enough (admin-only view, typically a few
+    # hundred to a few thousand rows) that an in-memory pass is fine
+    # and keeps the logic simple + readable.
+    raw_profiles: list[dict] = []
+    async for prof in db.profile.find({}):
+        raw_profiles.append(prof)
+    await _enrich_emails(raw_profiles)
+
+    rows: list[dict] = []
+    for prof in raw_profiles:
+        uid = prof.get("_id")
+        if not uid:
+            continue
+        # profile.last_seen_at (ISO) — primary signal.
+        last_seen = prof.get("last_seen_at") or prof.get("created_at") or ""
+        # Latest completed task_log — secondary signal so we don't flag
+        # a heavy-streak player who just happened to skip opening the
+        # app today.
+        last_log = await db.task_logs.find_one(
+            {"user_id": uid, "completed": True},
+            sort=[("completed_at", -1)],
+            projection={"completed_at": 1},
+        )
+        last_log_iso = (last_log or {}).get("completed_at") or ""
+        # Take the LATER of the two.
+        last_active_iso = last_seen if last_seen >= last_log_iso else last_log_iso
+        if not last_active_iso:
+            continue  # no signal at all — skip rather than flag.
+        if last_active_iso >= cutoff_iso:
+            continue  # active inside the window.
+        try:
+            last_dt = datetime.fromisoformat(last_active_iso.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        days_inactive = max(threshold_days, int((now - last_dt).total_seconds() // 86400))
+        rows.append({
+            "user_id": uid,
+            "name": prof.get("full_name") or prof.get("name") or "Anonymous",
+            "email": prof.get("_email_cache") or "",
+            "avatar_base64": prof.get("avatar_base64"),
+            "level": int(prof.get("level") or 1),
+            "total_xp": int(prof.get("total_xp") or 0),
+            "last_active_at": last_active_iso,
+            "days_inactive": days_inactive,
+        })
+
+    # Longest-inactive first.
+    rows.sort(key=lambda r: r["days_inactive"], reverse=True)
+    return {
+        "bucket": bucket_norm,
+        "threshold_days": threshold_days,
+        "count": len(rows),
+        "players": rows,
+    }
+
+
 # ═══════════════════ Admin: Global leaderboard (top 100) ═══════════════════
 # Top-100 players by total XP (lifetime, weekly, monthly, yearly). The
 # weekly/monthly/yearly windows are computed by summing xp_events; the
