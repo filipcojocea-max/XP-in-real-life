@@ -157,16 +157,26 @@ export default function ShieldTapAnimator({
   const burstOpacity = useRef(new Animated.Value(0)).current;
   const burstActive = useRef(false);
 
+  // 2026-06-19: Tap-spin completely rebuilt per spec.
+  //   • 6 full LEFT rotations (SPIN_DEG = -2160) over 1.5 s
+  //   • Linear easing so every rotation looks the same speed — the
+  //     previous Easing.out(cubic) made the final 0.5 s appear almost
+  //     stationary, which read as "flat 2D" to the user.
+  //   • Tap-blocking: while the animation is in motion, all extra
+  //     taps are ignored. Re-arms automatically on completion.
+  //   • Long-press handlers (startHold / endHold) are untouched.
+  const isSpinningRef = useRef(false);
+
   // ─── TAP ────────────────────────────────────────────────────────
   const onTap = useCallback(() => {
     if (disabled) return;
-    // If the gesture started as a long-press, the press-out handler
-    // will have already cleared holdingRef. A late tap event arriving
-    // after a hold should NOT re-spin — the hold's release flow plays
-    // its own burst.
-    if (holdingRef.current) return;
+    if (holdingRef.current) return;          // ignore tap fired by a long-press
+    if (isSpinningRef.current) return;       // block repeat taps while spinning
 
-    // Reset transforms so a rapid double-tap blends cleanly.
+    isSpinningRef.current = true;
+
+    // Fresh values for a clean run — also clears any leftover state
+    // from a hold that was cancelled before fully settling.
     spin.setValue(0);
     scale.setValue(1);
     burstProgress.setValue(0);
@@ -175,37 +185,45 @@ export default function ShieldTapAnimator({
     setTapParticles(buildTapParticles(colors, maxParticleReach, tapSeed.current));
 
     Animated.parallel([
-      // 3 rotations over 1.5 s, easing out for a smooth landing.
+      // The shield spin itself. LINEAR easing on this driver so the
+      // 6 rotations all read at the same speed — combined with rotateY
+      // + perspective this produces a continuous wheel-on-its-side
+      // motion instead of a "ease-out flat disc" feel.
       Animated.timing(spin, {
         toValue: 1,
         duration: SPIN_DURATION_MS,
-        easing: Easing.out(Easing.cubic),
+        easing: Easing.linear,
         useNativeDriver: true,
       }),
-      // Subtle scale pulse so the shield "punches" briefly at start.
+      // Tiny scale pulse on the way in to give the tap a "punch" — does
+      // not interfere with the 3D rotation since scale is a separate
+      // transform key.
       Animated.sequence([
         Animated.spring(scale, {
-          toValue: 1.08,
-          friction: 5,
-          tension: 220,
-          useNativeDriver: true,
+          toValue: 1.08, friction: 5, tension: 220, useNativeDriver: true,
         }),
         Animated.spring(scale, {
-          toValue: 1,
-          friction: 6,
-          tension: 160,
-          useNativeDriver: true,
+          toValue: 1, friction: 6, tension: 160, useNativeDriver: true,
         }),
       ]),
-      // Particles — fast initial acceleration (easing.out) so they
-      // clear the shield quickly, then drift out and fade.
+      // Particles fly outward — unchanged from the prior spec.
       Animated.timing(burstProgress, {
         toValue: 1,
         duration: TAP_PARTICLE_DURATION_MS,
         easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }),
-    ]).start();
+    ]).start(({ finished }) => {
+      // Re-arm the tap regardless of whether the animation was
+      // interrupted (finished=false) so a subsequent tap can't get
+      // stuck behind a stale flag.
+      isSpinningRef.current = false;
+      // Safety reset: snap the spin value back to 0 so the next run
+      // starts from a known origin even if the user double-tapped
+      // mid-flight (the early-return above already blocks it, but
+      // this keeps the Animated.Value tidy).
+      if (finished) spin.setValue(0);
+    });
   }, [disabled, colors, maxParticleReach, spin, scale, burstProgress]);
 
   // ─── HOLD (start) ──────────────────────────────────────────────
