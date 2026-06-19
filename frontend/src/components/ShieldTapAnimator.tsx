@@ -371,7 +371,12 @@ export default function ShieldTapAnimator({
     };
   }, []);
 
-  const rotate = spin.interpolate({
+  // 2026-06-19: TAP spin is now around the VERTICAL Y-axis (rotateY)
+  // — the shield turns like a wheel on its side, presenting its face
+  // and then its edge to the viewer. The previous rotateZ spin looked
+  // like a flat disc on a table, which the user explicitly didn't
+  // want. Hold behaviour is intentionally untouched.
+  const rotateY = spin.interpolate({
     inputRange: [0, 1],
     outputRange: ['0deg', `${SPIN_DEG}deg`],
   });
@@ -510,10 +515,20 @@ export default function ShieldTapAnimator({
           </Svg>
         </Animated.View>
 
-        {/* The shield itself — rotated + scaled, artwork untouched. */}
+        {/* The shield itself — `rotateY` produces a 3D wheel-on-its-side
+            spin around the vertical axis (face → edge → face → ...).
+            `perspective` controls how strong the 3D effect reads; 800
+            gives a satisfying "real wheel" depth without being too
+            theatrical. Scale stays on the same Animated.Value as
+            before so the hold-shrink and tap-pulse still feel
+            identical to the previous 2D version. */}
         <Animated.View
           style={{
-            transform: [{ rotate }, { scale }],
+            transform: [
+              { perspective: 800 },
+              { rotateY },
+              { scale },
+            ],
           }}
         >
           {children}
