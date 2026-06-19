@@ -71,8 +71,15 @@ export default function Ring({
           ]}
         />
       ) : null}
-      <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
-        <View style={styles.center}>{children}</View>
+      {/* Children slot — the actual contents of the ring (shield,
+          icons, etc.). We use `box-none` here, NOT `none`: the
+          wrapping View itself must NOT intercept taps (so the SVG
+          progress stroke stays "drawing only"), but children inside
+          MUST still be able to receive events — otherwise the
+          ShieldTapAnimator's Pressable on the Home tab silently
+          stops working. */}
+      <View style={StyleSheet.absoluteFillObject} pointerEvents="box-none">
+        <View style={styles.center} pointerEvents="box-none">{children}</View>
       </View>
     </View>
   );
