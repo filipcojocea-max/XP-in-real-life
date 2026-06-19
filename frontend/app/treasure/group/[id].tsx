@@ -36,6 +36,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
 import MapView, { Marker, Circle, IS_WEB_PLACEHOLDER } from '../../../src/components/MapShim';
 import BTLeafletMap, { type BTLeafletMapHandle } from '../../../src/components/BTLeafletMap';
+import BTAROverlay from '../../../src/components/BTAROverlay';
 import { api, type BTCompassReading, type BTGroup } from '../../../src/api';
 import { BTReportIssueModal } from '../../../src/components/BTReportIssueModal';
 import { colors, radii, spacing } from '../../../src/theme';
@@ -131,6 +132,21 @@ export default function GroupScreen() {
         granted = r.status === 'granted';
       }
       if (!granted) return;
+      // Seed with the OS's last known fix so the map can centre on the
+      // user within a few hundred milliseconds — Location.watchPositionAsync
+      // can take 3–8 s to deliver its first reading on Android (and even
+      // longer in places like AU where Google's network-locate is slow),
+      // and during that gap the map was rendering as a world view. The
+      // seed gets overwritten by the first live fix from the watcher.
+      try {
+        const last = await Location.getLastKnownPositionAsync({
+          maxAge: 5 * 60 * 1000, // 5 min — older than this isn't useful
+          requiredAccuracy: 1000,
+        });
+        if (!cancelled && last) {
+          setGPS({ lat: last.coords.latitude, lng: last.coords.longitude });
+        }
+      } catch {}
       const sub = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 1500 },
         (pos) => { if (!cancelled) setGPS({ lat: pos.coords.latitude, lng: pos.coords.longitude }); },
@@ -422,6 +438,20 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
         showAlert('Location needed', 'Allow Location so we can save the bury spot.');
         return;
       }
+      // Seed with the OS's last known fix so the bury map centres on
+      // the user quickly (especially in AU where the first watcher
+      // tick can take 3–8 s). Overwritten by the live watcher below.
+      try {
+        const last = await Location.getLastKnownPositionAsync({
+          maxAge: 5 * 60 * 1000,
+          requiredAccuracy: 1000,
+        });
+        if (!cancelled && last) {
+          const seed = { lat: last.coords.latitude, lng: last.coords.longitude };
+          setGPS(seed);
+          setInitialCenter((prev) => prev || seed);
+        }
+      } catch {}
       try {
         const sub = await Location.watchPositionAsync(
           { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 1500 },
@@ -610,6 +640,14 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
       <Modal visible={camOpen} animationType="slide" onRequestClose={() => setCamOpen(false)}>
         <View style={{ flex: 1, backgroundColor: '#000' }}>
           <CameraView ref={camRef as any} style={{ flex: 1 }} facing="back" />
+          {/* AR-lite overlay during BURY. Chest anchor = the player's
+              CURRENT GPS — the spot they're about to mark. Other group
+              members will see the chest at the same real-world spot
+              once they open their Hunting camera. Pulses inside the
+              15 m ring so the Creator knows they're well-placed. */}
+          {gps ? (
+            <BTAROverlay gps={gps} chestLat={gps.lat} chestLng={gps.lng} findRingM={15} />
+          ) : null}
           <View style={styles.camControls}>
             <TouchableOpacity onPress={() => setCamOpen(false)} style={{ width: 80, paddingVertical: 10 }}>
               <Text style={{ color: '#fff', fontWeight: '800' }}>Cancel</Text>
@@ -775,6 +813,20 @@ function HuntingView({
       <Modal visible={camOpen} animationType="slide" onRequestClose={() => setCamOpen(false)}>
         <View style={{ flex: 1, backgroundColor: '#000' }}>
           <CameraView ref={camRef as any} style={{ flex: 1 }} facing="back" />
+          {/* AR-lite overlay during HUNT. Chest anchor = the GROUP's
+              buried coordinates so every hunting member sees the
+              chest pinned at the exact same real-world spot the
+              Creator marked during bury. Pulses inside the 15 m find
+              ring so the finder knows they're well-placed before
+              snapping the claim photo. */}
+          {gps && (group as any).chest_lat != null && (group as any).chest_lng != null ? (
+            <BTAROverlay
+              gps={gps}
+              chestLat={(group as any).chest_lat}
+              chestLng={(group as any).chest_lng}
+              findRingM={15}
+            />
+          ) : null}
           <View style={styles.camControls}>
             <TouchableOpacity onPress={() => setCamOpen(false)} style={{ width: 80, paddingVertical: 10 }}>
               <Text style={{ color: '#fff', fontWeight: '800' }}>Cancel</Text>
