@@ -56,7 +56,7 @@ type Props = {
 
 // ─── Tunables (spec-driven) ──────────────────────────────────────
 const SPIN_DURATION_MS = 1500;             // user spec: 1.5 s
-const SPIN_DEG = 1080;                     // 3 full rotations
+const SPIN_DEG = -2160;                    // 6 full rotations LEFT (negative = anticlockwise around the vertical Y-axis)
 const TAP_PARTICLE_COUNT = 18;
 const TAP_PARTICLE_DURATION_MS = 1500;     // fly outward + fade matches spin
 const HOLD_SCALE = 0.88;                   // shield shrinks while held
@@ -543,6 +543,13 @@ const styles = StyleSheet.create({
   frame: {
     alignItems: 'center',
     justifyContent: 'center',
+    // overflow: 'visible' is the default on iOS but Android sometimes
+    // clips the 3D-rotated shield when it tilts past 90° (the bounding
+    // box stays size×size but the perspective-projected shape briefly
+    // extends outside it). Without this explicit hint the rotateY
+    // animation can look like a flat clipped disc instead of a proper
+    // wheel-on-its-side spin.
+    overflow: 'visible',
   },
   particle: {
     position: 'absolute',
