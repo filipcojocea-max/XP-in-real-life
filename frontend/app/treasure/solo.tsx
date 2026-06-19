@@ -32,6 +32,7 @@ import { Magnetometer } from 'expo-sensors';
 import * as FileSystem from 'expo-file-system';
 import { api, type BTCompassReading, type BTSoloHunt } from '../../src/api';
 import BTLeafletMap, { type BTLeafletMapHandle } from '../../src/components/BTLeafletMap';
+import BTAROverlay from '../../src/components/BTAROverlay';
 import { BTReportIssueModal } from '../../src/components/BTReportIssueModal';
 import { colors, radii, spacing } from '../../src/theme';
 import { showAlert } from '../../src/uiAlert';
@@ -263,7 +264,7 @@ export default function SoloHunt() {
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.55, skipProcessing: true });
       const uri: string = photo?.uri;
       if (!uri) throw new Error('Camera returned no photo.');
-      const b64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+      const b64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
       const res = await api.btSoloFind(gps.lat, gps.lng, b64);
       setCameraOpen(false);
       showAlert(
@@ -466,6 +467,21 @@ export default function SoloHunt() {
       <Modal visible={cameraOpen} animationType="slide" onRequestClose={() => setCameraOpen(false)}>
         <View style={{ flex: 1, backgroundColor: '#000' }}>
           <CameraView ref={cameraRef as any} style={{ flex: 1 }} facing="back" />
+          {/* AR-lite chest indicator anchored to the buried-treasure
+              coordinates. Uses the device compass + GPS to position
+              a chest icon on screen as if it were floating at the
+              find spot (Pokémon-GO-style guidance), with an edge
+              arrow when the chest is outside the camera's field of
+              view. Pulses when the user crosses inside the 15m find
+              ring so it's obvious WHEN to tap the shutter. */}
+          {hunt?.chest_lat != null && hunt?.chest_lng != null ? (
+            <BTAROverlay
+              gps={gps}
+              chestLat={hunt.chest_lat}
+              chestLng={hunt.chest_lng}
+              findRingM={15}
+            />
+          ) : null}
           <View style={styles.camControls}>
             <TouchableOpacity onPress={() => setCameraOpen(false)} style={styles.camCancel}>
               <Text style={{ color: '#fff', fontWeight: '800' }}>Cancel</Text>

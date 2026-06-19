@@ -353,9 +353,19 @@ async def _overpass_public_centers(lat: float, lng: float, radius_m: float) -> l
     caller will retry at a wider radius (never on a road)."""
     import httpx as _httpx
     query = _PUBLIC_TAGS_QUERY.format(r=int(radius_m), lat=lat, lng=lng)
+    # 2026-06-18: the primary Overpass mirror (overpass-api.de) returns
+    # 406 Not Acceptable when the request omits a real User-Agent —
+    # they tightened rate-limiting/bot-blocking. We now send a sane
+    # UA + Accept header so the primary mirror works and the strict
+    # green-only picker doesn't silently fall back to the centre of
+    # the user's hunt area on roads / private land.
+    headers = {
+        "User-Agent": "XPInRealLife/1.0 (server; +https://app.xpinreallife.com)",
+        "Accept": "application/json",
+    }
     for endpoint in _OVERPASS_ENDPOINTS:
         try:
-            async with _httpx.AsyncClient(timeout=20.0) as client:
+            async with _httpx.AsyncClient(timeout=20.0, headers=headers) as client:
                 resp = await client.post(endpoint, data={"data": query})
                 if resp.status_code != 200:
                     continue
@@ -396,9 +406,13 @@ async def _is_coord_green(lat: float, lng: float) -> bool:
     import httpx as _httpx
     query = _GREEN_CONTAINS_QUERY.format(lat=lat, lng=lng)
     last_err: Optional[str] = None
+    headers = {
+        "User-Agent": "XPInRealLife/1.0 (server; +https://app.xpinreallife.com)",
+        "Accept": "application/json",
+    }
     for endpoint in _OVERPASS_ENDPOINTS:
         try:
-            async with _httpx.AsyncClient(timeout=12.0) as client:
+            async with _httpx.AsyncClient(timeout=12.0, headers=headers) as client:
                 resp = await client.post(endpoint, data={"data": query})
                 if resp.status_code != 200:
                     last_err = f"http={resp.status_code}"

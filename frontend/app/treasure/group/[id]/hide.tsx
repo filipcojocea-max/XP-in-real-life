@@ -164,7 +164,7 @@ export default function HideScreen() {
       const uri: string = photo?.uri;
       if (!uri) throw new Error('Camera returned no photo.');
       const b64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
+        encoding: 'base64',
       });
       await api.btGroupHide(String(id), {
         lat: gps.lat,

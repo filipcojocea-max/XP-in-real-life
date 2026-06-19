@@ -487,7 +487,7 @@ function BuryView({ group, onBuried }: { group: BTGroup; onBuried: () => void })
     if (!camRef.current) return;
     try {
       const photo = await camRef.current.takePictureAsync({ quality: 0.55, skipProcessing: true });
-      const b64 = await FileSystem.readAsStringAsync(photo.uri, { encoding: FileSystem.EncodingType.Base64 });
+      const b64 = await FileSystem.readAsStringAsync(photo.uri, { encoding: 'base64' });
       setSpotPhoto(b64);
       setCamOpen(false);
     } catch (e: any) {
