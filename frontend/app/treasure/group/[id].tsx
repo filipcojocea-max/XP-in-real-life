@@ -31,7 +31,7 @@ import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-rou
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
 import MapView, { Marker, Circle, IS_WEB_PLACEHOLDER } from '../../../src/components/MapShim';

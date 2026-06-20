@@ -54,7 +54,7 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { api } from '../../../../src/api';
 import BTLeafletMap, { type BTLeafletMapHandle } from '../../../../src/components/BTLeafletMap';
 import { colors, radii, spacing } from '../../../../src/theme';

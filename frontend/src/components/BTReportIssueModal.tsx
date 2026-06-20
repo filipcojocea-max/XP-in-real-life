@@ -144,17 +144,35 @@ export function BTReportIssueModal({
                   future hunts.
                 </Text>
                 <View style={styles.mapWrap}>
-                  <BTLeafletMap
-                    mode="static"
-                    initialLat={chest_lat}
-                    initialLng={chest_lng}
-                    initialZoom={17}
-                    initialRadius={30}
-                    ringColor="#FF3B30"
-                    markerColor="#FF3B30"
-                    markerShape="x"
-                    interactive={false}
-                  />
+                  {Number.isFinite(chest_lat) && Number.isFinite(chest_lng) ? (
+                    <BTLeafletMap
+                      mode="static"
+                      initialLat={Number(chest_lat)}
+                      initialLng={Number(chest_lng)}
+                      initialZoom={17}
+                      initialRadius={30}
+                      ringColor="#FF3B30"
+                      markerColor="#FF3B30"
+                      markerShape="x"
+                      interactive={false}
+                    />
+                  ) : (
+                    // Defensive: BTLeafletMap's WebView would crash the
+                    // whole report modal when chest_lat/lng came through
+                    // as undefined (group hunts before the chest is
+                    // buried, or solo hunts where the API hasn't loaded
+                    // yet). Render a graceful placeholder instead so the
+                    // user can still submit a "location" report with
+                    // notes — the backend doesn't strictly need the
+                    // marker coords to record the issue.
+                    <View style={[styles.mapWrap, { alignItems: 'center', justifyContent: 'center', padding: 12 }]}>
+                      <Text style={[styles.sectionHint, { textAlign: 'center' }]}>
+                        Map preview unavailable — chest coordinates not loaded yet.
+                        You can still describe the location issue in the notes below
+                        and submit the report.
+                      </Text>
+                    </View>
+                  )}
                 </View>
               </View>
             ) : null}

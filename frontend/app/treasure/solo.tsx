@@ -29,7 +29,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Magnetometer } from 'expo-sensors';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { api, type BTCompassReading, type BTSoloHunt } from '../../src/api';
 import BTLeafletMap, { type BTLeafletMapHandle } from '../../src/components/BTLeafletMap';
 import BTAROverlay from '../../src/components/BTAROverlay';
@@ -115,7 +115,13 @@ export default function SoloHunt() {
         return;
       }
       const sub = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 1500 },
+        // 2026-06-20: tightened GPS precision per spec.
+        // • BestForNavigation = sub-metre target (vs ~5 m for High)
+        // • distanceInterval: 1 m (vs 2) so the AR overlay anchor stays
+        //   tight while the user walks into the 15 m ring.
+        // • timeInterval: 800 ms keeps battery cost reasonable while
+        //   the heading watcher already updates the icon position.
+        { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 1, timeInterval: 800 },
         (pos) => {
           if (cancelled) return;
           setGPS({ lat: pos.coords.latitude, lng: pos.coords.longitude });
@@ -267,13 +273,20 @@ export default function SoloHunt() {
       const b64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
       const res = await api.btSoloFind(gps.lat, gps.lng, b64);
       setCameraOpen(false);
+      // 2026-06-20: success flow per spec — clearly award XP, mark the
+      // user "completed for today", and tell them when they can hunt
+      // again. The backend has already flipped `found_today = true`
+      // and stamped `next_reset_at`, so when the user reopens the
+      // app the gate logic in /bt/solo/current will keep this hunt
+      // locked until the personal wake-up boundary passes.
       showAlert(
-        '+100 XP — chest found!',
-        `New total: ${res.new_total_xp.toLocaleString()} XP. A new chest has been placed inside your area — keep hunting!`,
+        `+${res.xp_awarded ?? 100} XP — chest found!`,
+        `New total: ${res.new_total_xp.toLocaleString()} XP.\n\n` +
+        `You completed it for today — come back tomorrow! A fresh chest will spawn in your area at your next wake-up boundary.`,
       );
-      // Refresh compass so the bearing/distance update to the next chest.
+      // Refresh compass + hunt doc so the screen reflects the locked
+      // "found today" state until the daily reset.
       await fetchCompass();
-      // Refresh hunt doc so the static map clue jumps to the new chest.
       await fetchHunt();
     } catch (e: any) {
       showAlert('Could not claim find', String(e?.message || e));
