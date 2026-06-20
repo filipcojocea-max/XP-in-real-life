@@ -35,6 +35,10 @@ export default function TreasureFriends() {
   const hasPickedArea = !!(params.lat && params.lng && params.radius_m);
 
   const [available, setAvailable] = useState<BTGroup[]>([]);
+  // 2026-06-20: the YOUR GROUPS list moved here from /treasure/index
+  // so every group-related affordance (create / join / resume) lives
+  // on one screen — the main entry stays clean with just the two CTAs.
+  const [myGroups, setMyGroups] = useState<BTGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [code, setCode] = useState('');
   const [joining, setJoining] = useState(false);
@@ -42,8 +46,17 @@ export default function TreasureFriends() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await api.btGroupsAvailable();
-      setAvailable(r.groups || []);
+      // Run both list calls in parallel — they're independent and the
+      // user is otherwise watching a spinner. btListGroups returns the
+      // groups THIS user is already a member of (active + lobby +
+      // finished). btGroupsAvailable returns OTHER users' lobby
+      // groups that this user could join by code or invite.
+      const [mine, avail] = await Promise.all([
+        api.btListGroups().catch(() => ({ groups: [] as BTGroup[] })),
+        api.btGroupsAvailable().catch(() => ({ groups: [] as BTGroup[] })),
+      ]);
+      setMyGroups(mine.groups || []);
+      setAvailable(avail.groups || []);
     } catch (e: any) {
       // 4xx is OK — just show empty list
     } finally {
@@ -99,6 +112,46 @@ export default function TreasureFriends() {
         <View style={styles.headerBtn} />
       </View>
       <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
+        {/* ───────── YOUR GROUPS — moved here from /treasure/index ─────────
+            Tap any row to resume that group. We keep this at the TOP
+            because returning users almost always want to dive back
+            into an existing hunt, not start a fresh one. */}
+        {myGroups.length > 0 ? (
+          <View style={styles.myGroupsBlock} testID="bt-my-groups">
+            <Text style={styles.sectionLabel}>YOUR GROUPS</Text>
+            {myGroups.map((g) => (
+              <TouchableOpacity
+                key={g.id}
+                style={styles.groupRow}
+                onPress={() => router.push(`/treasure/group/${g.id}`)}
+                activeOpacity={0.85}
+                testID={`bt-my-group-${g.id}`}
+              >
+                <Ionicons
+                  name={
+                    g.status === 'lobby' ? 'people-circle-outline' :
+                    g.status === 'hunting' ? 'flag' : 'trophy'
+                  }
+                  size={22}
+                  color={
+                    g.status === 'lobby' ? colors.amber :
+                    g.status === 'hunting' ? colors.cyan : '#22C55E'
+                  }
+                />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.groupName}>{g.name}</Text>
+                  <Text style={styles.groupSub}>
+                    {g.status === 'lobby' ? 'Waiting for invites · ' :
+                     g.status === 'hunting' ? 'Hunting · ' : 'Finished · '}
+                    {g.members.length} member{g.members.length === 1 ? '' : 's'}
+                  </Text>
+                </View>
+                <Text style={styles.groupCode}>{g.code}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+
         <TouchableOpacity
           style={[styles.primaryBtn, !hasPickedArea && styles.btnDisabled]}
           onPress={onCreate}
@@ -223,4 +276,7 @@ const styles = StyleSheet.create({
   },
   groupName: { color: colors.text, fontWeight: '800' },
   groupSub: { color: colors.textSecondary, fontSize: 11, marginTop: 2 },
+  groupCode: { color: colors.cyan, fontWeight: '800', fontSize: 12, letterSpacing: 1 },
+  myGroupsBlock: { gap: 8 },
+  sectionLabel: { color: colors.textMuted, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
 });

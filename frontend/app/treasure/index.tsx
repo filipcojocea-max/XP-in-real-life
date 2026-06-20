@@ -442,51 +442,13 @@ export default function TreasureHome() {
           </TouchableOpacity>
         </View>
 
-        {/* ───────── Compact "your groups" list ─────────
-            Kept as a single compact rail so users can dive back into
-            an existing group without going through the friends hub.
-            Intentionally minimal — the main two CTAs above are the
-            only "primary" buttons on this screen. */}
-        {myGroups.length > 0 ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>YOUR GROUPS</Text>
-            {myGroups.map((g) => (
-              <TouchableOpacity
-                key={g.id}
-                style={styles.groupRow}
-                onPress={() => router.push(`/treasure/group/${g.id}`)}
-                activeOpacity={0.85}
-              >
-                <Ionicons
-                  name={
-                    g.status === 'lobby' ? 'people-circle-outline' :
-                    g.status === 'hunting' ? 'flag' : 'trophy'
-                  }
-                  size={22}
-                  color={
-                    g.status === 'lobby' ? colors.amber :
-                    g.status === 'hunting' ? colors.cyan : '#22C55E'
-                  }
-                />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.groupName}>{g.name}</Text>
-                  <Text style={styles.groupSub}>
-                    {g.status === 'lobby' ? 'Waiting for invites · ' :
-                     g.status === 'hunting' ? 'Hunting · ' : 'Finished · '}
-                    {g.members.length} member{g.members.length === 1 ? '' : 's'}
-                  </Text>
-                  {g.status !== 'finished' && g.is_active_now === false ? (
-                    <View style={styles.inactivePill}>
-                      <Ionicons name="moon" size={10} color="#FFB020" />
-                      <Text style={styles.inactivePillText}>INACTIVE · NO ONE AWAKE</Text>
-                    </View>
-                  ) : null}
-                </View>
-                <Text style={styles.groupCode}>{g.code}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        ) : null}
+        {/* 2026-06-20: per spec the main entry screen now shows ONLY
+            the two big CTA buttons (Play Solo / Play With Friends).
+            The full "Your Groups" list moved into the dedicated
+            /treasure/friends screen so all group-related content lives
+            in one place. Keep the invite / turn-offer / report banners
+            above the CTAs since those are urgent-action items that
+            shouldn't be hidden one tap deeper. */}
       </ScrollView>
     </SafeAreaView>
   );
