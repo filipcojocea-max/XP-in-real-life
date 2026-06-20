@@ -1010,12 +1010,57 @@ function CheckinModal({ visible, onClose, onSaved }: { visible: boolean; onClose
     }
   };
 
+  // 2026-06-20: per spec, the daily "How was your sleep?" check-in must
+  // stay popped up until the player taps Submit. Backdrop-tap-to-close
+  // and back-button dismiss are both disabled. The user can however
+  // MINIMISE the sheet using the new "−" button top-right — when
+  // minimised we render a small floating pill in the bottom-right that
+  // re-expands the sheet on tap.
+  const [minimised, setMinimised] = useState(false);
+
+  // Reset to "expanded" state whenever the parent re-shows the modal.
+  useEffect(() => {
+    if (visible) setMinimised(false);
+  }, [visible]);
+
+  if (!visible) return null;
+
+  // ── Minimised state — small pill, always above scroll content. ──
+  if (minimised) {
+    return (
+      <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={() => setMinimised(false)}
+          style={styles.checkinPill}
+          testID="checkin-pill-restore"
+        >
+          <Ionicons name="moon" size={16} color="#0b0f15" />
+          <Text style={styles.checkinPillText}>Rate sleep</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="slide">
       <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        {/* Backdrop is no longer pressable — the sheet is only
+            dismissed via Submit (or temporarily via Minimise). */}
+        <View style={StyleSheet.absoluteFill} pointerEvents="none" />
         <View style={styles.modalSheet}>
           <View style={styles.sheetHandle} />
+          {/* Minimise button — collapses the sheet without losing
+              the user's in-progress rating / hours / notes input. */}
+          <TouchableOpacity
+            onPress={() => setMinimised(true)}
+            style={styles.minimiseBtn}
+            hitSlop={10}
+            testID="checkin-minimise"
+            accessibilityLabel="Minimise sleep check-in"
+          >
+            <Ionicons name="remove" size={22} color="#fff" />
+          </TouchableOpacity>
           <Text style={styles.modalTitle}>How was your sleep?</Text>
           <Text style={styles.modalSub}>Quick check-in. Helps Luna spot patterns over time.</Text>
 
@@ -1114,12 +1159,11 @@ const styles = StyleSheet.create({
   },
   topTitle: { color: colors.text, fontSize: 17, fontWeight: '900', letterSpacing: -0.3 },
 
-  subTabs: {
   sleepBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    marginHorizontal: spacing.lg,
+    marginHorizontal: spacing.md,
     marginBottom: spacing.sm,
     padding: spacing.md,
     borderRadius: radii.md,
@@ -1135,6 +1179,8 @@ const styles = StyleSheet.create({
   },
   sleepBannerTitle: { color: colors.cyan, fontWeight: '900', fontSize: 14 },
   sleepBannerSub: { color: colors.textSecondary, fontSize: 12, marginTop: 2 },
+
+  subTabs: {
     flexDirection: 'row', marginHorizontal: spacing.md,
     padding: 4, borderRadius: radii.pill,
     backgroundColor: colors.surfaceGlass, borderWidth: 1, borderColor: colors.border,
@@ -1427,10 +1473,14 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   factorRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  factorLabel: { color: colors.text, fontSize: 12, fontWeight: '800', width: 130 },
+  factorLabel: { color: '#FFFFFF', fontSize: 12, fontWeight: '800', width: 130 },
   factorBarTrack: { flex: 1, height: 6, borderRadius: 3, backgroundColor: colors.border, overflow: 'hidden' },
   factorBarFill: { height: '100%', borderRadius: 3 },
-  factorValue: { fontSize: 12, fontWeight: '900', width: 28, textAlign: 'right' },
+  // 2026-06-20: explicit white for factor value digits — user reported
+  // the numbers reading as black on some devices (no color set in the
+  // base style means the platform falls back to native black when the
+  // inline `{ color: c }` override is missed).
+  factorValue: { color: '#FFFFFF', fontSize: 12, fontWeight: '900', width: 28, textAlign: 'right' },
 
   animalCard: {
     backgroundColor: colors.surfaceGlass,
@@ -1489,9 +1539,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
   },
   statLabel: { color: colors.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.5 },
-  statValue: { color: colors.text, fontSize: 32, fontWeight: '900', marginTop: 4, letterSpacing: -1 },
-  statUnit: { fontSize: 18, color: colors.textSecondary, fontWeight: '800' },
-  statSub: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
+  // 2026-06-20: force white on the Heart & blood-oxygen stat block per
+  // user spec. Was using colors.text / colors.textSecondary / colors.textMuted
+  // which on some device themes resolved to near-black.
+  statValue: { color: '#FFFFFF', fontSize: 32, fontWeight: '900', marginTop: 4, letterSpacing: -1 },
+  statUnit: { fontSize: 18, color: '#FFFFFF', fontWeight: '800' },
+  statSub: { color: '#FFFFFF', fontSize: 11, fontWeight: '700' },
 
   chartCard: {
     backgroundColor: colors.surface, borderRadius: radii.md,
@@ -1504,18 +1557,41 @@ const styles = StyleSheet.create({
   chartBar: { width: 22, borderRadius: 4 },
   chartDay: { color: colors.textMuted, fontSize: 10, fontWeight: '800', marginTop: 4 },
 
-  stageRow: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    marginBottom: 8,
-  },
-  stageLabel: { color: colors.textSecondary, fontSize: 11, fontWeight: '800', width: 50 },
-  stageBarTrack: {
-    flex: 1, height: 14, borderRadius: 7,
-    backgroundColor: colors.surfaceGlass, overflow: 'hidden',
-    borderWidth: 1, borderColor: colors.border,
-  },
-  stageBarFill: { height: '100%', borderRadius: 7 },
   stageValue: { color: colors.text, fontSize: 12, fontWeight: '800', width: 44, textAlign: 'right' },
+
+  // ── Check-in minimise pill + minimise button ──────────────────────────
+  minimiseBtn: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.surfaceGlass,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+  },
+  checkinPill: {
+    position: 'absolute',
+    right: 18,
+    bottom: 28,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: colors.cyan,
+    borderRadius: radii.pill,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  checkinPillText: { color: '#0b0f15', fontWeight: '900', fontSize: 13 },
 
   footnote: {
     color: colors.textMuted, fontSize: 10, textAlign: 'center',
